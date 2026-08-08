@@ -463,7 +463,10 @@ set(NESTOPIA_LRC_SRC
 )
 
 add_library(nestopia_core_obj OBJECT ${NESTOPIA_CORE_SRC} ${NESTOPIA_LRC_SRC})
-target_include_directories(nestopia_core_obj PRIVATE -Wno-c++11-narrowing
+target_compile_options(nestopia_core_obj PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wno-c++11-narrowing>
+)
+target_include_directories(nestopia_core_obj PRIVATE
     ${NESTOPIA_PATH}/libretro
     ${NESTOPIA_PATH}
     ${NESTOPIA_PATH}/libretro/libretro-common/include
