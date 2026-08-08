@@ -2,6 +2,7 @@
 
 #include "core/Tools.hpp"
 #include "emulator/mgba_native/MgbaCheatSystem.hpp"
+#include "core/PackedRom.hpp"
 
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/cheats.h>
@@ -627,6 +628,15 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
         return false;
     }
 
+    std::string packedError;
+    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(romPath, &packedError);
+    if (loadPath.empty())
+    {
+        brls::Logger::error("MgbaNativeCore: packed ROM extraction failed: {} ({})",
+                            romPath, packedError);
+        return false;
+    }
+
     releaseCore();
     const auto platform = static_cast<beiklive::enums::EmuPlatform>(m_gameEntry.platform);
     const mPlatform mgbaPlatform =
@@ -664,9 +674,9 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
     brls::Logger::debug("MgbaNativeCore: pre-load config applied ok");
 
     brls::Logger::debug("MgbaNativeCore: loading ROM file");
-    if (!mCoreLoadFile(m_core, romPath.c_str()))
+    if (!mCoreLoadFile(m_core, loadPath.c_str()))
     {
-        brls::Logger::error("MgbaNativeCore: mCoreLoadFile failed: {}", romPath);
+        brls::Logger::error("MgbaNativeCore: mCoreLoadFile failed: {}", loadPath);
         releaseCore();
         return false;
     }

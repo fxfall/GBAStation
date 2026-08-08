@@ -1,6 +1,7 @@
 #include "Tools.hpp"
 #include "enums.h"
 #include "miniz.h"
+#include "core/PackedRom.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -250,6 +251,36 @@ beiklive::enums::FileType getFileType(const fs::path& path) {
         return beiklive::enums::FileType::DIRECTORY;
 
     std::string ext = getFileExtension(path);
+
+    if (beiklive::packed_rom::hasSupportedExtension(path.string()))
+    {
+        // Directory enumeration only needs platform/title hints. Full ROM and
+        // body hashes are verified later when the file is imported or launched.
+        const auto info = beiklive::packed_rom::readInfo(path.string(), nullptr, false);
+        if (!info)
+            return beiklive::enums::FileType::NORMAL_FILE;
+        switch (static_cast<beiklive::enums::EmuPlatform>(info->platform))
+        {
+            case beiklive::enums::EmuPlatform::EmuGBA:
+                return beiklive::enums::FileType::GBA_ROM;
+            case beiklive::enums::EmuPlatform::EmuGBC:
+                return beiklive::enums::FileType::GBC_ROM;
+            case beiklive::enums::EmuPlatform::EmuGB:
+                return beiklive::enums::FileType::GB_ROM;
+            case beiklive::enums::EmuPlatform::EmuNES:
+                return beiklive::enums::FileType::NES_ROM;
+            case beiklive::enums::EmuPlatform::EmuSNES:
+                return beiklive::enums::FileType::SNES_ROM;
+            case beiklive::enums::EmuPlatform::EmuNDS:
+                return beiklive::enums::FileType::NDS_ROM;
+            case beiklive::enums::EmuPlatform::Emu3DS:
+                return beiklive::enums::FileType::THREEDS_ROM;
+            case beiklive::enums::EmuPlatform::EmuGenesis:
+                return beiklive::enums::FileType::GENESIS_ROM;
+            default:
+                return beiklive::enums::FileType::NORMAL_FILE;
+        }
+    }
 
     if (ext == "png")
         return beiklive::enums::FileType::IMAGE_FILE;
@@ -512,7 +543,8 @@ std::string getDefaultLogoPath(beiklive::enums::EmuPlatform platform)
 
 std::string getDefaultLogoPath(beiklive::enums::EmuPlatform platform, const std::string& romPath)
 {
-    if (platform == beiklive::enums::EmuPlatform::EmuNDS)
+    if (platform == beiklive::enums::EmuPlatform::EmuNDS &&
+        !beiklive::packed_rom::hasSupportedExtension(romPath))
     {
         const std::string ndsIcon = beiklive::GetOrCreateNdsIconPath(romPath);
         if (!ndsIcon.empty())

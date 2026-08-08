@@ -8,6 +8,7 @@
 #include "MemConstants.h"
 #include "NDS.h"
 #include "NDSCart.h"
+#include "core/PackedRom.hpp"
 #include "OpenGLSupport.h"
 #include "SPI_Firmware.h"
 #include "Savestate.h"
@@ -415,7 +416,17 @@ bool MelonDSCore::SetupGame(beiklive::GameEntry GameEntry)
 
     if (!Initialize())
         return false;
-    if (!LoadGame(m_gameEntry.path))
+    std::string packedError;
+    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(
+        m_gameEntry.path, &packedError);
+    if (loadPath.empty())
+    {
+        brls::Logger::error("melonDS: packed ROM extraction failed: {} ({})",
+                            m_gameEntry.path, packedError);
+        return false;
+    }
+    m_loadedRomPath = loadPath;
+    if (!LoadGame(m_loadedRomPath))
         return false;
     ReloadCheats();
 
@@ -445,6 +456,7 @@ void MelonDSCore::Cleanup()
     }
     m_glContext.reset();
     m_romData.clear();
+    m_loadedRomPath.clear();
     m_acceleratedReadback.clear();
     m_acceleratedReadbackPbos.fill(0);
     m_acceleratedReadbackPboBytes = 0;
@@ -660,7 +672,8 @@ void MelonDSCore::Reset()
     std::lock_guard<std::mutex> lock(m_ndsMutex);
     ScopedMelonDSGLContext glScope(m_glContext.get());
     m_nds->Reset();
-    m_nds->SetupDirectBoot(std::filesystem::path(m_gameEntry.path).filename().string());
+    m_nds->SetupDirectBoot(std::filesystem::path(
+        m_loadedRomPath.empty() ? m_gameEntry.path : m_loadedRomPath).filename().string());
     syncRtcToHostTime();
     m_nds->GPU.StartFrame();
     m_nds->Start();
@@ -938,7 +951,9 @@ void MelonDSCore::ReloadCheats()
             previousState[beiklive::cheat::stateKey(cheat)] = cheat.enabled;
     }
 
-    auto loadedResult = beiklive::cheat::loadCheats({path, m_gameEntry.path, m_gameEntry.platform});
+    const std::string& cheatRomPath = m_loadedRomPath.empty()
+        ? m_gameEntry.path : m_loadedRomPath;
+    auto loadedResult = beiklive::cheat::loadCheats({path, cheatRomPath, m_gameEntry.platform});
     std::vector<CheatEntry> loaded = std::move(loadedResult.entries);
 
     if (datFile)

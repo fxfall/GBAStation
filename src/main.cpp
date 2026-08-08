@@ -10,8 +10,10 @@
 #include "core/ThreadPool.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
+#include "core/PackedRom.hpp"
 #include "core/ExternalCoreSession.hpp"
 #include "ui/utils/BKAudioPlayer.hpp"
+#include "ui/utils/NdsEnvironment.hpp"
 #include "ui/page/StartPage.hpp"
 #include "ui/utils/MyActivity.hpp"
 #include "network/WebService.h"
@@ -51,6 +53,7 @@ bool isDirectLaunchRomType(beiklive::enums::FileType type)
 		   type == FileType::GB_ROM ||
 		   type == FileType::NES_ROM ||
 		   type == FileType::SNES_ROM ||
+		   type == FileType::NDS_ROM ||
 		   type == FileType::GENESIS_ROM;
 }
 
@@ -111,16 +114,22 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 	beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
 	bool changed = !entryOpt.has_value();
 
-	const int platform = static_cast<int>(fileType);
+	const auto packedInfo = beiklive::packed_rom::hasSupportedExtension(romPath)
+		? beiklive::packed_rom::readInfo(romPath)
+		: std::optional<beiklive::packed_rom::Info>{};
+	const int platform = packedInfo ? packedInfo->platform : static_cast<int>(fileType);
 	const std::filesystem::path path(romPath);
 	const std::string stem = path.stem().string().empty() ? "game" : path.stem().string();
+	const std::string fallbackTitle = GET_MAPPING_KEY_STR(stem, stem);
+	const bool firstPackedImport = packedInfo && entry.packedRomSha256.empty();
 
 	if (entry.path.empty())
 	{
 		entry.path = romPath;
 		changed = true;
 	}
-	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE))
+	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE) ||
+		(firstPackedImport && entry.platform != platform))
 	{
 		entry.platform = platform;
 		changed = true;
@@ -131,9 +140,10 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 		changed = true;
 	}
 	entry.core = beiklive::NormalizeCoreId(entry.platform, entry.core);
-	if (entry.title.empty())
+	if (entry.title.empty() || (firstPackedImport && entry.title == fallbackTitle))
 	{
-		entry.title = GET_MAPPING_KEY_STR(stem, stem);
+		entry.title = packedInfo && !packedInfo->title.empty()
+			? packedInfo->title : fallbackTitle;
 		changed = true;
 	}
 	if (entry.savePath.empty())
@@ -141,11 +151,24 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 		entry.savePath = beiklive::tools::defaultGameSavePath(entry.platform, entry.path);
 		changed = true;
 	}
-	if (entry.logoPath.empty())
+	const std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
+		static_cast<beiklive::enums::EmuPlatform>(entry.platform), entry.path);
+	if (entry.logoPath.empty() || (firstPackedImport && entry.logoPath == defaultLogo))
 	{
-		entry.logoPath = beiklive::tools::getDefaultLogoPath(
-			static_cast<beiklive::enums::EmuPlatform>(entry.platform),
-			entry.path);
+		const std::string packedCover = packedInfo
+			? beiklive::packed_rom::extractCover(romPath, *packedInfo, entry.savePath)
+			: std::string{};
+		entry.logoPath = packedCover.empty() ? defaultLogo : packedCover;
+		changed = true;
+	}
+	if (packedInfo)
+	{
+		entry.developer = packedInfo->developer;
+		entry.releaseDate = packedInfo->releaseDate;
+		entry.genre = packedInfo->genre;
+		entry.region = packedInfo->region;
+		entry.packedRomSha256 = packedInfo->romSha256;
+		entry.romxMetadataJson = packedInfo->metadataJson;
 		changed = true;
 	}
 	if (beiklive::tools::tryUseNdsInternalIconCover(entry))
@@ -157,8 +180,14 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 	}
 	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
 	{
+		std::string titlePath = entry.path;
+		if (packedInfo)
+		{
+			const std::string extracted = beiklive::packed_rom::prepareRomForLaunch(entry.path);
+			if (!extracted.empty()) titlePath = extracted;
+		}
 		const std::string titleId = beiklive::three_ds::resolveTitleId(
-			entry.threeDsTitleId, entry.path);
+			entry.threeDsTitleId, titlePath);
 		if (!titleId.empty() && titleId != entry.threeDsTitleId)
 		{
 			entry.threeDsTitleId = titleId;
@@ -184,6 +213,33 @@ bool launchDirectGameActivity(const std::string& romPath)
 	ensureDirectGameDbEntry(romPath, fileType);
 
 #ifdef __SWITCH__
+	if (fileType == beiklive::enums::FileType::NDS_ROM)
+	{
+		if (!beiklive::ensureNdsEnvironmentReady())
+			return false;
+		std::string packedError;
+		const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
+			romPath, &packedError);
+		if (launchPath.empty())
+		{
+			brls::Logger::error("Direct NDS packed ROM extraction failed: {}", packedError);
+			return false;
+		}
+		const std::string nroPath = GET_SETTING_KEY_STR(
+			"nds.externalNro.path", "/GBAStation/core/GBAStationNDSStub.nro");
+		const std::string returnPath = GET_SETTING_KEY_STR(
+			"nds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
+		auto result = beiklive::switch_platform::launchNroOnExit(
+			{nroPath, launchPath, returnPath});
+		if (!result.success)
+		{
+			brls::Logger::error("Direct NDS NRO launch failed: {}", result.message);
+			return false;
+		}
+		brls::Application::quit();
+		return true;
+	}
+
 	const auto launchExternalCore = [&](const char* label, int platform,
 	                                    const char* pathKey, const char* defaultPath,
 	                                    const char* returnKey) {
@@ -226,12 +282,20 @@ bool launchDirectGameActivity(const std::string& romPath)
 
 	if (fileType == beiklive::enums::FileType::THREEDS_ROM)
 	{
+		std::string packedError;
+		const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
+			romPath, &packedError);
+		if (launchPath.empty())
+		{
+			brls::Logger::error("Direct 3DS packed ROM extraction failed: {}", packedError);
+			return false;
+		}
 		const std::string nroPath = GET_SETTING_KEY_STR(
 			"3ds.externalNro.path", "/GBAStation/core/GBAStation3DSStub.nro");
 		const std::string returnPath = GET_SETTING_KEY_STR(
 			"3ds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
 		auto result = beiklive::switch_platform::launchNroOnExit(
-			{nroPath, romPath, returnPath});
+			{nroPath, launchPath, returnPath});
 		if (!result.success)
 		{
 			brls::Logger::error("Direct 3DS NRO launch failed: {}", result.message);

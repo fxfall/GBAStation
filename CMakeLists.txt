@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.10)
 
 set(BOREALIS_LIBRARY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/borealis/library)
 set(MGBA_PATH        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mgba)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-c++11-narrowing")
 
 # 构建选项
 include(${BOREALIS_LIBRARY}/cmake/commonOption.cmake)

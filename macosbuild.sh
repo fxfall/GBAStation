@@ -29,7 +29,9 @@ cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUNDLE_MACOS_APP=ON \
     -DUSE_GLFW=ON \
-    -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5\
+    -DCMAKE_CXX_FLAGS="-Wno-error -Wno-error=cpp"\
+    -DAWK=/opt/homebrew/bin/gawk
 
 echo "[3/3] 开始编译（并行线程：${JOBS}）..."
 if cmake --build . -j "${JOBS}"; then

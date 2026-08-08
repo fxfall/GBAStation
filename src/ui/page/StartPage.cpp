@@ -6,6 +6,7 @@
 #include "core/Tools.hpp"
 #include "core/ThreadPool.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
+#include "core/PackedRom.hpp"
 #include "core/ExternalCoreSession.hpp"
 #include "core/forwarder/ForwarderInstaller.hpp"
 #include "ui/utils/MaterialIcons.hpp"
@@ -581,14 +582,22 @@ namespace beiklive
             beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
             bool changed = !entryOpt.has_value();
 
-            const int platform = static_cast<int>(dirItem.itemType);
+            const auto packedInfo = beiklive::packed_rom::hasSupportedExtension(dirItem.fullPath)
+                ? beiklive::packed_rom::readInfo(dirItem.fullPath)
+                : std::optional<beiklive::packed_rom::Info>{};
+            const int platform = packedInfo
+                ? packedInfo->platform
+                : static_cast<int>(dirItem.itemType);
             const std::string stem = beiklive::tools::getFileNameWithoutExtension(dirItem.fileName);
+            const std::string fallbackTitle = GET_MAPPING_KEY_STR(stem, stem);
+            const bool firstPackedImport = packedInfo && entry.packedRomSha256.empty();
 
             if (entry.path.empty()) {
                 entry.path = dirItem.fullPath;
                 changed = true;
             }
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE)) {
+            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE) ||
+                (firstPackedImport && entry.platform != platform)) {
                 entry.platform = platform;
                 changed = true;
             }
@@ -597,18 +606,34 @@ namespace beiklive
                 changed = true;
             }
             entry.core = beiklive::NormalizeCoreId(entry.platform, entry.core);
-            if (entry.title.empty()) {
-                entry.title = GET_MAPPING_KEY_STR(stem, stem);
+            if (entry.title.empty() || (firstPackedImport && entry.title == fallbackTitle)) {
+                const std::string packedTitle = packedInfo ? packedInfo->title : std::string{};
+                entry.title = packedTitle.empty() ? fallbackTitle : packedTitle;
                 changed = true;
             }
             if (entry.savePath.empty()) {
                 entry.savePath = beiklive::tools::defaultGameSavePath(entry.platform, entry.path);
                 changed = true;
             }
-            if (entry.logoPath.empty()) {
-                entry.logoPath = beiklive::tools::getDefaultLogoPath(
-                    static_cast<beiklive::enums::EmuPlatform>(entry.platform),
-                    entry.path);
+            const std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
+                static_cast<beiklive::enums::EmuPlatform>(entry.platform), entry.path);
+            if (entry.logoPath.empty() || (firstPackedImport && entry.logoPath == defaultLogo)) {
+                std::string packedCover;
+                if (packedInfo)
+                    packedCover = beiklive::packed_rom::extractCover(
+                        entry.path, *packedInfo, entry.savePath);
+                entry.logoPath = packedCover.empty()
+                    ? defaultLogo
+                    : packedCover;
+                changed = true;
+            }
+            if (packedInfo) {
+                entry.developer = packedInfo->developer;
+                entry.releaseDate = packedInfo->releaseDate;
+                entry.genre = packedInfo->genre;
+                entry.region = packedInfo->region;
+                entry.packedRomSha256 = packedInfo->romSha256;
+                entry.romxMetadataJson = packedInfo->metadataJson;
                 changed = true;
             }
             if (beiklive::tools::tryUseNdsInternalIconCover(entry))
@@ -619,8 +644,13 @@ namespace beiklive
             }
 
             if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS)) {
+                std::string titlePath = entry.path;
+                if (packedInfo) {
+                    const std::string extracted = beiklive::packed_rom::prepareRomForLaunch(entry.path);
+                    if (!extracted.empty()) titlePath = extracted;
+                }
                 const std::string titleId = beiklive::three_ds::resolveTitleId(
-                    entry.threeDsTitleId, entry.path);
+                    entry.threeDsTitleId, titlePath);
                 if (!titleId.empty() && titleId != entry.threeDsTitleId) {
                     entry.threeDsTitleId = titleId;
                     changed = true;
@@ -649,10 +679,18 @@ namespace beiklive
 #ifdef __SWITCH__
         bool launchNdsExternalNro(const std::string& romPath, const std::string& title)
         {
+            std::string packedError;
+            const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
+                romPath, &packedError);
+            if (launchPath.empty())
+            {
+                brls::Application::notify(L("NDS 打包 ROM 解包失败：") + packedError);
+                return false;
+            }
             const std::string nroPath = GET_SETTING_KEY_STR("nds.externalNro.path", "/GBAStation/core/GBAStationNDSStub.nro");
             const std::string returnPath = GET_SETTING_KEY_STR("nds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
 
-            auto result = beiklive::switch_platform::launchNroOnExit({nroPath, romPath, returnPath});
+            auto result = beiklive::switch_platform::launchNroOnExit({nroPath, launchPath, returnPath});
             if (!result.success)
             {
                 brls::Logger::error("NDS external NRO launch failed for {}: {}", title, result.message);
@@ -669,13 +707,21 @@ namespace beiklive
         bool launchThreeDsExternalNro(const std::string& romPath, const std::string& title)
         {
             exportThreeDsCoreConfig();
+            std::string packedError;
+            const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
+                romPath, &packedError);
+            if (launchPath.empty())
+            {
+                brls::Application::notify(L("3DS 打包 ROM 解包失败：") + packedError);
+                return false;
+            }
             const std::string nroPath = GET_SETTING_KEY_STR(
                 "3ds.externalNro.path", "/GBAStation/core/GBAStation3DSStub.nro");
             const std::string returnPath = GET_SETTING_KEY_STR(
                 "3ds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
 
             auto result = beiklive::switch_platform::launchNroOnExit(
-                {nroPath, romPath, returnPath});
+                {nroPath, launchPath, returnPath});
             if (!result.success)
             {
                 brls::Logger::error("3DS external NRO launch failed for {}: {}", title, result.message);
@@ -1045,7 +1091,18 @@ namespace beiklive
 #endif
         }
 
-        auto* gamePage = new beiklive::GamePage(dirItem);
+        beiklive::GamePage* gamePage = nullptr;
+        if (beiklive::packed_rom::hasSupportedExtension(dirItem.fullPath)) {
+            ensureGameDbEntryForFileLaunch(dirItem);
+            const auto packedEntry = beiklive::GameDB
+                ? beiklive::GameDB->findByPath(dirItem.fullPath)
+                : std::optional<beiklive::GameEntry>{};
+            gamePage = packedEntry
+                ? new beiklive::GamePage(*packedEntry)
+                : new beiklive::GamePage(dirItem);
+        } else {
+            gamePage = new beiklive::GamePage(dirItem);
+        }
         m_gamePage = gamePage;
         auto* frame = new brls::AppletFrame(gamePage);
         HIDE_BRLS_BAR(frame);
@@ -1330,7 +1387,7 @@ namespace beiklive
 
                 return true;
             });
-        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "nes", "fds", "sfc", "smc", "nds", "cia", "cci", "3ds", "md", "gen", "bin", "smd", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "zip", "7z", "png"});
+        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "gbx", "gbcx", "gbax", "nes", "fds", "nesx", "fdsx", "sfc", "smc", "sfcx", "smcx", "nds", "ndsx", "cia", "cci", "3ds", "ciax", "ccix", "3dsx", "md", "gen", "bin", "smd", "mdx", "genx", "binx", "smdx", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "zip", "7z", "png"});
 
         m_fileListPage->onFileSelected = [this](beiklive::DirListData dirItem)
         {

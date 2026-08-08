@@ -2,6 +2,7 @@
 
 #include "core/Tools.hpp"
 #include "core/common.h"
+#include "core/PackedRom.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -95,7 +96,17 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
         GET_SETTING_KEY_STR("core.genesis.no_sprite_limit", "disabled") == "enabled");
     system_hw = 0;
 
-    std::vector<char> mutablePath(m_gameEntry.path.begin(), m_gameEntry.path.end());
+    std::string packedError;
+    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(
+        m_gameEntry.path, &packedError);
+    if (loadPath.empty())
+    {
+        brls::Logger::error("GenesisCore: packed ROM extraction failed: {} ({})",
+                            m_gameEntry.path, packedError);
+        clearRuntimeState();
+        return false;
+    }
+    std::vector<char> mutablePath(loadPath.begin(), loadPath.end());
     mutablePath.push_back('\0');
     if (load_rom(mutablePath.data()) <= 0 || system_hw != SYSTEM_MD)
     {

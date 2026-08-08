@@ -1,4 +1,5 @@
 #include "FileListPage.hpp"
+#include "core/PackedRom.hpp"
 #include "core/Translation.hpp"
 #include "ui/utils/AnimationHelper.hpp"
 #include <algorithm>
@@ -51,6 +52,8 @@ namespace beiklive
                                         const std::string& fallbackIcon)
         {
             if (fileType != beiklive::enums::FileType::NDS_ROM)
+                return fallbackIcon;
+            if (beiklive::packed_rom::hasSupportedExtension(fullPath))
                 return fallbackIcon;
 
             std::string ndsIcon = beiklive::GetOrCreateNdsIconPath(fullPath);
@@ -468,11 +471,69 @@ namespace beiklive
             : beiklive::tools::formatTimestampForDisplay(entry.lastPlayed);
         _addInfoRow(L("最后游玩"), lastPlayed, nvgRGB(144, 164, 174));
         _addInfoRow(L("打开次数"), std::to_string(entry.playCount), nvgRGB(129, 199, 132));
+        if (!entry.developer.empty())
+            _addInfoRow(L("开发商"), entry.developer, nvgRGB(128, 203, 196));
+        if (!entry.releaseDate.empty())
+            _addInfoRow(L("发售日期"), entry.releaseDate, nvgRGB(255, 213, 79));
+        if (!entry.genre.empty())
+        {
+            std::string genres;
+            for (const auto& value : entry.genre)
+            {
+                if (!genres.empty()) genres += " / ";
+                genres += value;
+            }
+            _addInfoRow(L("类型"), genres, nvgRGB(186, 104, 200));
+        }
+        if (!entry.region.empty())
+            _addInfoRow(L("地区"), entry.region, nvgRGB(239, 154, 154));
         _addInfoRow(L("路径"), data.fullPath, nvgRGB(255, 183, 77));
     }
 
     void FileListPage::_showGameNoDBDetail(const beiklive::DirListData& data)
     {
+        const auto packedInfo = beiklive::packed_rom::hasSupportedExtension(data.fullPath)
+            ? beiklive::packed_rom::readInfo(data.fullPath, nullptr, false)
+            : std::optional<beiklive::packed_rom::Info>{};
+        if (packedInfo)
+        {
+            m_detailTitle->setText(packedInfo->title.empty() ? data.fileName : packedInfo->title);
+            m_detailSubtitle->setText("ROMX · " + _platformName(packedInfo->platform));
+
+            const std::string cover = beiklive::packed_rom::extractCover(
+                data.fullPath, *packedInfo,
+                (fs::path(beiklive::path::cachePath()) / "packed_covers").string());
+            m_detailImage->setVisibility(brls::Visibility::VISIBLE);
+            if (!cover.empty())
+                _requestThumbnail(cover);
+            else
+                m_detailImage->setImageFromFile(data.iconPath.empty()
+                    ? beiklive::tools::getIconPath(data.itemType) : data.iconPath);
+
+            const std::string ext = beiklive::tools::getFileExtension(data.fullPath);
+            _addBadge(ext, nvgRGBA(79, 193, 255, 200), nvgRGBA(255,255,255,255));
+            _addInfoRow(L("容量"), data.fileSize, nvgRGB(255, 183, 77));
+            _addInfoRow(L("平台"), _platformName(packedInfo->platform), nvgRGB(121, 201, 249));
+            if (!packedInfo->developer.empty())
+                _addInfoRow(L("开发商"), packedInfo->developer, nvgRGB(128, 203, 196));
+            if (!packedInfo->releaseDate.empty())
+                _addInfoRow(L("发售日期"), packedInfo->releaseDate, nvgRGB(255, 213, 79));
+            if (!packedInfo->genre.empty())
+            {
+                std::string genres;
+                for (const auto& value : packedInfo->genre)
+                {
+                    if (!genres.empty()) genres += " / ";
+                    genres += value;
+                }
+                _addInfoRow(L("类型"), genres, nvgRGB(186, 104, 200));
+            }
+            if (!packedInfo->region.empty())
+                _addInfoRow(L("地区"), packedInfo->region, nvgRGB(239, 154, 154));
+            _addInfoRow(L("路径"), data.fullPath, nvgRGB(129, 199, 132));
+            return;
+        }
+
         m_detailTitle->setText(data.fileName);
         m_detailSubtitle->setText(L("未录入数据库"));
 

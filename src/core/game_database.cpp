@@ -278,6 +278,11 @@ namespace beiklive
             {"cheatPath", sanitizeUtf8(entry.cheatPath)},
             {"overlayPath", sanitizeUtf8(entry.overlayPath)},
             {"shaderPath", sanitizeUtf8(entry.shaderPath)},
+            {"developer", sanitizeUtf8(entry.developer)},
+            {"releaseDate", sanitizeUtf8(entry.releaseDate)},
+            {"genre", entry.genre},
+            {"region", sanitizeUtf8(entry.region)},
+            {"packedRomSha256", sanitizeUtf8(entry.packedRomSha256)},
             {"overlayEnabled", entry.overlayEnabled},
             {"shaderEnabled", entry.shaderEnabled},
             {"displayMode", entry.displayMode},
@@ -301,6 +306,12 @@ namespace beiklive
             {"shaderParaPath", sanitizeUtf8(isNds ? ndsShaderType : entry.shaderParaPath)},
             {"shaderParaNames", isNds ? std::vector<std::string>() : entry.shaderParaNames},
             {"shaderParaValues", isNds ? std::vector<float>() : entry.shaderParaValues}};
+        if (!entry.romxMetadataJson.empty())
+        {
+            auto metadata = nlohmann::json::parse(entry.romxMetadataJson, nullptr, false);
+            if (!metadata.is_discarded() && metadata.is_object())
+                j["romxMetadata"] = std::move(metadata);
+        }
     }
 
     void from_json(const nlohmann::json &j, GameEntry &entry)
@@ -322,6 +333,14 @@ namespace beiklive
         entry.cheatPath = j.value("cheatPath", "");
         entry.overlayPath = j.value("overlayPath", "");
         entry.shaderPath = j.value("shaderPath", "");
+        entry.developer = j.value("developer", "");
+        entry.releaseDate = j.value("releaseDate", "");
+        entry.genre = j.value("genre", std::vector<std::string>());
+        entry.region = j.value("region", "");
+        entry.packedRomSha256 = j.value("packedRomSha256", "");
+        const auto metadata = j.find("romxMetadata");
+        entry.romxMetadataJson = metadata != j.end() && metadata->is_object()
+            ? metadata->dump() : std::string{};
         entry.overlayEnabled = j.value("overlayEnabled", false);
         entry.shaderEnabled = j.value("shaderEnabled", false);
         entry.displayMode = j.value("displayMode", 0);

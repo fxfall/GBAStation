@@ -11,6 +11,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/project-defaults.cmake)
 
 add_subdirectory(yoga)
 add_subdirectory(tests)
+add_compile_options(-Wno-error)
 
 # cmake install config
 include(GNUInstallDirs)

@@ -131,6 +131,14 @@ namespace beiklive // 结构体
         std::string overlayPath = "";    // 游戏专属遮罩图片路径
         std::string shaderPath = "";     // 游戏专属着色器预设路径
 
+        // 打包 ROM / 游戏资料字段
+        std::string developer = "";       // 开发商
+        std::string releaseDate = "";     // 发售日期
+        std::vector<std::string> genre;   // 游戏类型
+        std::string region = "";          // 地区
+        std::string packedRomSha256 = ""; // 打包容器中记录的原始 ROM SHA-256
+        std::string romxMetadataJson = ""; // 完整 ROMX metadata，保留标准字段和 x-* 扩展
+
         bool overlayEnabled = false; // 是否启用游戏专属遮罩（使用全局设置初始化）
         bool shaderEnabled = false;  // 是否启用游戏专属着色器（使用全局设置初始化）
 

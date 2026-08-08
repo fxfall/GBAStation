@@ -111,6 +111,7 @@ private:
     std::vector<melonDS::ARCode> m_arCheats;
     std::vector<int> m_cheatToArIndex;
     std::vector<uint8_t> m_romData;
+    std::string m_loadedRomPath;
     std::string m_saveFile;
     std::string m_stateFile;
     std::string m_biosDir;
