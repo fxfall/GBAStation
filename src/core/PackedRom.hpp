@@ -38,7 +38,7 @@ namespace beiklive::packed_rom
     /// True for a supported "normal ROM extension + x" packed-ROM alias.
     bool hasSupportedExtension(const std::string& path);
 
-    /// Parses and validates a ROMX 0.1.0 container.
+    /// Parses a ROMX container and extracts the recognized metadata fields.
     std::optional<Info> readInfo(const std::string& path, std::string* error = nullptr,
                                  bool verifyPayload = true);
 

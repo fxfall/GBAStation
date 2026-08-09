@@ -14,7 +14,6 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
-#include <regex>
 #include <sstream>
 #include <unordered_set>
 #include <unordered_map>
@@ -29,7 +28,6 @@ namespace beiklive::packed_rom
     {
         constexpr std::uint64_t FooterSize = 128;
         constexpr std::uint32_t SupportedVersion = 1;
-        constexpr const char* SupportedMetadataVersion = "0.1.0";
         constexpr std::uint32_t HasMetadata = 1U << 0;
         constexpr std::uint32_t HasCover = 1U << 1;
         constexpr std::uint32_t HasBodySha256 = 1U << 2;
@@ -493,139 +491,12 @@ namespace beiklive::packed_rom
             return true;
         }
 
-        bool validStandardMetadata(const nlohmann::json& metadata)
+        // ROMX metadata may come from different schema revisions. The
+        // container reader only needs a JSON object here; recognized fields
+        // are extracted below and unknown fields are ignored.
+        bool isMetadataObject(const nlohmann::json& metadata)
         {
-            if (!metadata.is_object())
-                return false;
-
-            static constexpr std::array<const char*, 25> Fields{
-                "schema_version", "name", "platform", "payload_format", "serial",
-                "developer", "publisher", "origin", "franchise", "release_date",
-                "genre", "region", "language", "users", "coop", "rumble", "analog",
-                "enhancement_hw", "category", "media", "description", "crc32",
-                "origin_crc32", "dump_status", "cover"};
-            for (const auto& item : metadata.items())
-                if (std::find_if(Fields.begin(), Fields.end(), [&item](const char* field) {
-                        return item.key() == field;
-                    }) == Fields.end())
-                    return false;
-
-            const auto requiredString = [&metadata](const char* key, std::size_t maxLength) {
-                const auto it = metadata.find(key);
-                return it != metadata.end() && it->is_string() &&
-                    !it->get<std::string>().empty() && it->get<std::string>().size() <= maxLength;
-            };
-            const auto optionalString = [&metadata](const char* key, std::size_t maxLength) {
-                const auto it = metadata.find(key);
-                return it == metadata.end() ||
-                    (it->is_string() && it->get<std::string>().size() <= maxLength);
-            };
-            const auto validCrc32 = [&metadata](const char* key, bool required) {
-                const auto it = metadata.find(key);
-                if (it == metadata.end())
-                    return !required;
-                if (!it->is_string() || it->get<std::string>().size() != 8)
-                    return false;
-                const std::string value = it->get<std::string>();
-                return std::all_of(value.begin(), value.end(),
-                    [](unsigned char c) {
-                        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-                    });
-            };
-
-            if (!requiredString("schema_version", 5) ||
-                metadataString(metadata, "schema_version") != SupportedMetadataVersion ||
-                !requiredString("name", 512) || !requiredString("platform", 16) ||
-                !requiredString("payload_format", 8) || !validCrc32("crc32", true) ||
-                !validCrc32("origin_crc32", false))
-                return false;
-
-            const std::string platform = metadataString(metadata, "platform");
-            const std::string format = metadataString(metadata, "payload_format");
-            static constexpr std::array<const char*, 8> Platforms{
-                "gb", "gbc", "gba", "nes", "snes", "nds", "3ds", "genesis"};
-            if (std::find_if(Platforms.begin(), Platforms.end(), [&platform](const char* value) {
-                    return platform == value;
-                }) == Platforms.end() ||
-                payloadPlatform(format) == 0 || metadataPlatform(metadata) != payloadPlatform(format))
-                return false;
-
-            if (!optionalString("serial", 128) || !optionalString("developer", 256) ||
-                !optionalString("publisher", 256) || !optionalString("origin", 128) ||
-                !optionalString("franchise", 256) || !optionalString("language", 256) ||
-                !optionalString("enhancement_hw", 256) || !optionalString("category", 128) ||
-                !optionalString("media", 64) || !optionalString("description", 32768))
-                return false;
-
-            const auto release = metadata.find("release_date");
-            if (release != metadata.end() &&
-                (!release->is_string() ||
-                 !std::regex_match(release->get<std::string>(),
-                                   std::regex("^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$"))))
-                return false;
-
-            for (const auto* key : {"genre", "region"})
-            {
-                const auto it = metadata.find(key);
-                if (it == metadata.end())
-                    continue;
-                if (!it->is_array() || it->size() > 32)
-                    return false;
-                std::unordered_set<std::string> seen;
-                for (const auto& value : *it)
-                {
-                    const std::size_t maxLength = std::string(key) == "genre" ? 64 : 32;
-                    if (!value.is_string() || value.get<std::string>().size() > maxLength ||
-                        !seen.insert(value.get<std::string>()).second)
-                        return false;
-                }
-            }
-
-            for (const auto* key : {"coop", "rumble", "analog"})
-            {
-                const auto it = metadata.find(key);
-                if (it != metadata.end() && !it->is_boolean())
-                    return false;
-            }
-            const auto users = metadata.find("users");
-            if (users != metadata.end() &&
-                (!users->is_number_integer() || users->get<int>() < 1 || users->get<int>() > 255))
-                return false;
-
-            const auto dumpStatus = metadata.find("dump_status");
-            if (dumpStatus != metadata.end())
-            {
-                static constexpr std::array<const char*, 7> Statuses{
-                    "unknown", "good", "bad", "overdump", "hack", "translation", "homebrew"};
-                if (!dumpStatus->is_string() ||
-                    std::find_if(Statuses.begin(), Statuses.end(), [&dumpStatus](const char* value) {
-                        return dumpStatus->get<std::string>() == value;
-                    }) == Statuses.end())
-                    return false;
-            }
-
-            const auto cover = metadata.find("cover");
-            if (cover != metadata.end())
-            {
-                if (!cover->is_object())
-                    return false;
-                for (const auto& item : cover->items())
-                    if (item.key() != "mime_type" && item.key() != "width" && item.key() != "height")
-                        return false;
-                const auto mime = cover->find("mime_type");
-                if (mime != cover->end() &&
-                    (!mime->is_string() || mime->get<std::string>() != "image/png"))
-                    return false;
-                for (const auto* key : {"width", "height"})
-                {
-                    const auto dimension = cover->find(key);
-                    if (dimension != cover->end() &&
-                        (!dimension->is_number_integer() || dimension->get<int>() < 1 ||
-                         dimension->get<int>() > 8192))
-                        return false;
-                }
-            }
-            return true;
+            return metadata.is_object();
         }
 
         bool rangesOverlap(std::uint64_t firstOffset, std::uint64_t firstSize,
@@ -1197,7 +1068,7 @@ namespace beiklive::packed_rom
             {
                 parseStrictJson(bytes, metadata);
             }
-            if (!validStandardMetadata(metadata))
+            if (!isMetadataObject(metadata))
                 metadata = nlohmann::json::object();
         }
 
