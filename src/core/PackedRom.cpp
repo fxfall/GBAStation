@@ -29,6 +29,7 @@ namespace beiklive::packed_rom
     {
         constexpr std::uint64_t FooterSize = 128;
         constexpr std::uint32_t SupportedVersion = 1;
+        constexpr const char* SupportedMetadataVersion = "0.1.0";
         constexpr std::uint32_t HasMetadata = 1U << 0;
         constexpr std::uint32_t HasCover = 1U << 1;
         constexpr std::uint32_t HasBodySha256 = 1U << 2;
@@ -532,7 +533,8 @@ namespace beiklive::packed_rom
                     });
             };
 
-            if (!requiredString("schema_version", 3) || metadataString(metadata, "schema_version") != "1.0" ||
+            if (!requiredString("schema_version", 5) ||
+                metadataString(metadata, "schema_version") != SupportedMetadataVersion ||
                 !requiredString("name", 512) || !requiredString("platform", 16) ||
                 !requiredString("payload_format", 8) || !validCrc32("crc32", true) ||
                 !validCrc32("origin_crc32", false))
