@@ -282,7 +282,7 @@ namespace beiklive
             {"releaseDate", sanitizeUtf8(entry.releaseDate)},
             {"genre", entry.genre},
             {"region", sanitizeUtf8(entry.region)},
-            {"packedRomSha256", sanitizeUtf8(entry.packedRomSha256)},
+            {"romxBodySha256", sanitizeUtf8(entry.romxBodySha256)},
             {"overlayEnabled", entry.overlayEnabled},
             {"shaderEnabled", entry.shaderEnabled},
             {"displayMode", entry.displayMode},
@@ -337,7 +337,7 @@ namespace beiklive
         entry.releaseDate = j.value("releaseDate", "");
         entry.genre = j.value("genre", std::vector<std::string>());
         entry.region = j.value("region", "");
-        entry.packedRomSha256 = j.value("packedRomSha256", "");
+        entry.romxBodySha256 = j.value("romxBodySha256", "");
         const auto metadata = j.find("romxMetadata");
         entry.romxMetadataJson = metadata != j.end() && metadata->is_object()
             ? metadata->dump() : std::string{};

@@ -136,8 +136,8 @@ namespace beiklive // 结构体
         std::string releaseDate = "";     // 发售日期
         std::vector<std::string> genre;   // 游戏类型
         std::string region = "";          // 地区
-        std::string packedRomSha256 = ""; // 打包容器中记录的原始 ROM SHA-256
-        std::string romxMetadataJson = ""; // 完整 ROMX metadata，保留标准字段和 x-* 扩展
+        std::string romxBodySha256 = "";  // ROMX 1.0 footer 中的 body SHA-256（可选）
+        std::string romxMetadataJson = ""; // 有效 ROMX 1.0 metadata JSON
 
         bool overlayEnabled = false; // 是否启用游戏专属遮罩（使用全局设置初始化）
         bool shaderEnabled = false;  // 是否启用游戏专属着色器（使用全局设置初始化）

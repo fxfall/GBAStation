@@ -12,14 +12,21 @@ namespace beiklive::packed_rom
         int platform = 0;
         std::string title;
         std::string developer;
+        std::string publisher;
+        std::string origin;
+        std::string franchise;
         std::string releaseDate;
         std::vector<std::string> genre;
         std::string region;
-        std::string romSha256;
+        std::string crc32;
+        std::uint32_t lookupCrc32 = 0;
+        std::string originCrc32;
+        std::string dumpStatus;
+        std::string bodySha256;
+        std::string payloadSha256;
         std::string payloadFormat;
         std::string romExtension;
         std::string metadataJson;
-        bool legacyContainer = false;
         std::uint64_t romOffset = 0;
         std::uint64_t romSize = 0;
         std::uint64_t metadataOffset = 0;
@@ -31,7 +38,7 @@ namespace beiklive::packed_rom
     /// True for a supported "normal ROM extension + x" packed-ROM alias.
     bool hasSupportedExtension(const std::string& path);
 
-    /// Parses and validates a ROMX 1.0 container. Legacy GBAX files remain readable.
+    /// Parses and validates a ROMX 1.0 container.
     std::optional<Info> readInfo(const std::string& path, std::string* error = nullptr,
                                  bool verifyPayload = true);
 

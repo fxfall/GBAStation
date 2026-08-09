@@ -121,7 +121,8 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 	const std::filesystem::path path(romPath);
 	const std::string stem = path.stem().string().empty() ? "game" : path.stem().string();
 	const std::string fallbackTitle = GET_MAPPING_KEY_STR(stem, stem);
-	const bool firstPackedImport = packedInfo && entry.packedRomSha256.empty();
+	const bool firstPackedImport = packedInfo && entry.romxBodySha256.empty() &&
+		entry.romxMetadataJson.empty();
 
 	if (entry.path.empty())
 	{
@@ -163,11 +164,13 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 	}
 	if (packedInfo)
 	{
+		if (!packedInfo->crc32.empty())
+			entry.crc32 = static_cast<int>(packedInfo->lookupCrc32);
 		entry.developer = packedInfo->developer;
 		entry.releaseDate = packedInfo->releaseDate;
 		entry.genre = packedInfo->genre;
 		entry.region = packedInfo->region;
-		entry.packedRomSha256 = packedInfo->romSha256;
+		entry.romxBodySha256 = packedInfo->bodySha256;
 		entry.romxMetadataJson = packedInfo->metadataJson;
 		changed = true;
 	}

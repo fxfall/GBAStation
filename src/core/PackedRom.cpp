@@ -10,11 +10,16 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <mutex>
+#include <regex>
 #include <sstream>
+#include <unordered_set>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -200,44 +205,16 @@ namespace beiklive::packed_rom
             return value;
         }
 
-        std::string removeTrailingJsonCommas(const std::string& input)
+        std::uint32_t parseHex32(const std::string& value)
         {
-            std::string output;
-            output.reserve(input.size());
-            bool inString = false;
-            bool escaped = false;
-            for (std::size_t i = 0; i < input.size(); ++i)
+            std::uint32_t result = 0;
+            for (const unsigned char c : value)
             {
-                const char c = input[i];
-                if (inString)
-                {
-                    output.push_back(c);
-                    if (escaped)
-                        escaped = false;
-                    else if (c == '\\')
-                        escaped = true;
-                    else if (c == '"')
-                        inString = false;
-                    continue;
-                }
-                if (c == '"')
-                {
-                    inString = true;
-                    output.push_back(c);
-                    continue;
-                }
-                if (c == ',')
-                {
-                    std::size_t next = i + 1;
-                    while (next < input.size() &&
-                           std::isspace(static_cast<unsigned char>(input[next])))
-                        ++next;
-                    if (next < input.size() && (input[next] == '}' || input[next] == ']'))
-                        continue;
-                }
-                output.push_back(c);
+                result <<= 4;
+                result |= c >= '0' && c <= '9' ? c - '0' :
+                    (c >= 'a' && c <= 'f' ? c - 'a' + 10 : c - 'A' + 10);
             }
-            return output;
+            return result;
         }
 
         std::string metadataString(const nlohmann::json& metadata, const char* key)
@@ -247,13 +224,11 @@ namespace beiklive::packed_rom
                 ? it->get<std::string>() : std::string{};
         }
 
-        std::string metadataStringOrList(const nlohmann::json& metadata, const char* key)
+        std::string metadataStringList(const nlohmann::json& metadata, const char* key)
         {
             const auto it = metadata.find(key);
             if (it == metadata.end())
                 return {};
-            if (it->is_string())
-                return it->get<std::string>();
             if (!it->is_array())
                 return {};
             std::string result;
@@ -266,6 +241,90 @@ namespace beiklive::packed_rom
                 result += value.get<std::string>();
             }
             return result;
+        }
+
+        class DuplicateKeyDetector final : public nlohmann::json_sax<nlohmann::json>
+        {
+        public:
+            bool duplicate = false;
+
+            bool null() override { return true; }
+            bool boolean(bool) override { return true; }
+            bool number_integer(number_integer_t) override { return true; }
+            bool number_unsigned(number_unsigned_t) override { return true; }
+            bool number_float(number_float_t, const string_t&) override { return true; }
+            bool string(string_t&) override { return true; }
+            bool binary(binary_t&) override { return true; }
+
+            bool start_object(std::size_t) override
+            {
+                contexts.push_back(Context{true, {}});
+                return true;
+            }
+
+            bool key(string_t& value) override
+            {
+                if (contexts.empty() || !contexts.back().object ||
+                    !contexts.back().keys.insert(value).second)
+                {
+                    duplicate = true;
+                    return false;
+                }
+                return true;
+            }
+
+            bool end_object() override
+            {
+                if (contexts.empty() || !contexts.back().object)
+                    return false;
+                contexts.pop_back();
+                return true;
+            }
+
+            bool start_array(std::size_t) override
+            {
+                contexts.push_back(Context{false, {}});
+                return true;
+            }
+
+            bool end_array() override
+            {
+                if (contexts.empty() || contexts.back().object)
+                    return false;
+                contexts.pop_back();
+                return true;
+            }
+
+            bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception&) override
+            {
+                return false;
+            }
+
+        private:
+            struct Context
+            {
+                bool object;
+                std::unordered_set<std::string> keys;
+            };
+            std::vector<Context> contexts;
+        };
+
+        bool parseStrictJson(const std::string& bytes, nlohmann::json& output)
+        {
+            DuplicateKeyDetector detector;
+            if (!nlohmann::json::sax_parse(bytes, &detector,
+                                           nlohmann::json::input_format_t::json,
+                                           true, false) || detector.duplicate)
+                return false;
+            try
+            {
+                output = nlohmann::json::parse(bytes);
+                return !output.is_discarded();
+            }
+            catch (const nlohmann::json::exception&)
+            {
+                return false;
+            }
         }
 
         std::string trimHeaderTitle(const unsigned char* data, std::size_t size)
@@ -283,22 +342,21 @@ namespace beiklive::packed_rom
         int metadataPlatform(const nlohmann::json& metadata)
         {
             std::string platform = lower(metadataString(metadata, "platform"));
-            if (platform == "gba" || platform == "game boy advance")
+            if (platform == "gba")
                 return static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA);
-            if (platform == "gbc" || platform == "game boy color")
+            if (platform == "gbc")
                 return static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC);
-            if (platform == "gb" || platform == "game boy")
+            if (platform == "gb")
                 return static_cast<int>(beiklive::enums::EmuPlatform::EmuGB);
-            if (platform == "nes" || platform == "fc" || platform == "famicom")
+            if (platform == "nes")
                 return static_cast<int>(beiklive::enums::EmuPlatform::EmuNES);
-            if (platform == "snes" || platform == "sfc" || platform == "super famicom")
+            if (platform == "snes")
                 return static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES);
-            if (platform == "nds" || platform == "nintendo ds")
+            if (platform == "nds")
                 return static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS);
-            if (platform == "3ds" || platform == "nintendo 3ds")
+            if (platform == "3ds")
                 return static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS);
-            if (platform == "md" || platform == "genesis" ||
-                platform == "mega drive" || platform == "megadrive")
+            if (platform == "genesis")
                 return static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis);
             return 0;
         }
@@ -391,15 +449,15 @@ namespace beiklive::packed_rom
 
         bool verifyContainerHashes(std::ifstream& input, std::uint64_t bodySize,
                                    std::uint64_t romOffset, std::uint64_t romSize,
-                                   const unsigned char* expectedRom,
-                                   bool checkBody, const unsigned char* expectedBody)
+                                   bool checkBody, const unsigned char* expectedBody,
+                                   std::array<unsigned char, 32>& payloadDigest)
         {
             input.clear();
             input.seekg(0, std::ios::beg);
             if (!input)
                 return false;
 
-            Sha256 romSha;
+            Sha256 payloadSha;
             Sha256 bodySha;
             std::array<unsigned char, 64 * 1024> buffer{};
             const std::uint64_t romEnd = romOffset + romSize;
@@ -418,15 +476,13 @@ namespace beiklive::packed_rom
                 const std::uint64_t intersectionEnd = std::min(position + chunk, romEnd);
                 if (intersectionStart < intersectionEnd)
                 {
-                    romSha.update(buffer.data() + static_cast<std::size_t>(intersectionStart - position),
-                                  static_cast<std::size_t>(intersectionEnd - intersectionStart));
+                    payloadSha.update(buffer.data() + static_cast<std::size_t>(intersectionStart - position),
+                                      static_cast<std::size_t>(intersectionEnd - intersectionStart));
                 }
                 position += chunk;
             }
 
-            const auto romDigest = romSha.finish();
-            if (!std::equal(romDigest.begin(), romDigest.end(), expectedRom))
-                return false;
+            payloadDigest = payloadSha.finish();
             if (checkBody)
             {
                 const auto bodyDigest = bodySha.finish();
@@ -438,23 +494,135 @@ namespace beiklive::packed_rom
 
         bool validStandardMetadata(const nlohmann::json& metadata)
         {
-            if (!metadata.is_object() || metadataString(metadata, "schema_version") != "1.0")
+            if (!metadata.is_object())
                 return false;
-            const std::string label = metadataString(metadata, "label");
+
+            static constexpr std::array<const char*, 25> Fields{
+                "schema_version", "name", "platform", "payload_format", "serial",
+                "developer", "publisher", "origin", "franchise", "release_date",
+                "genre", "region", "language", "users", "coop", "rumble", "analog",
+                "enhancement_hw", "category", "media", "description", "crc32",
+                "origin_crc32", "dump_status", "cover"};
+            for (const auto& item : metadata.items())
+                if (std::find_if(Fields.begin(), Fields.end(), [&item](const char* field) {
+                        return item.key() == field;
+                    }) == Fields.end())
+                    return false;
+
+            const auto requiredString = [&metadata](const char* key, std::size_t maxLength) {
+                const auto it = metadata.find(key);
+                return it != metadata.end() && it->is_string() &&
+                    !it->get<std::string>().empty() && it->get<std::string>().size() <= maxLength;
+            };
+            const auto optionalString = [&metadata](const char* key, std::size_t maxLength) {
+                const auto it = metadata.find(key);
+                return it == metadata.end() ||
+                    (it->is_string() && it->get<std::string>().size() <= maxLength);
+            };
+            const auto validCrc32 = [&metadata](const char* key, bool required) {
+                const auto it = metadata.find(key);
+                if (it == metadata.end())
+                    return !required;
+                if (!it->is_string() || it->get<std::string>().size() != 8)
+                    return false;
+                const std::string value = it->get<std::string>();
+                return std::all_of(value.begin(), value.end(),
+                    [](unsigned char c) {
+                        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                    });
+            };
+
+            if (!requiredString("schema_version", 3) || metadataString(metadata, "schema_version") != "1.0" ||
+                !requiredString("name", 512) || !requiredString("platform", 16) ||
+                !requiredString("payload_format", 8) || !validCrc32("crc32", true) ||
+                !validCrc32("origin_crc32", false))
+                return false;
+
             const std::string platform = metadataString(metadata, "platform");
             const std::string format = metadataString(metadata, "payload_format");
             static constexpr std::array<const char*, 8> Platforms{
                 "gb", "gbc", "gba", "nes", "snes", "nds", "3ds", "genesis"};
-            if (label.empty() || label.size() > 512 ||
-                std::find(Platforms.begin(), Platforms.end(), platform) == Platforms.end() ||
-                payloadPlatform(format) == 0)
+            if (std::find_if(Platforms.begin(), Platforms.end(), [&platform](const char* value) {
+                    return platform == value;
+                }) == Platforms.end() ||
+                payloadPlatform(format) == 0 || metadataPlatform(metadata) != payloadPlatform(format))
                 return false;
-            if (metadataPlatform(metadata) != payloadPlatform(format))
+
+            if (!optionalString("serial", 128) || !optionalString("developer", 256) ||
+                !optionalString("publisher", 256) || !optionalString("origin", 128) ||
+                !optionalString("franchise", 256) || !optionalString("language", 256) ||
+                !optionalString("enhancement_hw", 256) || !optionalString("category", 128) ||
+                !optionalString("media", 64) || !optionalString("description", 32768))
                 return false;
+
+            const auto release = metadata.find("release_date");
+            if (release != metadata.end() &&
+                (!release->is_string() ||
+                 !std::regex_match(release->get<std::string>(),
+                                   std::regex("^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$"))))
+                return false;
+
+            for (const auto* key : {"genre", "region"})
+            {
+                const auto it = metadata.find(key);
+                if (it == metadata.end())
+                    continue;
+                if (!it->is_array() || it->size() > 32)
+                    return false;
+                std::unordered_set<std::string> seen;
+                for (const auto& value : *it)
+                {
+                    const std::size_t maxLength = std::string(key) == "genre" ? 64 : 32;
+                    if (!value.is_string() || value.get<std::string>().size() > maxLength ||
+                        !seen.insert(value.get<std::string>()).second)
+                        return false;
+                }
+            }
+
+            for (const auto* key : {"coop", "rumble", "analog"})
+            {
+                const auto it = metadata.find(key);
+                if (it != metadata.end() && !it->is_boolean())
+                    return false;
+            }
+            const auto users = metadata.find("users");
+            if (users != metadata.end() &&
+                (!users->is_number_integer() || users->get<int>() < 1 || users->get<int>() > 255))
+                return false;
+
+            const auto dumpStatus = metadata.find("dump_status");
+            if (dumpStatus != metadata.end())
+            {
+                static constexpr std::array<const char*, 7> Statuses{
+                    "unknown", "good", "bad", "overdump", "hack", "translation", "homebrew"};
+                if (!dumpStatus->is_string() ||
+                    std::find_if(Statuses.begin(), Statuses.end(), [&dumpStatus](const char* value) {
+                        return dumpStatus->get<std::string>() == value;
+                    }) == Statuses.end())
+                    return false;
+            }
+
             const auto cover = metadata.find("cover");
-            if (cover != metadata.end() &&
-                (!cover->is_object() || metadataString(*cover, "mime_type") != "image/png"))
-                return false;
+            if (cover != metadata.end())
+            {
+                if (!cover->is_object())
+                    return false;
+                for (const auto& item : cover->items())
+                    if (item.key() != "mime_type" && item.key() != "width" && item.key() != "height")
+                        return false;
+                const auto mime = cover->find("mime_type");
+                if (mime != cover->end() &&
+                    (!mime->is_string() || mime->get<std::string>() != "image/png"))
+                    return false;
+                for (const auto* key : {"width", "height"})
+                {
+                    const auto dimension = cover->find(key);
+                    if (dimension != cover->end() &&
+                        (!dimension->is_number_integer() || dimension->get<int>() < 1 ||
+                         dimension->get<int>() > 8192))
+                        return false;
+                }
+            }
             return true;
         }
 
@@ -618,6 +786,118 @@ namespace beiklive::packed_rom
             for (std::size_t i = 0; i < 32; ++i)
                 out << std::setw(2) << static_cast<unsigned>(bytes[i]);
             return out.str();
+        }
+
+        bool validPng(const std::vector<unsigned char>& bytes)
+        {
+            static constexpr std::array<unsigned char, 8> Signature{
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+            if (bytes.size() > MaxCoverSize || bytes.size() < Signature.size() + 12 ||
+                !std::equal(Signature.begin(), Signature.end(), bytes.begin()))
+                return false;
+
+            auto crc32 = [](const unsigned char* data, std::size_t size) {
+                std::uint32_t crc = 0xFFFFFFFFU;
+                for (std::size_t i = 0; i < size; ++i)
+                {
+                    crc ^= data[i];
+                    for (int bit = 0; bit < 8; ++bit)
+                        crc = (crc >> 1) ^ ((crc & 1U) ? 0xEDB88320U : 0U);
+                }
+                return crc ^ 0xFFFFFFFFU;
+            };
+
+            std::size_t offset = Signature.size();
+            bool first = true;
+            bool sawIhdr = false;
+            bool sawIdat = false;
+            bool endedIdat = false;
+            bool sawIend = false;
+            bool sawPlte = false;
+            unsigned char colorType = 0;
+            unsigned char bitDepth = 0;
+            while (offset < bytes.size())
+            {
+                if (bytes.size() - offset < 12)
+                    return false;
+                const std::uint32_t length = readBe32(bytes.data() + offset);
+                if (length > 0x7FFFFFFFU || bytes.size() - offset - 12 < length)
+                    return false;
+                const unsigned char* type = bytes.data() + offset + 4;
+                for (int i = 0; i < 4; ++i)
+                    if (!std::isalpha(type[i]))
+                        return false;
+                if ((type[2] & 0x20U) != 0)
+                    return false;
+                const unsigned char* data = type + 4;
+                const std::uint32_t expectedCrc = readBe32(data + length);
+                if (crc32(type, static_cast<std::size_t>(4 + length)) != expectedCrc)
+                    return false;
+
+                const auto isType = [type](const char* value) {
+                    return std::equal(type, type + 4, value);
+                };
+                if (first)
+                {
+                    if (!isType("IHDR") || length != 13)
+                        return false;
+                    first = false;
+                    sawIhdr = true;
+                    const std::uint32_t width = readBe32(data);
+                    const std::uint32_t height = readBe32(data + 4);
+                    bitDepth = data[8];
+                    colorType = data[9];
+                    if (width == 0 || width > 8192 || height == 0 || height > 8192 ||
+                        data[10] != 0 || data[11] != 0 || data[12] > 1)
+                        return false;
+                    static constexpr std::array<std::pair<unsigned char, std::array<unsigned char, 5>>, 5> Depths{{
+                        {0, {1, 2, 4, 8, 16}}, {2, {8, 16, 0, 0, 0}},
+                        {3, {1, 2, 4, 8, 0}}, {4, {8, 16, 0, 0, 0}},
+                        {6, {8, 16, 0, 0, 0}}}};
+                    bool legalDepth = false;
+                    for (const auto& entry : Depths)
+                        if (entry.first == colorType &&
+                            std::find(entry.second.begin(), entry.second.end(), bitDepth) != entry.second.end())
+                            legalDepth = true;
+                    if (!legalDepth)
+                        return false;
+                }
+                else if (isType("IHDR"))
+                    return false;
+                else if (isType("PLTE"))
+                {
+                    if (length == 0 || length > 768 || length % 3 != 0 || sawIdat || sawPlte ||
+                        colorType == 0 || colorType == 4)
+                        return false;
+                    sawPlte = true;
+                }
+                else if (isType("IDAT"))
+                {
+                    if (endedIdat)
+                        return false;
+                    sawIdat = true;
+                    if (colorType == 3 && !sawPlte)
+                        return false;
+                }
+                else if (isType("IEND"))
+                {
+                    if (length != 0 || sawIend || !sawIdat || offset + 12 != bytes.size())
+                        return false;
+                    sawIend = true;
+                }
+                else
+                {
+                    const bool critical = (type[0] & 0x20U) == 0;
+                    if (critical)
+                        return false;
+                    if (sawIdat)
+                        endedIdat = true;
+                }
+                offset += static_cast<std::size_t>(12 + length);
+                if (sawIend)
+                    break;
+            }
+            return sawIhdr && sawIdat && sawIend && offset == bytes.size();
         }
 
         std::string coverExtension(std::ifstream& input, const Info& info)
@@ -790,9 +1070,7 @@ namespace beiklive::packed_rom
             if (error) *error = "无法读取 ROMX 文件尾";
             return std::nullopt;
         }
-        const bool isStandard = std::equal(footer.begin(), footer.begin() + 4, "ROMX");
-        const bool isLegacy = std::equal(footer.begin(), footer.begin() + 4, "GBAX");
-        if (!isStandard && !isLegacy)
+        if (!std::equal(footer.begin(), footer.begin() + 4, "ROMX"))
         {
             if (error) *error = "缺少 ROMX 文件尾";
             return std::nullopt;
@@ -802,44 +1080,39 @@ namespace beiklive::packed_rom
             if (error) *error = "不支持的 ROMX 版本";
             return std::nullopt;
         }
-
         Info info;
-        info.legacyContainer = isLegacy;
         info.romOffset = readLe64(footer.data() + 0x08);
         info.romSize = readLe64(footer.data() + 0x10);
         info.metadataOffset = readLe64(footer.data() + 0x18);
         info.metadataSize = readLe64(footer.data() + 0x20);
         info.coverOffset = readLe64(footer.data() + 0x28);
         info.coverSize = readLe64(footer.data() + 0x30);
-        info.romSha256 = shaHex(footer.data() + 0x38);
-
         const std::uint32_t flags = readLe32(footer.data() + 0x58);
-        if (isStandard)
+        if ((flags & HasBodySha256) != 0)
+            info.bodySha256 = shaHex(footer.data() + 0x60);
+        if (readLe32(footer.data() + 0x5C) != FooterSize)
         {
-            if (readLe32(footer.data() + 0x5C) != FooterSize)
-            {
-                if (error) *error = "ROMX footer_size 不是 128";
-                return std::nullopt;
-            }
-            if ((flags & ~KnownFlags) != 0)
-            {
-                if (error) *error = "ROMX 使用了未知的 Footer 标志";
-                return std::nullopt;
-            }
-            if (((flags & HasMetadata) != 0) != (info.metadataSize != 0) ||
-                ((flags & HasCover) != 0) != (info.coverSize != 0))
-            {
-                if (error) *error = "ROMX Footer 标志与数据区域不一致";
-                return std::nullopt;
-            }
-            if ((flags & HasBodySha256) == 0 &&
-                std::any_of(footer.begin() + 0x60, footer.end(), [](unsigned char value) {
-                    return value != 0;
-                }))
-            {
-                if (error) *error = "ROMX 未启用 body_sha256，但哈希字段不是零";
-                return std::nullopt;
-            }
+            if (error) *error = "ROMX footer_size 不是 128";
+            return std::nullopt;
+        }
+        if ((flags & ~KnownFlags) != 0)
+        {
+            if (error) *error = "ROMX 使用了未知的 Footer 标志";
+            return std::nullopt;
+        }
+        if (((flags & HasMetadata) != 0) != (info.metadataSize != 0) ||
+            ((flags & HasCover) != 0) != (info.coverSize != 0))
+        {
+            if (error) *error = "ROMX Footer 标志与数据区域不一致";
+            return std::nullopt;
+        }
+        if ((flags & HasBodySha256) == 0 &&
+            std::any_of(footer.begin() + 0x60, footer.end(), [](unsigned char value) {
+                return value != 0;
+            }))
+        {
+            if (error) *error = "ROMX 未启用 body_sha256，但哈希字段不是零";
+            return std::nullopt;
         }
 
         const std::uint64_t payloadEnd = fileSize - FooterSize;
@@ -861,16 +1134,53 @@ namespace beiklive::packed_rom
             return std::nullopt;
         }
 
-        if (isStandard && verifyPayload)
+        struct Region
+        {
+            std::uint64_t offset;
+            std::uint64_t size;
+        };
+        std::array<Region, 3> regions{{
+            {info.romOffset, info.romSize},
+            {info.metadataOffset, info.metadataSize},
+            {info.coverOffset, info.coverSize}}};
+        std::sort(regions.begin(), regions.end(), [](const Region& first, const Region& second) {
+            if (first.size == 0) return false;
+            if (second.size == 0) return true;
+            return first.offset < second.offset;
+        });
+        std::uint64_t cursor = 0;
+        for (const auto& region : regions)
+        {
+            if (region.size == 0)
+                continue;
+            if (region.offset != cursor)
+            {
+                if (error) *error = "ROMX 数据区域未完整覆盖 body";
+                return std::nullopt;
+            }
+            cursor = region.offset + region.size;
+        }
+        if (cursor != payloadEnd)
+        {
+            if (error) *error = "ROMX body 存在未分配字节";
+            return std::nullopt;
+        }
+        if (info.metadataSize == 0)
+            info.metadataOffset = 0;
+        if (info.coverSize == 0)
+            info.coverOffset = 0;
+
+        std::array<unsigned char, 32> payloadDigest{};
+        if (verifyPayload)
         {
             if (!verifyContainerHashes(input, payloadEnd, info.romOffset, info.romSize,
-                                       footer.data() + 0x38,
                                        (flags & HasBodySha256) != 0,
-                                       footer.data() + 0x60))
+                                       footer.data() + 0x60, payloadDigest))
             {
                 if (error) *error = "ROMX SHA-256 校验失败";
                 return std::nullopt;
             }
+            info.payloadSha256 = shaHex(payloadDigest.data());
         }
 
         nlohmann::json metadata = nlohmann::json::object();
@@ -878,30 +1188,30 @@ namespace beiklive::packed_rom
         {
             std::string bytes(static_cast<std::size_t>(info.metadataSize), '\0');
             if (readAt(input, info.metadataOffset, bytes.data(), bytes.size()) &&
-                !(isStandard && bytes.size() >= 3 &&
+                !(bytes.size() >= 3 &&
                   static_cast<unsigned char>(bytes[0]) == 0xEF &&
                   static_cast<unsigned char>(bytes[1]) == 0xBB &&
                   static_cast<unsigned char>(bytes[2]) == 0xBF))
             {
-                metadata = nlohmann::json::parse(bytes, nullptr, false);
+                parseStrictJson(bytes, metadata);
             }
-            if (isLegacy && metadata.is_discarded())
-                metadata = nlohmann::json::parse(removeTrailingJsonCommas(bytes), nullptr, false);
-            if (metadata.is_discarded() || !metadata.is_object())
-                metadata = nlohmann::json::object();
-            if (isStandard && !validStandardMetadata(metadata))
+            if (!validStandardMetadata(metadata))
                 metadata = nlohmann::json::object();
         }
 
-        info.title = metadataString(metadata, "label");
-        if (isLegacy && info.title.empty()) info.title = metadataString(metadata, "title");
-        if (isLegacy && info.title.empty()) info.title = metadataString(metadata, "name");
+        info.title = metadataString(metadata, "name");
         info.developer = metadataString(metadata, "developer");
+        info.publisher = metadataString(metadata, "publisher");
+        info.origin = metadataString(metadata, "origin");
+        info.franchise = metadataString(metadata, "franchise");
         info.releaseDate = metadataString(metadata, "release_date");
-        if (isLegacy && info.releaseDate.empty())
-            info.releaseDate = metadataString(metadata, "releaseDate");
-        info.region = metadataStringOrList(metadata, "region");
-        if (isStandard && !metadata.empty())
+        info.region = metadataStringList(metadata, "region");
+        info.crc32 = metadataString(metadata, "crc32");
+        if (info.crc32.size() == 8)
+            info.lookupCrc32 = parseHex32(info.crc32);
+        info.originCrc32 = metadataString(metadata, "origin_crc32");
+        info.dumpStatus = metadataString(metadata, "dump_status");
+        if (!metadata.empty())
             info.metadataJson = metadata.dump();
         if (metadata.contains("genre"))
         {
@@ -911,14 +1221,10 @@ namespace beiklive::packed_rom
                     if (item.is_string() && !item.get<std::string>().empty())
                         info.genre.push_back(item.get<std::string>());
             }
-            else if (isLegacy && metadata["genre"].is_string())
-            {
-                info.genre.push_back(metadata["genre"].get<std::string>());
-            }
         }
 
         info.payloadFormat = lower(metadataString(metadata, "payload_format"));
-        std::string headerTitle = metadataString(metadata, "header_title");
+        std::string headerTitle;
         const int detected = detectRomPlatform(input, info, &headerTitle);
         const int declared = metadataPlatform(metadata);
         const std::string aliasExtension = packedBaseExtension(path);
@@ -935,41 +1241,22 @@ namespace beiklive::packed_rom
         }
         else if (info.payloadFormat.empty() && !info.romExtension.empty())
             info.payloadFormat = info.romExtension.substr(1);
+        if (detected != 0 && payloadPlatform(info.payloadFormat) != detected &&
+            !info.romExtension.empty())
+            info.payloadFormat = info.romExtension.substr(1);
         if (info.title.empty())
             info.title = headerTitle;
-        if (info.platform == 0)
-        {
-            if (error) *error = "无法识别 ROMX 容器内的 ROM 平台";
-            return std::nullopt;
-        }
+        // A structurally valid ROMX may omit metadata and contain a payload
+        // whose header is not recognizable. Keep the container readable; the
+        // caller can still use the payload or the filename extension as a hint.
 
-        if (isStandard && info.coverSize != 0)
+        if (info.coverSize != 0)
         {
-            static constexpr std::array<unsigned char, 8> PngSignature{
-                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
-            std::array<unsigned char, 24> header{};
-            bool validCover = info.coverSize <= MaxCoverSize && info.coverSize >= header.size() &&
-                readAt(input, info.coverOffset, header.data(), header.size()) &&
-                std::equal(PngSignature.begin(), PngSignature.end(), header.begin()) &&
-                std::equal(header.begin() + 12, header.begin() + 16, "IHDR");
-            if (validCover)
+            bool validCover = false;
+            if (info.coverSize <= MaxCoverSize)
             {
-                const std::uint32_t width = readBe32(header.data() + 16);
-                const std::uint32_t height = readBe32(header.data() + 20);
-                validCover = width >= 1 && width <= 8192 && height >= 1 && height <= 8192;
-            }
-            const auto coverMetadata = metadata.find("cover");
-            if (verifyPayload && validCover &&
-                coverMetadata != metadata.end() && coverMetadata->is_object())
-            {
-                const std::string expectedCoverSha = metadataString(*coverMetadata, "sha256");
-                if (!expectedCoverSha.empty())
-                {
-                    std::array<unsigned char, 32> coverDigest{};
-                    validCover = expectedCoverSha.size() == 64 &&
-                        sha256Range(input, info.coverOffset, info.coverSize, coverDigest) &&
-                        shaHex(coverDigest.data()) == expectedCoverSha;
-                }
+                std::vector<unsigned char> cover(static_cast<std::size_t>(info.coverSize));
+                validCover = readAt(input, info.coverOffset, cover.data(), cover.size()) && validPng(cover);
             }
             if (!validCover)
             {
@@ -1004,7 +1291,10 @@ namespace beiklive::packed_rom
         std::ifstream input(packedPath, std::ios::binary);
         if (!input)
             return {};
-        const std::string key = info.romSha256.empty() ? "unknown" : info.romSha256.substr(0, 16);
+        std::string key = !info.crc32.empty() ? info.crc32 :
+            (!info.payloadSha256.empty() ? info.payloadSha256.substr(0, 16) : std::string{});
+        if (key.empty())
+            key = std::to_string(std::hash<std::string>{}(packedPath));
         const fs::path output = fs::path(destinationDir) /
             ("packed_cover_" + key + coverExtension(input, info));
         if (fs::exists(output, ec) && fs::file_size(output, ec) == info.coverSize)
@@ -1031,15 +1321,14 @@ namespace beiklive::packed_rom
             if (error) *error = ec.message();
             return {};
         }
-        const std::string key = info->romSha256.empty() ? "unknown" : info->romSha256;
+        const std::string key = !info->crc32.empty() ? info->crc32 :
+            (!info->payloadSha256.empty() ? info->payloadSha256 : "unknown");
         const fs::path output = dir / (key + ext);
-        if ((info->legacyContainer && fs::exists(output, ec) &&
-             fs::file_size(output, ec) == info->romSize) ||
-            (!info->legacyContainer &&
-             fileMatchesSha256(output, info->romSize, info->romSha256)))
+        if (!info->payloadSha256.empty() &&
+            fileMatchesSha256(output, info->romSize, info->payloadSha256))
             return output.string();
         return copyRange(path, info->romOffset, info->romSize, output, error,
-                         info->legacyContainer ? std::string{} : info->romSha256)
+                         info->payloadSha256)
             ? output.string() : std::string{};
     }
 }
