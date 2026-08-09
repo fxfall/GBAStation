@@ -6,6 +6,7 @@
 #include "ui/utils/GradientFocus.hpp"
 #include "ui/utils/MaterialIcons.hpp"
 #include "ui/widget/DetailCell.hpp"
+#include "core/PackedRom.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
 #include "network/WebService.h"
@@ -31,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <sstream>
 #include <unordered_set>
 
@@ -2188,6 +2190,28 @@ void DataManagementPage::startDirImport(const std::string& dirPath)
     finishWorker();
 
     std::unordered_set<std::string> exts;
+    std::unordered_set<int> enabledPlatforms;
+    if (m_scanGBA)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA));
+    if (m_scanGBC)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC));
+    if (m_scanGB)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGB));
+    if (m_scanNES)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuNES));
+    if (m_scanSNES)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES));
+    if (m_scanNDS)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS));
+    if (m_scan3DS)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS));
+    if (m_scanGenesis)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis));
+    if (m_scanArcade)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade));
+    if (m_scanDreamcast)
+        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast));
+
     if (m_scanGBA) exts.insert("gba");
     if (m_scanGBC) exts.insert("gbc");
     if (m_scanGB) exts.insert("gb");
@@ -2199,9 +2223,22 @@ void DataManagementPage::startDirImport(const std::string& dirPath)
     if (m_scanArcade) { exts.insert("zip"); exts.insert("7z"); }
     if (m_scanDreamcast) { exts.insert("cdi"); exts.insert("gdi"); exts.insert("chd"); }
 
+    // ROMX aliases carry the payload platform in the container/header, so
+    // collect all packed extensions first and filter by the detected platform
+    // after readInfo() succeeds.
+    if (!enabledPlatforms.empty())
+    {
+        for (const auto* ext : {"gbx", "gbcx", "gbax", "nesx", "fdsx",
+                                "sfcx", "smcx", "ndsx", "ciax", "ccix",
+                                "3dsx", "mdx", "genx", "binx", "smdx"})
+            exts.insert(ext);
+    }
+
     m_importing.store(true, std::memory_order_release);
 
-    m_importThread = std::thread([this, dirPath, exts = std::move(exts)]() {
+    m_importThread = std::thread([this, dirPath,
+                                  exts = std::move(exts),
+                                  enabledPlatforms = std::move(enabledPlatforms)]() {
         std::vector<fs::path> roms;
         try
         {
@@ -2245,8 +2282,19 @@ void DataManagementPage::startDirImport(const std::string& dirPath)
             const auto& romPath = roms[i];
             std::string path = romPath.string();
             std::string romStem = romPath.stem().string();
-            int platform = platformFromExistingPath(romPath);
+            const std::optional<beiklive::packed_rom::Info> packedInfo =
+                beiklive::packed_rom::hasSupportedExtension(path)
+                    ? beiklive::packed_rom::readInfo(path, nullptr, false)
+                    : std::optional<beiklive::packed_rom::Info>{};
+            int platform = packedInfo
+                ? packedInfo->platform
+                : platformFromExistingPath(romPath);
             if (platform < 0)
+            {
+                m_progress.store(i + 1, std::memory_order_release);
+                continue;
+            }
+            if (packedInfo && enabledPlatforms.count(platform) == 0)
             {
                 m_progress.store(i + 1, std::memory_order_release);
                 continue;
@@ -2262,8 +2310,9 @@ void DataManagementPage::startDirImport(const std::string& dirPath)
                 continue;
             }
 
-            std::string displayName = romStem;
-            if (m_useNameMapping)
+            std::string displayName = packedInfo && !packedInfo->title.empty()
+                ? packedInfo->title : romStem;
+            if ((!packedInfo || packedInfo->title.empty()) && m_useNameMapping)
             {
                 auto nameVal = beiklive::NameMappingManager->Get(romStem);
                 if (nameVal)
@@ -2295,6 +2344,21 @@ void DataManagementPage::startDirImport(const std::string& dirPath)
             {
             }
             entry.savePath = savePath;
+            if (packedInfo)
+            {
+                const std::string packedCover = beiklive::packed_rom::extractCover(
+                    path, *packedInfo, entry.savePath);
+                if (!packedCover.empty())
+                    entry.logoPath = packedCover;
+                if (!packedInfo->crc32.empty())
+                    entry.crc32 = static_cast<int>(packedInfo->lookupCrc32);
+                entry.developer = packedInfo->developer;
+                entry.releaseDate = packedInfo->releaseDate;
+                entry.genre = packedInfo->genre;
+                entry.region = packedInfo->region;
+                entry.romxBodySha256 = packedInfo->bodySha256;
+                entry.romxMetadataJson = packedInfo->metadataJson;
+            }
             entry.overlayEnabled = config.overlayEnabled;
             entry.shaderEnabled = config.shaderEnabled;
             entry.overlayPath = config.overlayPath;
