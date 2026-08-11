@@ -1386,17 +1386,17 @@ struct ScanPlatformConfig
 };
 
 const ScanPlatformConfig kScanPlatforms[] = {
-    {L("FC/NES"), beiklive::SettingKey::KEY_SCAN_PATH_NES,    {"nes", "fds", "nesx", "fdsx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuNES)},
+    {L("FC/NES"), beiklive::SettingKey::KEY_SCAN_PATH_NES,    {"nes", "fds", "unf", "unif", "nesx", "fdsx", "unfx", "unifx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuNES)},
     {L("SFC"),    beiklive::SettingKey::KEY_SCAN_PATH_SNES,   {"sfc", "smc", "sfcx", "smcx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES)},
     {L("GB"),     beiklive::SettingKey::KEY_SCAN_PATH_GB,     {"gb", "gbx"},         material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGB)},
     {L("GBC"),    beiklive::SettingKey::KEY_SCAN_PATH_GBC,    {"gbc", "gbcx"},        material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC)},
     {L("GBA"),    beiklive::SettingKey::KEY_SCAN_PATH_GBA,    {"gba", "gbax"},        material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA)},
     {L("NDS"),    beiklive::SettingKey::KEY_SCAN_PATH_NDS,    {"nds", "ndsx"},        material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS)},
-    {L("3DS"),    beiklive::SettingKey::KEY_SCAN_PATH_3DS,    {"cci", "3ds", "cia", "ccix", "3dsx", "ciax"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS)},
+    {L("3DS"),    beiklive::SettingKey::KEY_SCAN_PATH_3DS,    {"cci", "3ds", "cia", "cxi", "app", "ccix", "3dsx", "ciax", "cxix", "appx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS)},
     {L("Arcade"), beiklive::SettingKey::KEY_SCAN_PATH_ARCADE, {"zip", "7z"},  material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade)},
-    {L("DC"),     beiklive::SettingKey::KEY_SCAN_PATH_DC,     {"cdi", "gdi", "chd", "isox", "chdx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast)},
-    {L("MD"),     beiklive::SettingKey::KEY_SCAN_PATH_GENESIS,{"md", "gen", "bin", "smd", "mdx", "genx", "binx", "smdx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis)},
-    {L("PSP"),    beiklive::SettingKey::KEY_SCAN_PATH_PSP,    {"iso", "cso", "pbp", "isox"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)},
+    {L("DC"),     beiklive::SettingKey::KEY_SCAN_PATH_DC,     {"cdi", "gdi", "chd", "isox", "chdx", "cdix"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast)},
+    {L("MD"),     beiklive::SettingKey::KEY_SCAN_PATH_GENESIS,{"md", "gen", "bin", "smd", "32x", "mdx", "genx", "binx", "smdx", "32xx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis)},
+    {L("PSP"),    beiklive::SettingKey::KEY_SCAN_PATH_PSP,    {"iso", "cso", "pbp", "elf", "prx", "isox", "csox", "pbpx", "elfx", "prxx", "chdx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)},
 };
 constexpr size_t kScanPlatformCount = sizeof(kScanPlatforms) / sizeof(kScanPlatforms[0]);
 

@@ -112,11 +112,14 @@ int platformFromString(std::string value)
     if (value == "gba") return static_cast<int>(enums::EmuPlatform::EmuGBA);
     if (value == "gbc") return static_cast<int>(enums::EmuPlatform::EmuGBC);
     if (value == "gb") return static_cast<int>(enums::EmuPlatform::EmuGB);
-    if (value == "nes") return static_cast<int>(enums::EmuPlatform::EmuNES);
+    if (value == "nes" || value == "fds") return static_cast<int>(enums::EmuPlatform::EmuNES);
     if (value == "snes") return static_cast<int>(enums::EmuPlatform::EmuSNES);
     if (value == "nds") return static_cast<int>(enums::EmuPlatform::EmuNDS);
     if (value == "3ds") return static_cast<int>(enums::EmuPlatform::Emu3DS);
-    if (value == "genesis") return static_cast<int>(enums::EmuPlatform::EmuGenesis);
+    if (value == "genesis" || value == "genesis32x")
+        return static_cast<int>(enums::EmuPlatform::EmuGenesis);
+    if (value == "dreamcast") return static_cast<int>(enums::EmuPlatform::EmuDreamcast);
+    if (value == "psp") return static_cast<int>(enums::EmuPlatform::EmuPSP);
     return 0;
 }
 
@@ -127,11 +130,17 @@ int platformFromExtension(std::string value)
     if (value == "gba") return static_cast<int>(enums::EmuPlatform::EmuGBA);
     if (value == "gbc") return static_cast<int>(enums::EmuPlatform::EmuGBC);
     if (value == "gb") return static_cast<int>(enums::EmuPlatform::EmuGB);
-    if (value == "nes" || value == "fds") return static_cast<int>(enums::EmuPlatform::EmuNES);
+    if (value == "nes" || value == "unf" || value == "unif" || value == "fds")
+        return static_cast<int>(enums::EmuPlatform::EmuNES);
     if (value == "sfc" || value == "smc") return static_cast<int>(enums::EmuPlatform::EmuSNES);
     if (value == "nds") return static_cast<int>(enums::EmuPlatform::EmuNDS);
-    if (value == "3ds" || value == "cci" || value == "cia") return static_cast<int>(enums::EmuPlatform::Emu3DS);
-    if (value == "md" || value == "gen" || value == "smd" || value == "bin") return static_cast<int>(enums::EmuPlatform::EmuGenesis);
+    if (value == "3ds" || value == "cci" || value == "cxi" || value == "app" || value == "cia")
+        return static_cast<int>(enums::EmuPlatform::Emu3DS);
+    if (value == "md" || value == "gen" || value == "smd" || value == "32x" || value == "bin")
+        return static_cast<int>(enums::EmuPlatform::EmuGenesis);
+    if (value == "iso" || value == "cso" || value == "pbp" || value == "elf" || value == "prx")
+        return static_cast<int>(enums::EmuPlatform::EmuPSP);
+    if (value == "cdi") return static_cast<int>(enums::EmuPlatform::EmuDreamcast);
     return 0;
 }
 
@@ -261,10 +270,11 @@ bool readMetadataJson(const romx_reader_t* reader, const romx_info_t& info,
 
 bool hasSupportedExtension(const std::string& path)
 {
-    static constexpr std::array<const char*, 17> extensions{
-        ".gbx", ".gbcx", ".gbax", ".nesx", ".fdsx", ".sfcx", ".smcx",
-        ".ndsx", ".3dsx", ".ccix", ".ciax", ".mdx", ".genx", ".smdx",
-        ".binx", ".isox", ".chdx"};
+    static constexpr std::array<const char*, 27> extensions{
+        ".gbx", ".gbcx", ".gbax", ".nesx", ".unfx", ".unifx", ".fdsx",
+        ".sfcx", ".smcx", ".ndsx", ".3dsx", ".ccix", ".cxix", ".appx",
+        ".ciax", ".mdx", ".genx", ".smdx", ".32xx", ".binx", ".isox",
+        ".csox", ".pbpx", ".elfx", ".prxx", ".chdx", ".cdix"};
     const std::string extension = lower(fs::path(path).extension().string());
     return std::find(extensions.begin(), extensions.end(), extension) != extensions.end();
 }

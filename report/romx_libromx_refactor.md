@@ -77,3 +77,23 @@
 - mGBA native、melonDS、Genesis、libretro mGBA 启动入口和 Switch 外部 NRO 路径均通过 `RomxLaunchSession` 处理；核心只接收 mapping、VFS 虚拟路径或已物化的标准 ROM 路径。
 - `src/core/game_database.cpp` 新写入格式把 ROMX 专属字段放进 `romx` 对象（`developer`、`releaseDate`、`genre`、`region`、`bodySha256`、`metadata`）；读取仍兼容历史平铺字段和 `romxMetadata`，避免升级时丢失旧库数据。
 - `src/core/Tools.cpp` 和 `src/game/mgba/GameRun.cpp` 保持上游入口；ROMX 核心路径由 `RomxLaunchSession`/`LibretroLoader` 接管，不再依赖旧 `PackedRom`。
+
+## 实际 ROMX 测试与标准平台扩展（2026-08-12）
+
+本轮使用 `/Volumes/rom` 中的真实游戏，并调用 ROMX 标准项目 `/Volumes/Repositories/romx/tools/romx.py` 进行转换。Python 工具生成的是 ROMX 0.1.1 文件，均使用 `--body-sha256`，并通过标准 `verify` 校验：
+
+- `/Volumes/rom/rom/GBA/GBA 001.gba` → `GBA 001.gbax`，使用 GBA 封面；
+- `/Volumes/rom/rom/FC/FC 001.nes` → `FC 001.nesx`，使用 FC 封面；
+- `/Volumes/rom/rom/SFC/SFC 001.smc` → `SFC 001.smcx`，使用 SFC 封面；
+- `/Volumes/rom/rom/NDS/NDS 001.nds` → `NDS 001.ndsx`，使用 NDS 封面；
+- `/Volumes/rom/rom/16-MD/1.md` → `1.mdx`，使用 MD 封面；
+- `/Volumes/rom/rom/dc/08 Tetris 4D/Tetris 4D.cdi` → `cdix`；
+- `/Volumes/rom/rom/PS1/09/09EBOOT.PBP` → `pbpx`。
+
+使用 GBAStation 的 `RomxFrontend`、`RomxGameEntryAdapter` 和 `RomxLaunchSession` 对生成文件进行实测：五个带封面的 ROMX 均能读取 platform、title、payload format、CRC32、cover，并成功建立 payload mapping；Dreamcast CDI 和 PSP PBP 也能按 metadata 平台建立 mapping。GBA 的 mapping 回退物化文件与原始 `GBA 001.gba` 逐字节一致，大小为 14,357,872 字节。封面提取成功并写入 probe cover 目录。
+
+GBA 标准工具提取出的标题为 `fciq_tgbus`，这是该 ROM 的标准 header/数据库推导结果；没有强行用容器文件名覆盖。PSP PBP 的标题在源文件中本身是非 UTF-8/编码异常，Python 标准工具与 C++ 前端保留同一 metadata 值，前端没有进行可能破坏标题的猜测式转码。
+
+根据 `romx` 的 `PLATFORMS-0.1.1.md`，前端补齐了当前项目已有核心可以承载的扩展识别：NES/FDS 的 `unf/unif`，3DS 的 `cxi/app`，Genesis 32X 的 `32x`，PSP 的 `iso/cso/pbp/elf/prx`，Dreamcast 的 `cdi`，以及对应的 ROMX `x` 后缀（`unfx/unifx/cxix/appx/32xx/csox/pbpx/elfx/prxx/cdix` 等）。扫描导入配置与 `RomxFrontend::hasSupportedExtension` 已保持一致；metadata 中的 platform 仍是最终权威值，避免仅凭多义扩展误判核心。
+
+验证结果：`build_linux_romx` 的 `romx` 目标和相关源文件语法检查通过；libromx payload、phase 1–8、C/C++ phase 8、reader/writer conformance 仍全部通过。完整 GBAStation 在当前 macOS 主机上仍被上游 Borealis/Yoga 的 AppleClang libc++ 旧平台警告（`-Werror`）阻断，未发现 ROMX 模块编译错误。
