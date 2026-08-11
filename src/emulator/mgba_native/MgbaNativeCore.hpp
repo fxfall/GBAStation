@@ -17,6 +17,8 @@
 
 struct mCore;
 struct mCheatDevice;
+struct romx_payload_mapping;
+typedef struct romx_payload_mapping romx_payload_mapping_t;
 
 namespace beiklive::mgba_native
 {
@@ -117,6 +119,7 @@ private:
 
     beiklive::GameEntry m_gameEntry;
     mCore* m_core = nullptr;
+    romx_payload_mapping_t* m_romxMapping = nullptr;
     bool m_coreInitialized = false;
     bool m_configInitialized = false;
     bool m_ready = false;

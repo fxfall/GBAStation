@@ -1,5 +1,4 @@
 #include "CoreSnes9x.hpp"
-#include "core/PackedRom.hpp"
 #include "core/CoreUtils.hpp"
 
 namespace beiklive::snes9x {
@@ -125,18 +124,9 @@ bool CoreSnes9x::_loadRom(const std::string &romPath)
         m_core.unload();
         return false;
     }
-    std::string packedError;
-    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(
-        romPath, &packedError);
-    if (loadPath.empty())
+    if (!m_core.loadGame(romPath))
     {
-        brls::Logger::error("Packed ROM extraction failed: {} ({})", romPath, packedError);
-        m_core.unload();
-        return false;
-    }
-    if (!m_core.loadGame(loadPath))
-    {
-        brls::Logger::error("retro_load_game() failed for: {}", loadPath);
+        brls::Logger::error("retro_load_game() failed for: {}", romPath);
         m_core.unload();
         return false;
     }

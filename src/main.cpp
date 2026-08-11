@@ -10,10 +10,11 @@
 #include "core/ThreadPool.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
-#include "core/PackedRom.hpp"
+#include "core/rom/PspMeta.hpp"
+#include "core/RomxGameEntryAdapter.hpp"
+#include "core/RomxLaunchSession.hpp"
 #include "core/ExternalCoreSession.hpp"
 #include "ui/utils/BKAudioPlayer.hpp"
-#include "ui/utils/NdsEnvironment.hpp"
 #include "ui/page/StartPage.hpp"
 #include "ui/utils/MyActivity.hpp"
 #include "network/WebService.h"
@@ -53,7 +54,6 @@ bool isDirectLaunchRomType(beiklive::enums::FileType type)
 		   type == FileType::GB_ROM ||
 		   type == FileType::NES_ROM ||
 		   type == FileType::SNES_ROM ||
-		   type == FileType::NDS_ROM ||
 		   type == FileType::GENESIS_ROM;
 }
 
@@ -112,89 +112,36 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 
 	auto entryOpt = beiklive::GameDB->findByPath(romPath);
 	beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
-	bool changed = !entryOpt.has_value();
-
-	const auto packedInfo = beiklive::packed_rom::hasSupportedExtension(romPath)
-		? beiklive::packed_rom::readInfo(romPath)
-		: std::optional<beiklive::packed_rom::Info>{};
-	const int platform = packedInfo ? packedInfo->platform : static_cast<int>(fileType);
 	const std::filesystem::path path(romPath);
 	const std::string stem = path.stem().string().empty() ? "game" : path.stem().string();
 	const std::string fallbackTitle = GET_MAPPING_KEY_STR(stem, stem);
-	const bool firstPackedImport = packedInfo && entry.romxBodySha256.empty() &&
-		entry.romxMetadataJson.empty();
-
-	if (entry.path.empty())
+	beiklive::romx::RomxGameEntryOptions options;
+	options.fallbackPlatform = static_cast<int>(fileType);
+	options.fallbackTitle = fallbackTitle;
+	const auto result = beiklive::romx::RomxGameEntryAdapter::apply(
+		entry, romPath, options);
+	bool changed = !entryOpt.has_value() || result.changed;
+	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
 	{
-		entry.path = romPath;
-		changed = true;
-	}
-	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE) ||
-		(firstPackedImport && entry.platform != platform))
-	{
-		entry.platform = platform;
-		changed = true;
-	}
-	if (entry.core.empty())
-	{
-		entry.core = beiklive::GetDefaultCoreId(platform);
-		changed = true;
-	}
-	entry.core = beiklive::NormalizeCoreId(entry.platform, entry.core);
-	if (entry.title.empty() || (firstPackedImport && entry.title == fallbackTitle))
-	{
-		entry.title = packedInfo && !packedInfo->title.empty()
-			? packedInfo->title : fallbackTitle;
-		changed = true;
-	}
-	if (entry.savePath.empty())
-	{
-		entry.savePath = beiklive::tools::defaultGameSavePath(entry.platform, entry.path);
-		changed = true;
-	}
-	const std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
-		static_cast<beiklive::enums::EmuPlatform>(entry.platform), entry.path);
-	if (entry.logoPath.empty() || (firstPackedImport && entry.logoPath == defaultLogo))
-	{
-		const std::string packedCover = packedInfo
-			? beiklive::packed_rom::extractCover(romPath, *packedInfo, entry.savePath)
-			: std::string{};
-		entry.logoPath = packedCover.empty() ? defaultLogo : packedCover;
-		changed = true;
-	}
-	if (packedInfo)
-	{
-		if (!packedInfo->crc32.empty())
-			entry.crc32 = static_cast<int>(packedInfo->lookupCrc32);
-		entry.developer = packedInfo->developer;
-		entry.releaseDate = packedInfo->releaseDate;
-		entry.genre = packedInfo->genre;
-		entry.region = packedInfo->region;
-		entry.romxBodySha256 = packedInfo->bodySha256;
-		entry.romxMetadataJson = packedInfo->metadataJson;
-		changed = true;
-	}
-	if (beiklive::tools::tryUseNdsInternalIconCover(entry))
-		changed = true;
-	if (entry.screenShotPath.empty())
-	{
-		entry.screenShotPath = beiklive::path::screenshotPath();
-		changed = true;
-	}
-	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
-	{
-		std::string titlePath = entry.path;
-		if (packedInfo)
+		// PSP ROM：入库时提取真实游戏标题与 ICON0 封面（保存到该 ROM 的存档目录）。
+		// TITLE 仅在仍是默认文件名/映射名时覆盖；封面仅当仍是默认资源图时替换。
+		const std::string realTitle = beiklive::psp_meta::ExtractTitle(entry.path);
+		if (!realTitle.empty() && entry.title == GET_MAPPING_KEY_STR(stem, stem))
 		{
-			const std::string extracted = beiklive::packed_rom::prepareRomForLaunch(entry.path);
-			if (!extracted.empty()) titlePath = extracted;
-		}
-		const std::string titleId = beiklive::three_ds::resolveTitleId(
-			entry.threeDsTitleId, titlePath);
-		if (!titleId.empty() && titleId != entry.threeDsTitleId)
-		{
-			entry.threeDsTitleId = titleId;
+			entry.title = realTitle;
 			changed = true;
+		}
+		if (entry.logoPath.empty() ||
+			entry.logoPath == beiklive::tools::getDefaultLogoPath(
+				static_cast<beiklive::enums::EmuPlatform>(entry.platform), entry.path))
+		{
+			const std::string icon = beiklive::psp_meta::ExtractIcon0(
+				entry.path, entry.savePath);
+			if (!icon.empty())
+			{
+				entry.logoPath = icon;
+				changed = true;
+			}
 		}
 	}
 	std::error_code ec;
@@ -216,39 +163,21 @@ bool launchDirectGameActivity(const std::string& romPath)
 	ensureDirectGameDbEntry(romPath, fileType);
 
 #ifdef __SWITCH__
-	if (fileType == beiklive::enums::FileType::NDS_ROM)
-	{
-		if (!beiklive::ensureNdsEnvironmentReady())
-			return false;
-		std::string packedError;
-		const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
-			romPath, &packedError);
-		if (launchPath.empty())
-		{
-			brls::Logger::error("Direct NDS packed ROM extraction failed: {}", packedError);
-			return false;
-		}
-		const std::string nroPath = GET_SETTING_KEY_STR(
-			"nds.externalNro.path", "/GBAStation/core/GBAStationNDSStub.nro");
-		const std::string returnPath = GET_SETTING_KEY_STR(
-			"nds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
-		auto result = beiklive::switch_platform::launchNroOnExit(
-			{nroPath, launchPath, returnPath});
-		if (!result.success)
-		{
-			brls::Logger::error("Direct NDS NRO launch failed: {}", result.message);
-			return false;
-		}
-		brls::Application::quit();
-		return true;
-	}
-
 	const auto launchExternalCore = [&](const char* label, int platform,
 	                                    const char* pathKey, const char* defaultPath,
 	                                    const char* returnKey) {
+		std::string materializeError;
+		beiklive::romx::RomxLaunchSession session(romPath);
+		const std::string launchPath = session.materialize(&materializeError);
+		if (launchPath.empty())
+		{
+			brls::Logger::error("Direct {} ROMX preparation failed: {}", label, materializeError);
+			brls::Application::notify(std::string(label) + L(" ROMX 准备失败：") + materializeError);
+			return false;
+		}
 		if (platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast))
 		{
-			std::string extension = std::filesystem::path(romPath).extension().string();
+			std::string extension = std::filesystem::path(launchPath).extension().string();
 			std::transform(extension.begin(), extension.end(), extension.begin(),
 				[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
 			if (extension == ".zip" || extension == ".7z")
@@ -260,11 +189,11 @@ bool launchDirectGameActivity(const std::string& romPath)
 
 		const std::string nroPath = GET_SETTING_KEY_STR(pathKey, defaultPath);
 		const std::string returnPath = GET_SETTING_KEY_STR(returnKey, "sdmc:/switch/GBAStation.nro");
-		const std::string sessionToken = beiklive::makeExternalCoreSessionToken(romPath);
+		const std::string sessionToken = beiklive::makeExternalCoreSessionToken(launchPath);
 
 		beiklive::switch_platform::NroLaunchRequest request;
 		request.nroPath = nroPath;
-		request.romPath = romPath;
+		request.romPath = launchPath;
 		request.returnNroPath = returnPath;
 		request.extraArgs = {"--gbastation-session", sessionToken};
 		auto result = beiklive::switch_platform::launchNroOnExit(request);
@@ -275,8 +204,8 @@ bool launchDirectGameActivity(const std::string& romPath)
 			return false;
 		}
 
-		if (!beiklive::beginExternalCoreSession(romPath, platform, sessionToken))
-			brls::Logger::error("Direct {} external session tracking could not start for {}", label, romPath);
+		if (!beiklive::beginExternalCoreSession(launchPath, platform, sessionToken))
+			brls::Logger::error("Direct {} external session tracking could not start for {}", label, launchPath);
 
 		brls::Logger::info("Direct {} NRO launch configured: {}", label, result.message);
 		brls::Application::quit();
@@ -285,12 +214,12 @@ bool launchDirectGameActivity(const std::string& romPath)
 
 	if (fileType == beiklive::enums::FileType::THREEDS_ROM)
 	{
-		std::string packedError;
-		const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
-			romPath, &packedError);
+		std::string launchError;
+		beiklive::romx::RomxLaunchSession session(romPath);
+		const std::string launchPath = session.materialize(&launchError);
 		if (launchPath.empty())
 		{
-			brls::Logger::error("Direct 3DS packed ROM extraction failed: {}", packedError);
+			brls::Logger::error("Direct 3DS ROM preparation failed: {}", launchError);
 			return false;
 		}
 		const std::string nroPath = GET_SETTING_KEY_STR(

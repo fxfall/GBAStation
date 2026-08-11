@@ -64,6 +64,7 @@ namespace beiklive
         std::atomic<int>        m_thumbDelayId{0};
         int                     m_thumbReqId   = 0;
         std::string             m_thumbPendingPath;
+        bool                    m_pickerActive = false;
 
         void _requestThumbnail(const std::string& path);
         void _cancelThumbnail();
@@ -82,6 +83,8 @@ namespace beiklive
         void setInitialFocusFilename(const std::string& filename);
         void setDirSelectionMode(bool on);
         void requestClose();
+        void setInteractionDisabled(bool disabled);
+        void setPickerActive(bool active);
 
         std::function<void(beiklive::DirListData)> onFileSelected;
         std::function<void()> onRequestClose;

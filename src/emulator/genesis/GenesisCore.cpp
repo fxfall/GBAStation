@@ -2,7 +2,7 @@
 
 #include "core/Tools.hpp"
 #include "core/common.h"
-#include "core/PackedRom.hpp"
+#include "core/RomxLaunchSession.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -97,8 +97,8 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
     system_hw = 0;
 
     std::string packedError;
-    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(
-        m_gameEntry.path, &packedError);
+    beiklive::romx::RomxLaunchSession session(m_gameEntry.path);
+    const std::string loadPath = session.materialize(&packedError);
     if (loadPath.empty())
     {
         brls::Logger::error("GenesisCore: packed ROM extraction failed: {} ({})",

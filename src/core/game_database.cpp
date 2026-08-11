@@ -73,6 +73,22 @@ namespace beiklive
             return false;
         }
 
+        // 路径索引键：统一分隔符（\ → /），Windows 下再转小写，
+        // 使同一文件在不同写法（分隔符/大小写）下命中同一键。
+        std::string pathKey(const std::string& path)
+        {
+            std::string key = path;
+            for (auto& c : key)
+                if (c == '\\')
+                    c = '/';
+#ifdef _WIN32
+            for (auto& c : key)
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+#endif
+            return key;
+        }
+
+
         std::vector<std::string> fallbackNdsShaderTypes()
         {
             return {"RetroArch_dot"};
@@ -278,11 +294,6 @@ namespace beiklive
             {"cheatPath", sanitizeUtf8(entry.cheatPath)},
             {"overlayPath", sanitizeUtf8(entry.overlayPath)},
             {"shaderPath", sanitizeUtf8(entry.shaderPath)},
-            {"developer", sanitizeUtf8(entry.developer)},
-            {"releaseDate", sanitizeUtf8(entry.releaseDate)},
-            {"genre", entry.genre},
-            {"region", sanitizeUtf8(entry.region)},
-            {"romxBodySha256", sanitizeUtf8(entry.romxBodySha256)},
             {"overlayEnabled", entry.overlayEnabled},
             {"shaderEnabled", entry.shaderEnabled},
             {"displayMode", entry.displayMode},
@@ -306,12 +317,26 @@ namespace beiklive
             {"shaderParaPath", sanitizeUtf8(isNds ? ndsShaderType : entry.shaderParaPath)},
             {"shaderParaNames", isNds ? std::vector<std::string>() : entry.shaderParaNames},
             {"shaderParaValues", isNds ? std::vector<float>() : entry.shaderParaValues}};
+
+        nlohmann::json romx = nlohmann::json::object();
+        if (!entry.developer.empty())
+            romx["developer"] = sanitizeUtf8(entry.developer);
+        if (!entry.releaseDate.empty())
+            romx["releaseDate"] = sanitizeUtf8(entry.releaseDate);
+        if (!entry.genre.empty())
+            romx["genre"] = entry.genre;
+        if (!entry.region.empty())
+            romx["region"] = sanitizeUtf8(entry.region);
+        if (!entry.romxBodySha256.empty())
+            romx["bodySha256"] = sanitizeUtf8(entry.romxBodySha256);
         if (!entry.romxMetadataJson.empty())
         {
             auto metadata = nlohmann::json::parse(entry.romxMetadataJson, nullptr, false);
             if (!metadata.is_discarded() && metadata.is_object())
-                j["romxMetadata"] = std::move(metadata);
+                romx["metadata"] = std::move(metadata);
         }
+        if (!romx.empty())
+            j["romx"] = std::move(romx);
     }
 
     void from_json(const nlohmann::json &j, GameEntry &entry)
@@ -333,14 +358,39 @@ namespace beiklive
         entry.cheatPath = j.value("cheatPath", "");
         entry.overlayPath = j.value("overlayPath", "");
         entry.shaderPath = j.value("shaderPath", "");
-        entry.developer = j.value("developer", "");
-        entry.releaseDate = j.value("releaseDate", "");
-        entry.genre = j.value("genre", std::vector<std::string>());
-        entry.region = j.value("region", "");
-        entry.romxBodySha256 = j.value("romxBodySha256", "");
-        const auto metadata = j.find("romxMetadata");
-        entry.romxMetadataJson = metadata != j.end() && metadata->is_object()
-            ? metadata->dump() : std::string{};
+        const nlohmann::json* romx = nullptr;
+        const auto romxValue = j.find("romx");
+        if (romxValue != j.end() && romxValue->is_object())
+            romx = &*romxValue;
+        entry.developer = romx
+            ? romx->value("developer", j.value("developer", ""))
+            : j.value("developer", "");
+        entry.releaseDate = romx
+            ? romx->value("releaseDate", j.value("releaseDate", ""))
+            : j.value("releaseDate", "");
+        entry.genre = romx
+            ? romx->value("genre", j.value("genre", std::vector<std::string>()))
+            : j.value("genre", std::vector<std::string>());
+        entry.region = romx
+            ? romx->value("region", j.value("region", ""))
+            : j.value("region", "");
+        entry.romxBodySha256 = romx
+            ? romx->value("bodySha256", j.value("romxBodySha256", ""))
+            : j.value("romxBodySha256", "");
+        const nlohmann::json* metadata = nullptr;
+        if (romx)
+        {
+            const auto value = romx->find("metadata");
+            if (value != romx->end() && value->is_object())
+                metadata = &*value;
+        }
+        if (!metadata)
+        {
+            const auto value = j.find("romxMetadata");
+            if (value != j.end() && value->is_object())
+                metadata = &*value;
+        }
+        entry.romxMetadataJson = metadata ? metadata->dump() : std::string{};
         entry.overlayEnabled = j.value("overlayEnabled", false);
         entry.shaderEnabled = j.value("shaderEnabled", false);
         entry.displayMode = j.value("displayMode", 0);
@@ -832,7 +882,7 @@ namespace beiklive
     // ==================== 私有实现（无锁） ====================
     void GameDatabase::doUpsertByPath(const GameEntry &entry)
     {
-        auto it = pathIndex_.find(entry.path);
+        auto it = pathIndex_.find(pathKey(entry.path));
         if (it != pathIndex_.end())
         {
             int oldCrc32 = data_[it->second].crc32;
@@ -851,7 +901,7 @@ namespace beiklive
             size_t idx = data_.size() - 1;
             if (entry.crc32 != 0)
                 crc32Index_[entry.crc32] = idx;
-            pathIndex_[entry.path] = idx;
+            pathIndex_[pathKey(entry.path)] = idx;
         }
     }
 
@@ -867,8 +917,8 @@ namespace beiklive
             data_[it->second] = entry;
             if (oldPath != entry.path)
             {
-                pathIndex_.erase(oldPath);
-                pathIndex_[entry.path] = it->second;
+                pathIndex_.erase(pathKey(oldPath));
+                pathIndex_[pathKey(entry.path)] = it->second;
             }
         }
         else
@@ -877,7 +927,7 @@ namespace beiklive
             size_t idx = data_.size() - 1;
             if (entry.crc32 != 0)
                 crc32Index_[entry.crc32] = idx;
-            pathIndex_[entry.path] = idx;
+            pathIndex_[pathKey(entry.path)] = idx;
         }
     }
 
@@ -887,7 +937,7 @@ namespace beiklive
         if (it == crc32Index_.end())
             return false;
         size_t idx = it->second;
-        pathIndex_.erase(data_[idx].path);
+        pathIndex_.erase(pathKey(data_[idx].path));
         crc32Index_.erase(it);
         if (idx != data_.size() - 1)
         {
@@ -895,7 +945,7 @@ namespace beiklive
             const auto &moved = data_[idx];
             if (moved.crc32 != 0)
                 crc32Index_[moved.crc32] = idx;
-            pathIndex_[moved.path] = idx;
+            pathIndex_[pathKey(moved.path)] = idx;
         }
         data_.pop_back();
         return true;
@@ -903,7 +953,7 @@ namespace beiklive
 
     bool GameDatabase::doRemoveByPath(const std::string &path)
     {
-        auto it = pathIndex_.find(path);
+        auto it = pathIndex_.find(pathKey(path));
         if (it == pathIndex_.end())
             return false;
         size_t idx = it->second;
@@ -916,7 +966,7 @@ namespace beiklive
             const auto &moved = data_[idx];
             if (moved.crc32 != 0)
                 crc32Index_[moved.crc32] = idx;
-            pathIndex_[moved.path] = idx;
+            pathIndex_[pathKey(moved.path)] = idx;
         }
         data_.pop_back();
         return true;
@@ -932,7 +982,7 @@ namespace beiklive
 
     std::optional<GameEntry> GameDatabase::doFindByPath(const std::string &path) const
     {
-        auto it = pathIndex_.find(path);
+        auto it = pathIndex_.find(pathKey(path));
         if (it == pathIndex_.end())
             return std::nullopt;
         return data_[it->second];

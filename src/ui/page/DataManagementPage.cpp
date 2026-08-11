@@ -6,8 +6,11 @@
 #include "ui/utils/GradientFocus.hpp"
 #include "ui/utils/MaterialIcons.hpp"
 #include "ui/widget/DetailCell.hpp"
-#include "core/PackedRom.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
+#include "core/rom/PspMeta.hpp"
+#include "core/rom/ThreeDsIcon.hpp"
+#include "core/RomxGameEntryAdapter.hpp"
+#include "core/RomxLaunchSession.hpp"
 #include "core/Tools.hpp"
 #include "network/WebService.h"
 #include "third_party/qrcodegen/qrcodegen.hpp"
@@ -32,7 +35,6 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <optional>
 #include <sstream>
 #include <unordered_set>
 
@@ -45,6 +47,7 @@ struct ImportItem
 {
     std::string romPath;
     std::string label;
+    std::string dbName;
 };
 
 struct ImportSharedConfig
@@ -251,9 +254,117 @@ std::string stemFromPath(const std::string& path)
     return fs::path(path).stem().string();
 }
 
-std::string parentPath(const std::string& path)
+/* 缩略图文件名清洗：与 RetroArch gfx_thumbnail_fill_content_img() 一致，
+ * 将 No-Intro 非法字符替换为下划线 */
+std::string scrubThumbnailName(std::string name)
 {
-    return fs::path(path).parent_path().string();
+    for (auto& c : name)
+    {
+        if (c == '&' || c == '*' || c == '/' || c == ':' ||
+            c == '"' || c == '<' || c == '>' || c == '?' ||
+            c == '\\' || c == '|')
+            c = '_';
+    }
+    return name;
+}
+
+/* 由 label 生成缩略图文件名；shorten 为 true 时截取到第一个 " (" 之前
+ * （与 RetroArch 的 content_img_short 逻辑一致） */
+std::string thumbnailNameFromLabel(const std::string& label, bool shorten)
+{
+    std::string name = label;
+    if (shorten)
+    {
+        const std::size_t pos = label.find(" (");
+        if (pos == std::string::npos || pos == 0)
+            return "";
+        name = label.substr(0, pos);
+    }
+    return scrubThumbnailName(name) + ".png";
+}
+
+/* 缩略图一级目录（系统名）：优先条目 db_name，其次 lpl 文件名，
+ * 最后回退 ROM 所在目录名（对齐 RetroArch 规则） */
+std::string thumbnailSystemDir(const std::string& dbName,
+                               const std::string& lplStem,
+                               const std::string& romPath)
+{
+    if (!dbName.empty())
+    {
+        /* MAME 缩略图仓库只保留一个 MAME 目录 */
+        if (dbName.compare(0, 4, "MAME") == 0)
+            return "MAME";
+        const std::size_t pos = dbName.find('|');
+        return (pos == std::string::npos) ? dbName : dbName.substr(0, pos);
+    }
+    if (!lplStem.empty())
+        return lplStem;
+    return fs::path(romPath).parent_path().filename().string();
+}
+
+/* 从 ROM 路径推导缩略图根目录：大小写不敏感地整路径段匹配 "roms"，
+ * 替换为 "thumbnails"（如 ...\retroarch\roms\<sys>\x.nes →
+ * ...\retroarch\thumbnails） */
+std::string thumbnailRootFromRoms(const std::string& romPath)
+{
+    std::string lower = romPath;
+    for (auto& c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    std::size_t pos = 0;
+    while ((pos = lower.find("roms", pos)) != std::string::npos)
+    {
+        const bool startOk = (pos == 0) || lower[pos - 1] == '/' || lower[pos - 1] == '\\';
+        const std::size_t end = pos + 4;
+        const bool endOk = (end >= lower.size()) || lower[end] == '/' || lower[end] == '\\';
+        if (startOk && endOk)
+            return romPath.substr(0, pos) + "thumbnails";
+        pos = end;
+    }
+    return "";
+}
+
+/* 匹配 RetroArch 缩略图（对齐 gfx_thumbnail_path.c 的匹配规则）：
+ * 根目录候选（lpl 推导 → roms 推导）→ 系统目录 → 名称三级回退
+ * （文件名 → label → 短label），首个真实存在的文件即为命中；
+ * 全部未命中返回空串 */
+std::string findRetroArchThumbnail(const std::string& dbName,
+                                   const std::string& lplStem,
+                                   const std::string& lplThumbRoot,
+                                   const std::string& romPath,
+                                   const std::string& romStem,
+                                   const std::string& label)
+{
+    const std::string systemDir = thumbnailSystemDir(dbName, lplStem, romPath);
+    if (systemDir.empty())
+        return "";
+
+    std::vector<std::string> roots;
+    if (!lplThumbRoot.empty())
+        roots.push_back(lplThumbRoot);
+    const std::string romsRoot = thumbnailRootFromRoms(romPath);
+    if (!romsRoot.empty() && romsRoot != lplThumbRoot)
+        roots.push_back(romsRoot);
+
+    std::string names[3];
+    names[0] = scrubThumbnailName(romStem) + ".png";
+    names[1] = thumbnailNameFromLabel(label, false);
+    names[2] = thumbnailNameFromLabel(label, true);
+
+    for (const auto& root : roots)
+    {
+        const fs::path base = fs::path(root) / systemDir / "Named_Snaps";
+        for (const auto& name : names)
+        {
+            if (name.empty())
+                continue;
+            const std::string candidate = (base / name).string();
+            std::error_code ec;
+            if (fs::exists(candidate, ec) && !ec)
+                return candidate;
+        }
+    }
+    return "";
 }
 
 std::string normalizeExtension(std::string ext)
@@ -265,39 +376,6 @@ std::string normalizeExtension(std::string ext)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
     return ext;
-}
-
-int platformFromExtension(const std::string& ext)
-{
-    if (ext == "gba") return static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA);
-    if (ext == "gbc") return static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC);
-    if (ext == "gb") return static_cast<int>(beiklive::enums::EmuPlatform::EmuGB);
-    if (ext == "nes" || ext == "fds") return static_cast<int>(beiklive::enums::EmuPlatform::EmuNES);
-    if (ext == "sfc" || ext == "smc") return static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES);
-    if (ext == "nds") return static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS);
-    if (ext == "cia" || ext == "cci" || ext == "3ds")
-        return static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS);
-    if (ext == "md" || ext == "gen" || ext == "bin" || ext == "smd")
-        return static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis);
-    if (ext == "zip" || ext == "7z")
-        return static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade);
-    if (ext == "cdi" || ext == "gdi" || ext == "chd" || ext == "cue")
-        return static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast);
-    if (ext == "iso" || ext == "cso")
-        return static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP);
-    return -1;
-}
-
-int platformFromExistingPath(const fs::path& path)
-{
-    int detected = beiklive::tools::detectGamePlatform(path);
-    if (detected >= 0)
-        return detected;
-
-    std::string ext = normalizeExtension(path.extension().string());
-    if (ext == "zip" || ext == "7z")
-        return -1;
-    return platformFromExtension(ext);
 }
 
 std::string overlayKeyForPlatform(int platform)
@@ -519,24 +597,6 @@ bool clearDirectoryContents(const fs::path& dir)
     return ok;
 }
 
-int findUnexpectedLplPlatform(const json& items, int expectedPlatform)
-{
-    for (const auto& item : items)
-    {
-        std::string romPath = item.value("path", "");
-        if (romPath.empty())
-            continue;
-
-        fs::path path(romPath);
-        int detectedPlatform = fs::exists(path) ? platformFromExistingPath(path) :
-            platformFromExtension(normalizeExtension(path.extension().string()));
-        if (detectedPlatform >= 0 && detectedPlatform != expectedPlatform)
-            return detectedPlatform;
-    }
-
-    return -1;
-}
-
 } // namespace
 
 namespace beiklive
@@ -673,6 +733,20 @@ public:
         m_focusIndices.assign(m_tabs.size(), 0);
         m_savedScroll.assign(m_tabs.size(), 0.f);
         m_lastFrameTime = std::chrono::steady_clock::now();
+    }
+
+    /// 替换某个标签页的条目列表并重绘（用于扫描路径选择后的刷新）。
+    void UpdateTabItems(size_t tabIndex, std::vector<Item> items)
+    {
+        if (tabIndex >= m_tabs.size())
+            return;
+        m_tabs[tabIndex].items = std::move(items);
+        if (m_focusIndices.size() <= tabIndex)
+            return;
+        const int count = static_cast<int>(m_tabs[tabIndex].items.size());
+        m_focusIndices[tabIndex] = std::max(0, std::min(m_focusIndices[tabIndex], count - 1));
+        m_savedScroll[tabIndex] = 0.f;
+        invalidate();
     }
 
     void frame(brls::FrameContext* ctx) override
@@ -1111,7 +1185,8 @@ private:
         const float titleY = m_itemHeight > 80.f ? r.y + r.h * 0.39f
                                                  : r.y + r.h * 0.43f;
         nvgText(vg, textX, titleY, item.title.c_str(), nullptr);
-        if (m_itemHeight > 68.f)
+        // 62px 行高（条目较多的扫描页）也显示描述行（如机型扫描路径）。
+        if (m_itemHeight > 52.f)
         {
             nvgFontSize(vg, 14.f);
             nvgFillColor(vg, nvgRGBA(205, 212, 223, focused ? 215 : 165));
@@ -1280,7 +1355,6 @@ DataManagementPage::DataManagementPage()
     this->showFooter(false);
     this->setFocusable(false);
     init();
-    setupProgressOverlay();
     brls::sync([this]() {
         if (m_mainCanvas)
             brls::Application::giveFocus(m_mainCanvas);
@@ -1298,117 +1372,33 @@ void DataManagementPage::draw(
     brls::Style style, brls::FrameContext* ctx)
 {
     beiklive::Box::draw(vg, x, y, w, h, style, ctx);
-
-    if (!m_progressOverlay)
-        return;
-
-    if (m_importing.load(std::memory_order_acquire))
-    {
-        int cur = m_progress.load(std::memory_order_acquire);
-        int tot = m_total.load(std::memory_order_acquire);
-        float frac = (tot > 0) ? static_cast<float>(cur) / static_cast<float>(tot) : 0.f;
-
-        {
-            std::lock_guard<std::mutex> lock(m_statusMutex);
-            m_progressNameLabel->setText(m_progressName.empty() ? " " : m_progressName);
-        }
-
-        m_progressBar->setWidth(400.f * frac);
-        m_progressCountLabel->setText(std::to_string(cur) + " / " + std::to_string(tot));
-
-        if (m_importError.load(std::memory_order_acquire))
-        {
-            m_importing.store(false, std::memory_order_release);
-            m_progressTitleLabel->setText(
-                m_progressTask == ProgressTask::Cleanup ? L("处理失败") : L("导入失败"));
-            {
-                std::lock_guard<std::mutex> lock(m_statusMutex);
-                std::string err = m_errorMsg.empty() ? L("未知错误") : m_errorMsg;
-                if (err.size() > 60)
-                    err = err.substr(0, 60) + "...";
-                m_progressCountLabel->setText(err);
-            }
-            hideProgressOverlay();
-
-            if (!m_completionShown)
-            {
-                m_completionShown = true;
-                std::string err;
-                {
-                    std::lock_guard<std::mutex> lock(m_statusMutex);
-                    err = m_errorMsg.empty() ? L("未知错误") : m_errorMsg;
-                }
-                rememberFocusBeforeModal();
-                auto* dialog = new brls::Dialog(
-                    std::string(m_progressTask == ProgressTask::Cleanup ? L("处理失败\n\n")
-                                                                       : L("导入失败\n\n")) +
-                    err);
-                dialog->addButton("确认", [this]() { restoreFocusAfterModal(); });
-                dialog->open();
-            }
-        }
-        else if (m_importDone.load(std::memory_order_acquire))
-        {
-            m_importing.store(false, std::memory_order_release);
-            finishWorker();
-            if (beiklive::GameDB && m_progressTask == ProgressTask::Import)
-                beiklive::GameDB->flush();
-
-            int total = m_total.load(std::memory_order_acquire);
-            m_progressBar->setWidth(400.f);
-            m_progressBar->setColor(nvgRGB(129, 199, 132));
-            if (m_progressTask == ProgressTask::Cleanup)
-            {
-                int removed = m_cleanupRemoved.load(std::memory_order_acquire);
-                m_progressTitleLabel->setText(L("处理完成"));
-                m_progressCountLabel->setText(
-                    L("已扫描 ") + std::to_string(total) + L(" 个游戏，移除 ") +
-                    std::to_string(removed) + L(" 个无效记录"));
-            }
-            else
-            {
-                int skipped = m_importSkipped.load(std::memory_order_acquire);
-                m_progressTitleLabel->setText(L("导入完成"));
-                if (skipped > 0)
-                    m_progressCountLabel->setText(
-                        L("共处理 ") + std::to_string(total) + L(" 个游戏，跳过 ") +
-                        std::to_string(skipped) + L(" 个已有游戏"));
-                else
-                    m_progressCountLabel->setText(L("共处理 ") + std::to_string(total) + L(" 个游戏"));
-            }
-            hideProgressOverlay();
-
-            if (!m_completionShown)
-            {
-                m_completionShown = true;
-                rememberFocusBeforeModal();
-                std::string dialogText;
-                if (m_progressTask == ProgressTask::Cleanup)
-                {
-                    int removed = m_cleanupRemoved.load(std::memory_order_acquire);
-                    dialogText = removed > 0
-                        ? L("处理完成\n\n已移除 ") + std::to_string(removed) + L(" 个无效游戏记录")
-                        : L("处理完成\n\n没有发现无效游戏记录");
-                }
-                else
-                {
-                    int skipped = m_importSkipped.load(std::memory_order_acquire);
-                    dialogText = skipped > 0
-                        ? L("导入完成\n\n共处理 ") + std::to_string(total) +
-                              L(" 个游戏，跳过 ") + std::to_string(skipped) + L(" 个已有游戏")
-                        : L("导入完成\n\n共处理 ") + std::to_string(total) + L(" 个游戏");
-                }
-                auto* dialog = new brls::Dialog(dialogText);
-                dialog->addButton("确认", [this]() { restoreFocusAfterModal(); });
-                dialog->open();
-            }
-        }
-        else
-        {
-            invalidate();
-        }
-    }
 }
+
+// 扫描机型配置：显示名 / 配置键 / 扩展名 / 图标 / 平台枚举。
+// 顺序与 DataManagementPage 的 m_scanPath* 成员一一对应。
+struct ScanPlatformConfig
+{
+    std::string name;
+    const char* settingKey;
+    const std::vector<const char*> exts;
+    char32_t icon;
+    int platform;
+};
+
+const ScanPlatformConfig kScanPlatforms[] = {
+    {L("FC/NES"), beiklive::SettingKey::KEY_SCAN_PATH_NES,    {"nes", "fds", "nesx", "fdsx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuNES)},
+    {L("SFC"),    beiklive::SettingKey::KEY_SCAN_PATH_SNES,   {"sfc", "smc", "sfcx", "smcx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES)},
+    {L("GB"),     beiklive::SettingKey::KEY_SCAN_PATH_GB,     {"gb", "gbx"},         material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGB)},
+    {L("GBC"),    beiklive::SettingKey::KEY_SCAN_PATH_GBC,    {"gbc", "gbcx"},        material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC)},
+    {L("GBA"),    beiklive::SettingKey::KEY_SCAN_PATH_GBA,    {"gba", "gbax"},        material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA)},
+    {L("NDS"),    beiklive::SettingKey::KEY_SCAN_PATH_NDS,    {"nds", "ndsx"},        material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS)},
+    {L("3DS"),    beiklive::SettingKey::KEY_SCAN_PATH_3DS,    {"cci", "3ds", "cia", "ccix", "3dsx", "ciax"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS)},
+    {L("Arcade"), beiklive::SettingKey::KEY_SCAN_PATH_ARCADE, {"zip", "7z"},  material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade)},
+    {L("DC"),     beiklive::SettingKey::KEY_SCAN_PATH_DC,     {"cdi", "gdi", "chd", "isox", "chdx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast)},
+    {L("MD"),     beiklive::SettingKey::KEY_SCAN_PATH_GENESIS,{"md", "gen", "bin", "smd", "mdx", "genx", "binx", "smdx"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis)},
+    {L("PSP"),    beiklive::SettingKey::KEY_SCAN_PATH_PSP,    {"iso", "cso", "pbp", "isox"}, material::MEMORY, static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)},
+};
+constexpr size_t kScanPlatformCount = sizeof(kScanPlatforms) / sizeof(kScanPlatforms[0]);
 
 void DataManagementPage::init()
 {
@@ -1456,19 +1446,32 @@ void DataManagementPage::init()
     }
     tabs.push_back(std::move(bundle));
 
+    // 从配置载入各机型的扫描路径。
+    m_scanPathNES    = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_NES, "");
+    m_scanPathSNES   = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_SNES, "");
+    m_scanPathGB     = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_GB, "");
+    m_scanPathGBC    = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_GBC, "");
+    m_scanPathGBA    = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_GBA, "");
+    m_scanPathNDS    = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_NDS, "");
+    m_scanPath3DS    = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_3DS, "");
+    m_scanPathArcade = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_ARCADE, "");
+    m_scanPathDC     = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_DC, "");
+    m_scanPathGenesis= GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_GENESIS, "");
+    m_scanPathPSP    = GET_SETTING_KEY_STR(beiklive::SettingKey::KEY_SCAN_PATH_PSP, "");
+
     Canvas::Tab scan;
     scan.title = L("扫描导入");
-    scan.summary = L("扫描指定目录中的 ROM 文件，根据扩展名识别平台并批量加入游戏库。");
-    scan.detail = L("先设置扫描范围和平台开关，再选择目录。关闭全部平台时不会找到可导入的游戏。");
+    scan.summary = L("为每个机型设置 ROM 扫描目录，点击开始扫描批量导入游戏库。");
+    scan.detail = L("NDS/3DS/PSP 入库时始终提取内置图标与标题。");
     scan.icon = material::SEARCH;
     scan.items.push_back({
-        L("选择 ROM 目录并开始扫描"),
-        L("打开目录浏览器，确认后在后台完成扫描和导入"),
-        L("选择目录"),
+        L("开始扫描"),
+        L("扫描所有已配置机型的目录并导入新游戏"),
+        L("开始"),
         material::SEARCH,
         [this]() {
             if (!m_importing.load(std::memory_order_acquire))
-                selectRomDir();
+                startScanAll();
         },
         nullptr,
         false,
@@ -1477,27 +1480,24 @@ void DataManagementPage::init()
                           material::STORAGE, {}, &m_autoSubDir, false});
     scan.items.push_back({L("读取映射名称"), L("存在名称映射时使用中文或规范化标题"), "",
                           material::EDIT, {}, &m_useNameMapping, false});
-    scan.items.push_back({L("扫描 GBA 游戏"), L("识别 .gba 文件"), "",
-                          material::MEMORY, {}, &m_scanGBA, false});
-    scan.items.push_back({L("扫描 GBC 游戏"), L("识别 .gbc 文件"), "",
-                          material::MEMORY, {}, &m_scanGBC, false});
-    scan.items.push_back({L("扫描 GB 游戏"), L("识别 .gb 文件"), "",
-                          material::MEMORY, {}, &m_scanGB, false});
-    scan.items.push_back({L("扫描 FC 游戏"), L("识别 .nes 与 .fds 文件"), "",
-                          material::MEMORY, {}, &m_scanNES, false});
-    scan.items.push_back({L("扫描 SFC 游戏"), L("识别 .sfc 与 .smc 文件"), "",
-                          material::MEMORY, {}, &m_scanSNES, false});
-    scan.items.push_back({L("扫描 NDS 游戏"), L("识别 .nds 文件"), "",
-                          material::MEMORY, {}, &m_scanNDS, false});
-    scan.items.push_back({L("扫描 3DS 游戏"), L("识别 .cia、.cci 与 .3ds 文件"), "",
-                          material::MEMORY, {}, &m_scan3DS, false});
-    scan.items.push_back({L("扫描 MD 游戏"), L("识别 .md、.gen、.bin 与 .smd 文件"), "",
-                          material::MEMORY, {}, &m_scanGenesis, false});
-    scan.items.push_back({L("扫描 Arcade街机 游戏"), L("识别 .zip 与 .7z 文件"), "",
-                          material::MEMORY, {}, &m_scanArcade, false});
-    scan.items.push_back({L("扫描 DC 游戏"), L("识别 .cdi、.gdi 与 .chd 文件"), "",
-                          material::MEMORY, {}, &m_scanDreamcast, false});
+    for (size_t i = 0; i < kScanPlatformCount; ++i) {
+        const std::string path = scanPathFor(static_cast<int>(i));
+        scan.items.push_back({
+            kScanPlatforms[i].name,
+            path.empty() ? L("未设置，点击选择扫描目录") : path,
+            L("选择目录"),
+            kScanPlatforms[i].icon,
+            [this, i]() {
+                if (!m_importing.load(std::memory_order_acquire))
+                    pickScanDir(static_cast<int>(i));
+            },
+            nullptr,
+            false,
+        });
+    }
     tabs.push_back(std::move(scan));
+    m_scanTabIndex = static_cast<int>(tabs.size()) - 1;
+
 
     Canvas::Tab process;
     process.title = L("数据处理");
@@ -1546,107 +1546,201 @@ void DataManagementPage::init()
         beiklive::popActivity(this);
     });
     m_bundleDefaultFocus = m_mainCanvas;
-    m_scanDefaultFocus = m_mainCanvas;
     m_processDefaultFocus = m_mainCanvas;
     this->getContentBox()->addView(m_mainCanvas);
 }
 
-void DataManagementPage::setupProgressOverlay()
+// 进度弹窗：Dialog + 自定义内容（标题 / 当前项 / 计数 / 进度条）。
+// draw 轮询 DataManagementPage 的原子进度状态，完成后自动关闭；
+// 出错时保留错误信息，由用户按键关闭。
+// 进度弹窗：Dialog + 自定义内容（标题 / 当前项 / 计数 / 进度条）。
+// draw 轮询 DataManagementPage 的原子进度状态，完成后自动关闭；
+// 出错时保留错误信息，由用户按键关闭。
+// 进度弹窗：Dialog + 自定义内容（标题 / 当前项 / 计数 / 进度条）。
+// draw 轮询 DataManagementPage 的原子进度状态，完成后自动关闭；
+// 出错时保留错误信息，由用户按键关闭。
+class ScanProgressDialogView final : public brls::Box
 {
-    m_progressOverlay = new brls::Box(brls::Axis::COLUMN);
-    m_progressOverlay->setVisibility(brls::Visibility::GONE);
-    m_progressOverlay->setFocusable(true);
-    m_progressOverlay->setHideHighlight(true);
-    m_progressOverlay->setPositionType(brls::PositionType::ABSOLUTE);
-    m_progressOverlay->setPositionTop(0);
-    m_progressOverlay->setPositionLeft(0);
-    m_progressOverlay->setWidthPercentage(100.f);
-    m_progressOverlay->setHeightPercentage(100.f);
-    m_progressOverlay->setBackgroundColor(nvgRGBA(0, 0, 0, 140));
-    m_progressOverlay->setJustifyContent(brls::JustifyContent::CENTER);
-    m_progressOverlay->setAlignItems(brls::AlignItems::CENTER);
-    m_progressOverlay->registerAction(L("返回"), brls::BUTTON_B, [](brls::View*) { 
-        return true; 
-    
-    });
+public:
+    explicit ScanProgressDialogView(DataManagementPage* page)
+        : brls::Box(brls::Axis::COLUMN), m_page(page)
+    {
+        setFocusable(false);
+        setWidth(560.f);
+        setPadding(20.f, 10.f, 14.f, 10.f);
+        setAlignItems(brls::AlignItems::CENTER);
 
-    auto* card = new brls::Box(brls::Axis::COLUMN);
-    card->setFocusable(false);
-    card->setCornerRadius(18.f);
-    card->setBackgroundColor(nvgRGBA(30, 30, 35, 235));
-    card->setShadowType(brls::ShadowType::GENERIC);
-    card->setShadowVisibility(true);
-    card->setPadding(34.f, 44.f, 34.f, 44.f);
-    card->setWidth(560.f);
-    card->setAlignItems(brls::AlignItems::CENTER);
+        m_titleLabel = new brls::Label();
+        m_titleLabel->setFontSize(24.f);
+        m_titleLabel->setTextColor(GET_THEME_COLOR("brls/text"));
+        m_titleLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+        m_titleLabel->setMarginBottom(14.f);
+        m_titleLabel->setFocusable(false);
+        addView(m_titleLabel);
 
-    m_progressTitleLabel = new brls::Label();
-    m_progressTitleLabel->setText(L("准备就绪"));
-    m_progressTitleLabel->setFontSize(24.f);
-    m_progressTitleLabel->setTextColor(GET_THEME_COLOR("brls/text"));
-    m_progressTitleLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    m_progressTitleLabel->setMarginBottom(16.f);
-    m_progressTitleLabel->setFocusable(false);
-    card->addView(m_progressTitleLabel);
+        m_nameLabel = new brls::Label();
+        m_nameLabel->setText(" ");
+        m_nameLabel->setFontSize(22.f);
+        m_nameLabel->setTextColor(GET_THEME_COLOR("brls/text"));
+        m_nameLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+        m_nameLabel->setMarginBottom(12.f);
+        m_nameLabel->setFocusable(false);
+        addView(m_nameLabel);
 
-    m_progressNameLabel = new brls::Label();
-    m_progressNameLabel->setText(" ");
-    m_progressNameLabel->setFontSize(28.f);
-    m_progressNameLabel->setTextColor(GET_THEME_COLOR("brls/text"));
-    m_progressNameLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    m_progressNameLabel->setMarginBottom(16.f);
-    m_progressNameLabel->setFocusable(false);
-    card->addView(m_progressNameLabel);
+        m_countLabel = new brls::Label();
+        m_countLabel->setText("0 / 0");
+        m_countLabel->setFontSize(16.f);
+        m_countLabel->setTextColor(GET_THEME_COLOR("brls/text_disabled"));
+        m_countLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+        m_countLabel->setMarginBottom(12.f);
+        m_countLabel->setFocusable(false);
+        addView(m_countLabel);
 
-    m_progressCountLabel = new brls::Label();
-    m_progressCountLabel->setText("0 / 0");
-    m_progressCountLabel->setFontSize(18.f);
-    m_progressCountLabel->setTextColor(GET_THEME_COLOR("brls/text_disabled"));
-    m_progressCountLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
-    m_progressCountLabel->setMarginBottom(18.f);
-    m_progressCountLabel->setFocusable(false);
-    card->addView(m_progressCountLabel);
+        auto* track = new brls::Box(brls::Axis::ROW);
+        track->setWidth(480.f);
+        track->setHeight(8.f);
+        track->setCornerRadius(4.f);
+        track->setBackgroundColor(nvgRGBA(255, 255, 255, 30));
+        track->setFocusable(false);
+        m_bar = new brls::Rectangle(nvgRGB(79, 193, 255));
+        m_bar->setWidth(0.f);
+        m_bar->setHeight(8.f);
+        m_bar->setCornerRadius(4.f);
+        m_bar->setFocusable(false);
+        track->addView(m_bar);
+        addView(track);
 
-    auto* progressTrack = new brls::Box(brls::Axis::ROW);
-    progressTrack->setWidth(400.f);
-    progressTrack->setHeight(8.f);
-    progressTrack->setCornerRadius(4.f);
-    progressTrack->setBackgroundColor(nvgRGBA(255, 255, 255, 30));
-    progressTrack->setFocusable(false);
+        m_titleLabel->setText(
+            m_page->m_progressTask == DataManagementPage::ProgressTask::Cleanup
+                ? L("正在扫描无效游戏，请勿操作")
+                : L("正在导入，请勿操作"));
+    }
 
-    m_progressBar = new brls::Rectangle(nvgRGB(79, 193, 255));
-    m_progressBar->setWidth(0.f);
-    m_progressBar->setHeight(8.f);
-    m_progressBar->setCornerRadius(4.f);
-    m_progressBar->setFocusable(false);
-    progressTrack->addView(m_progressBar);
+    void draw(NVGcontext* vg, float x, float y, float w, float h,
+              brls::Style style, brls::FrameContext* ctx) override
+    {
+        brls::Box::draw(vg, x, y, w, h, style, ctx);
+        DataManagementPage* p = m_page;
+        if (!p || m_closed)
+            return;
 
-    card->addView(progressTrack);
-    m_progressOverlay->addView(card);
-    this->addView(m_progressOverlay);
+        if (p->m_importError.load(std::memory_order_acquire))
+        {
+            p->m_importing.store(false, std::memory_order_release);
+            m_titleLabel->setText(
+                p->m_progressTask == DataManagementPage::ProgressTask::Cleanup
+                    ? L("处理失败") : L("导入失败"));
+            std::string err;
+            {
+                std::lock_guard<std::mutex> lock(p->m_statusMutex);
+                err = p->m_errorMsg.empty() ? L("未知错误") : p->m_errorMsg;
+            }
+            if (err.size() > 120)
+                err = err.substr(0, 120) + "...";
+            m_countLabel->setText(err);
+            invalidate();
+            return;
+        }
+
+        if (!p->m_importDone.load(std::memory_order_acquire))
+        {
+            int cur = p->m_progress.load(std::memory_order_acquire);
+            int tot = p->m_total.load(std::memory_order_acquire);
+            float frac = (tot > 0) ? static_cast<float>(cur) / static_cast<float>(tot) : 0.f;
+            {
+                std::lock_guard<std::mutex> lock(p->m_statusMutex);
+                m_nameLabel->setText(p->m_progressName.empty() ? " " : p->m_progressName);
+            }
+            m_bar->setWidth(480.f * frac);
+            m_countLabel->setText(std::to_string(cur) + " / " + std::to_string(tot));
+            invalidate();
+            return;
+        }
+
+        // 完成
+        p->m_importing.store(false, std::memory_order_release);
+        p->finishWorker();
+        if (beiklive::GameDB && p->m_progressTask == DataManagementPage::ProgressTask::Import)
+            beiklive::GameDB->flush();
+        int total = p->m_total.load(std::memory_order_acquire);
+        m_bar->setWidth(480.f);
+        m_bar->setColor(nvgRGB(129, 199, 132));
+        std::string summary;
+        if (p->m_progressTask == DataManagementPage::ProgressTask::Cleanup)
+        {
+            int removed = p->m_cleanupRemoved.load(std::memory_order_acquire);
+            m_titleLabel->setText(L("处理完成"));
+            summary = removed > 0
+                ? L("已移除 ") + std::to_string(removed) + L(" 个无效游戏记录")
+                : L("没有发现无效游戏记录");
+        }
+        else
+        {
+            int skipped = p->m_importSkipped.load(std::memory_order_acquire);
+            m_titleLabel->setText(L("导入完成"));
+            summary = skipped > 0
+                ? L("共处理 ") + std::to_string(total) + L(" 个游戏，跳过 ")
+                      + std::to_string(skipped) + L(" 个已有游戏")
+                : L("共处理 ") + std::to_string(total) + L(" 个游戏");
+        }
+        m_countLabel->setText(summary);
+        // 扫描时部分平台目录不可读：完成后一次性提示
+        if (p->m_progressTask == DataManagementPage::ProgressTask::Import &&
+            !p->m_completionShown)
+        {
+            std::string errMsg;
+            {
+                std::lock_guard<std::mutex> lock(p->m_statusMutex);
+                errMsg = p->m_errorMsg;
+            }
+            if (!errMsg.empty())
+            {
+                p->m_completionShown = true;
+                brls::Application::notify(errMsg);
+            }
+        }
+        CloseAsync();
+    }
+
+public:
+    void SetDialog(brls::Dialog* dialog) { m_dialog = dialog; }
+
+private:
+    void CloseAsync()
+    {
+        if (m_closed)
+            return;
+        m_closed = true;
+        brls::Dialog* dlg = m_dialog;
+        brls::sync([dlg]() {
+            if (dlg)
+                dlg->close();
+        });
+    }
+
+    DataManagementPage* m_page = nullptr;
+    brls::Dialog* m_dialog = nullptr;
+    brls::Label* m_titleLabel = nullptr;
+    brls::Label* m_nameLabel = nullptr;
+    brls::Label* m_countLabel = nullptr;
+    brls::Rectangle* m_bar = nullptr;
+    bool m_closed = false;
+};
+
+void DataManagementPage::showProgressDialog()
+{
+    auto* view = new ScanProgressDialogView(this);
+    auto* dialog = new brls::Dialog(view);
+    dialog->setCancelable(false);
+    view->SetDialog(dialog);
+    dialog->open();
 }
 
-void DataManagementPage::showProgressOverlay()
-{
-    if (!m_progressOverlay)
-        return;
-    rememberFocusBeforeModal();
-    m_progressOverlay->setVisibility(brls::Visibility::VISIBLE);
-    brls::Application::giveFocus(m_progressOverlay);
-}
-
-void DataManagementPage::hideProgressOverlay()
-{
-    if (!m_progressOverlay)
-        return;
-    m_progressOverlay->setVisibility(brls::Visibility::GONE);
-    restoreFocusAfterModal();
-}
 
 void DataManagementPage::rememberFocusBeforeModal()
 {
     brls::View* currentFocus = brls::Application::getCurrentFocus();
-    if (!currentFocus || currentFocus == m_progressOverlay || currentFocus->isHidden())
+    if (!currentFocus || currentFocus->isHidden())
         return;
 
     m_focusBeforeModal = currentFocus;
@@ -1654,8 +1748,6 @@ void DataManagementPage::rememberFocusBeforeModal()
 
 brls::View* DataManagementPage::getFallbackFocus()
 {
-    if (m_scanDefaultFocus && !m_scanDefaultFocus->isHidden())
-        return m_scanDefaultFocus;
 
     if (m_bundleDefaultFocus && !m_bundleDefaultFocus->isHidden())
         return m_bundleDefaultFocus;
@@ -1663,8 +1755,6 @@ brls::View* DataManagementPage::getFallbackFocus()
     if (m_processDefaultFocus && !m_processDefaultFocus->isHidden())
         return m_processDefaultFocus;
 
-    if (m_scanDefaultFocus)
-        return m_scanDefaultFocus;
 
     if (m_bundleDefaultFocus)
         return m_bundleDefaultFocus;
@@ -1684,90 +1774,6 @@ void DataManagementPage::restoreFocusAfterModal()
 
     if (targetFocus)
         brls::Application::giveFocus(targetFocus);
-}
-
-brls::View* DataManagementPage::buildScanImportTab()
-{
-    using beiklive::ui::makeContentBox;
-    using beiklive::ui::makeHeader;
-    using beiklive::ui::makeHint;
-    using beiklive::ui::makeScrollTab;
-
-    auto* scroll = makeScrollTab();
-    auto* box = makeContentBox();
-
-    box->addView(makeHeader(L("扫描目录并导入")));
-
-    auto* scanBtn = new beiklive::DetailCell();
-    scanBtn->setLeftText(L("选择ROM目录并导入"));
-    scanBtn->setRightText("\uE14A");
-    scanBtn->registerAction(L("选择"), brls::BUTTON_A, [this](brls::View*) -> bool {
-        if (m_importing.load(std::memory_order_acquire))
-            return true;
-        selectRomDir();
-        return true;
-    });
-    box->addView(scanBtn);
-    m_scanDefaultFocus = scanBtn;
-
-    box->addView(makeHint(L("扫描时会根据下面的开关确认扫描对象，默认全部类型都导入，可按自己需要开关")));
-
-    auto* subDirSwitch = new brls::BooleanCell();
-    subDirSwitch->init(L("自动扫描子目录"), m_autoSubDir, [this](bool on) { m_autoSubDir = on; });
-    box->addView(subDirSwitch);
-
-    auto* nameMapSwitch = new brls::BooleanCell();
-    nameMapSwitch->init(L("自动读取映射名称(如果存在)"), m_useNameMapping, [this](bool on) { m_useNameMapping = on; });
-    box->addView(nameMapSwitch);
-
-    auto* gbaSwitch = new brls::BooleanCell();
-    gbaSwitch->init(L("扫描GBA游戏"), m_scanGBA, [this](bool on) { m_scanGBA = on; });
-    box->addView(gbaSwitch);
-
-    auto* gbcSwitch = new brls::BooleanCell();
-    gbcSwitch->init(L("扫描GBC游戏"), m_scanGBC, [this](bool on) { m_scanGBC = on; });
-    box->addView(gbcSwitch);
-
-    auto* gbSwitch = new brls::BooleanCell();
-    gbSwitch->init(L("扫描GB游戏"), m_scanGB, [this](bool on) { m_scanGB = on; });
-    box->addView(gbSwitch);
-
-    auto* nesSwitch = new brls::BooleanCell();
-    nesSwitch->init(L("扫描FC游戏"), m_scanNES, [this](bool on) { m_scanNES = on; });
-    box->addView(nesSwitch);
-
-    auto* snesSwitch = new brls::BooleanCell();
-    snesSwitch->init(L("扫描SFC游戏"), m_scanSNES, [this](bool on) { m_scanSNES = on; });
-    box->addView(snesSwitch);
-
-    auto* ndsSwitch = new brls::BooleanCell();
-    ndsSwitch->init(L("扫描NDS游戏"), m_scanNDS, [this](bool on) { m_scanNDS = on; });
-    box->addView(ndsSwitch);
-
-    auto* threeDsSwitch = new brls::BooleanCell();
-    threeDsSwitch->init(L("扫描3DS游戏"), m_scan3DS, [this](bool on) { m_scan3DS = on; });
-    box->addView(threeDsSwitch);
-
-    auto* genesisSwitch = new brls::BooleanCell();
-    genesisSwitch->init(L("扫描MD游戏"), m_scanGenesis, [this](bool on) { m_scanGenesis = on; });
-    box->addView(genesisSwitch);
-
-    auto* arcadeSwitch = new brls::BooleanCell();
-    arcadeSwitch->init(L("扫描Arcade游戏"), m_scanArcade, [this](bool on) { m_scanArcade = on; });
-    box->addView(arcadeSwitch);
-
-    auto* dcSwitch = new brls::BooleanCell();
-    dcSwitch->init(L("扫描DC游戏"), m_scanDreamcast, [this](bool on) { m_scanDreamcast = on; });
-    box->addView(dcSwitch);
-
-
-    scroll->setContentView(box);
-
-    auto* container = new brls::Box(brls::Axis::COLUMN);
-    container->setWidthPercentage(100.f);
-    container->setGrow(1.0f);
-    container->addView(scroll);
-    return container;
 }
 
 brls::View* DataManagementPage::buildBundleImportTab()
@@ -1886,31 +1892,6 @@ brls::View* DataManagementPage::buildDataProcessingTab()
     return container;
 }
 
-void DataManagementPage::resetProgressUi(const std::string& title)
-{
-    m_completionShown = false;
-    m_cleanupRemoved.store(0, std::memory_order_release);
-    m_importSkipped.store(0, std::memory_order_release);
-    m_importDone.store(false, std::memory_order_release);
-    m_importError.store(false, std::memory_order_release);
-    m_progress.store(0, std::memory_order_release);
-    m_total.store(0, std::memory_order_release);
-
-    {
-        std::lock_guard<std::mutex> lock(m_statusMutex);
-        m_errorMsg.clear();
-        m_progressName.clear();
-    }
-
-    showProgressOverlay();
-    m_progressTitleLabel->setText(title);
-    m_progressNameLabel->setText(" ");
-    m_progressCountLabel->setText("0 / 0");
-    m_progressBar->setWidth(0.f);
-    m_progressBar->setColor(nvgRGB(79, 193, 255));
-
-    invalidate();
-}
 
 void DataManagementPage::updateProgressName(const std::string& name)
 {
@@ -1986,14 +1967,14 @@ void DataManagementPage::onSelectLpl(int platform)
 void DataManagementPage::startImport(const std::string& lplPath, int platform)
 {
     m_progressTask = ProgressTask::Import;
-    resetProgressUi(L("正在解析LPL文件..."));
+    m_completionShown = false;
+    showProgressDialog();
     finishWorker();
 
     std::string realPath = expandTilde(lplPath);
     std::ifstream ifs(realPath);
     if (!ifs.is_open())
     {
-        hideProgressOverlay();
         rememberFocusBeforeModal();
         auto* dialog = new brls::Dialog(L("无法打开LPL文件"));
         dialog->addButton("确认", [this]() { restoreFocusAfterModal(); });
@@ -2011,7 +1992,6 @@ void DataManagementPage::startImport(const std::string& lplPath, int platform)
     }
     catch (const std::exception& e)
     {
-        hideProgressOverlay();
         rememberFocusBeforeModal();
         auto* dialog = new brls::Dialog(L("LPL文件解析失败"));
         dialog->addButton("确认", [this]() { restoreFocusAfterModal(); });
@@ -2021,25 +2001,8 @@ void DataManagementPage::startImport(const std::string& lplPath, int platform)
 
     if (!lplJson.contains("items") || !lplJson["items"].is_array())
     {
-        hideProgressOverlay();
         rememberFocusBeforeModal();
         auto* dialog = new brls::Dialog(L("LPL文件无数据"));
-        dialog->addButton("确认", [this]() { restoreFocusAfterModal(); });
-        dialog->open();
-        return;
-    }
-
-    int unexpectedPlatform = findUnexpectedLplPlatform(lplJson["items"], platform);
-    if (unexpectedPlatform >= 0)
-    {
-        hideProgressOverlay();
-        rememberFocusBeforeModal();
-        auto* dialog = new brls::Dialog(
-            L("选择错误\n\n当前选择的是 ") +
-            beiklive::tools::platformName(platform) +
-            L(" 游戏的lpl导入按钮，但文件中的游戏类型是 ") +
-            beiklive::tools::platformName(unexpectedPlatform) +
-            L("。\n请返回后选择对应类型的按钮。"));
         dialog->addButton("确认", [this]() { restoreFocusAfterModal(); });
         dialog->open();
         return;
@@ -2048,27 +2011,33 @@ void DataManagementPage::startImport(const std::string& lplPath, int platform)
     std::vector<ImportItem> importItems;
     for (const auto& item : lplJson["items"])
     {
+        std::string path = item.value("path", "");
+        // 3DS CIA 安装包跳过（与扫描导入一致）
+        if (normalizeExtension(fs::path(path).extension().string()) == "cia")
+            continue;
         importItems.push_back({
-            item.value("path", ""),
+            path,
             item.value("label", ""),
+            item.value("db_name", ""),
         });
     }
 
     m_total.store(static_cast<int>(importItems.size()), std::memory_order_release);
-    m_progressCountLabel->setText("0 / " + std::to_string(importItems.size()));
-    m_progressTitleLabel->setText(L("正在导入游戏数据，请勿操作"));
 
     ImportSharedConfig config = buildSharedConfig(platform);
     m_importing.store(true, std::memory_order_release);
 
     m_importThread = std::thread([this, importItems = std::move(importItems), config, lplPath]() {
-        std::string lplStem = stemFromPath(expandTilde(lplPath));
+        const std::string realLplPath = expandTilde(lplPath);
+        std::string lplStem = stemFromPath(realLplPath);
+        const std::string lplThumbRoot =
+            (fs::path(realLplPath).parent_path().parent_path() / "thumbnails").string();
         for (int i = 0; i < static_cast<int>(importItems.size()); ++i)
         {
             const auto& item = importItems[i];
             std::string romPath = expandTilde(item.romPath);
 
-            if (romPath.empty() || item.label.empty() || !fs::exists(romPath))
+            if (romPath.empty() || !fs::exists(romPath))
             {
                 m_progress.store(i + 1, std::memory_order_release);
                 continue;
@@ -2083,29 +2052,14 @@ void DataManagementPage::startImport(const std::string& lplPath, int platform)
                 continue;
             }
 
-            updateProgressName(item.label);
             std::string romStem = stemFromPath(romPath);
+            updateProgressName(item.label.empty() ? romStem : item.label);
 
-            std::string logoPath;
-            std::string thumbPath = romPath;
-            size_t romsPos = thumbPath.find("roms");
-            if (romsPos != std::string::npos)
-            {
-                thumbPath.replace(romsPos, 4, "retroarch/thumbnails");
-                std::string thumbDir = parentPath(thumbPath);
-                std::string logoFile = thumbDir + "/Named_Snaps/" + romStem + ".png";
-#ifdef _WIN32
-                std::string altLogo = logoFile;
-                for (auto& c : altLogo)
-                    if (c == '/') c = '\\';
-                if (fs::exists(altLogo))
-                    logoPath = altLogo;
-                else
-#endif
-                    logoPath = logoFile;
-            }
+            std::string logoPath = findRetroArchThumbnail(
+                item.dbName, lplStem, lplThumbRoot,
+                romPath, romStem, item.label);
 
-            if (logoPath.empty() || !fs::exists(logoPath))
+            if (logoPath.empty())
             {
                 logoPath = beiklive::tools::getDefaultLogoPath(
                     static_cast<beiklive::enums::EmuPlatform>(config.platform),
@@ -2127,11 +2081,63 @@ void DataManagementPage::startImport(const std::string& lplPath, int platform)
 
             beiklive::GameEntry entry;
             entry.path = romPath;
-            entry.title = item.label;
+            entry.title = item.label.empty() ? romStem : item.label;
             entry.platform = config.platform;
             if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
                 entry.threeDsTitleId = beiklive::three_ds::readNcsdTitleId(romPath);
             entry.logoPath = logoPath;
+            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)) {
+                // PSP ROM：开启读取映射名称且映射名存在时使用映射名（不用 TITLE）；
+                // 否则 TITLE 优先于 lpl 的文件名称。无 RetroArch 缩略图时
+                // 提取 ICON0 作为封面（保存在该 ROM 的专属存档目录下）。
+                std::string mappedName;
+                if (m_useNameMapping) {
+                    auto nameVal = beiklive::NameMappingManager->Get(romStem);
+                    if (nameVal) {
+                        auto nameStr = nameVal->AsString();
+                        if (nameStr && !nameStr->empty())
+                            mappedName = *nameStr;
+                    }
+                }
+                if (!mappedName.empty()) {
+                    entry.title = mappedName;
+                } else {
+                    const std::string realTitle = beiklive::psp_meta::ExtractTitle(romPath);
+                    if (!realTitle.empty())
+                        entry.title = realTitle;
+                }
+                if (logoPath == beiklive::tools::getDefaultLogoPath(
+                                     static_cast<beiklive::enums::EmuPlatform>(config.platform),
+                                     romPath))
+                {
+                    const std::string icon = beiklive::psp_meta::ExtractIcon0(romPath, savePath);
+                    if (!icon.empty())
+                        entry.logoPath = icon;
+                }
+            }
+            else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS))
+            {
+                // NDS 内置图标：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
+                const std::string ndsIcon = beiklive::GetOrCreateNdsIconPath(romPath);
+                if (!ndsIcon.empty() && entry.logoPath == beiklive::tools::getDefaultLogoPath(
+                    static_cast<beiklive::enums::EmuPlatform>(config.platform), romPath))
+                    entry.logoPath = ndsIcon;
+                // NDS 名称：ROM header 游戏名（仅当标题仍是默认文件名/映射名时）。
+                const std::string ndsTitle = beiklive::ExtractNdsHeaderTitle(romPath);
+                if (!ndsTitle.empty() && entry.title == GET_MAPPING_KEY_STR(romStem, romStem))
+                    entry.title = ndsTitle;
+            }
+            else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
+            {
+                // 3DS 内置图标（SMDH）：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
+                const std::string icon = beiklive::GetOrCreateThreeDsIconPath(romPath);
+                if (!icon.empty() && entry.logoPath == beiklive::tools::getDefaultLogoPath(
+                    static_cast<beiklive::enums::EmuPlatform>(config.platform), romPath))
+                    entry.logoPath = icon;
+                const std::string title = beiklive::ExtractThreeDsTitle(romPath);
+                if (!title.empty() && entry.title == GET_MAPPING_KEY_STR(romStem, romStem))
+                    entry.title = title;
+            }
             entry.savePath = savePath;
             entry.overlayPath = config.overlayPath;
             entry.shaderPath = config.shaderPath;
@@ -2154,17 +2160,100 @@ void DataManagementPage::startImport(const std::string& lplPath, int platform)
     });
 }
 
-void DataManagementPage::selectRomDir()
+std::string DataManagementPage::scanPathFor(int platformIndex) const
+{
+    switch (platformIndex)
+    {
+        case 0: return m_scanPathNES;
+        case 1: return m_scanPathSNES;
+        case 2: return m_scanPathGB;
+        case 3: return m_scanPathGBC;
+        case 4: return m_scanPathGBA;
+        case 5: return m_scanPathNDS;
+        case 6: return m_scanPath3DS;
+        case 7: return m_scanPathArcade;
+        case 8: return m_scanPathDC;
+        case 9: return m_scanPathGenesis;
+        case 10: return m_scanPathPSP;
+        default: return "";
+    }
+}
+
+void DataManagementPage::setScanPath(int platformIndex, const std::string& path)
+{
+    switch (platformIndex)
+    {
+        case 0: m_scanPathNES = path; break;
+        case 1: m_scanPathSNES = path; break;
+        case 2: m_scanPathGB = path; break;
+        case 3: m_scanPathGBC = path; break;
+        case 4: m_scanPathGBA = path; break;
+        case 5: m_scanPathNDS = path; break;
+        case 6: m_scanPath3DS = path; break;
+        case 7: m_scanPathArcade = path; break;
+        case 8: m_scanPathDC = path; break;
+        case 9: m_scanPathGenesis = path; break;
+        case 10: m_scanPathPSP = path; break;
+        default: return;
+    }
+    if (platformIndex >= 0 && platformIndex < static_cast<int>(kScanPlatformCount))
+        SET_SETTING_KEY_STR(kScanPlatforms[platformIndex].settingKey, path);
+}
+
+void DataManagementPage::refreshScanTab()
+{
+    if (!m_mainCanvas)
+        return;
+    using Canvas = DataManagementCanvas;
+    auto* canvas = static_cast<Canvas*>(m_mainCanvas);
+    std::vector<Canvas::Item> items;
+    items.push_back({
+        L("开始扫描"),
+        L("扫描所有已配置机型的目录并导入新游戏"),
+        L("开始"),
+        material::SEARCH,
+        [this]() {
+            if (!m_importing.load(std::memory_order_acquire))
+                startScanAll();
+        },
+        nullptr,
+        false,
+    });
+    items.push_back({L("扫描子目录"), L("同时扫描所选目录下的所有子目录，请做好游戏目录分类，部分游戏后缀相同，可能导致导入错误"), "",
+                     material::STORAGE, {}, &m_autoSubDir, false});
+    items.push_back({L("读取映射名称"), L("存在名称映射时使用中文或规范化标题"), "",
+                     material::EDIT, {}, &m_useNameMapping, false});
+    for (size_t i = 0; i < kScanPlatformCount; ++i)
+    {
+        const std::string path = scanPathFor(static_cast<int>(i));
+        items.push_back({
+            kScanPlatforms[i].name,
+            path.empty() ? L("未设置，点击选择扫描目录") : path,
+            L("选择目录"),
+            kScanPlatforms[i].icon,
+            [this, i]() {
+                if (!m_importing.load(std::memory_order_acquire))
+                    pickScanDir(static_cast<int>(i));
+            },
+            nullptr,
+            false,
+        });
+    }
+    canvas->UpdateTabItems(static_cast<size_t>(m_scanTabIndex), std::move(items));
+}
+
+void DataManagementPage::pickScanDir(int platformIndex)
 {
     auto* flPage = new beiklive::FileListPage();
     flPage->setDirSelectionMode(true);
-    flPage->registerAction(L("选择目录"), brls::BUTTON_Y, [this, flPage](brls::View*) -> bool {
+    flPage->registerAction(L("选择目录"), brls::BUTTON_Y, [this, flPage, platformIndex](brls::View*) -> bool {
         std::string dirPath = flPage->getHeader()->getPath();
         if (dirPath.empty())
             return true;
 
         brls::Application::popActivity(brls::TransitionAnimation::NONE);
-        startDirImport(dirPath);
+        setScanPath(platformIndex, dirPath);
+        refreshScanTab();
         return true;
     });
 
@@ -2183,202 +2272,260 @@ void DataManagementPage::selectRomDir()
     flPage->showDriveList();
 }
 
-void DataManagementPage::startDirImport(const std::string& dirPath)
+void DataManagementPage::startScanAll()
 {
-    m_progressTask = ProgressTask::Import;
-    resetProgressUi(L("正在扫描ROM文件..."));
-    finishWorker();
-
-    std::unordered_set<std::string> exts;
-    std::unordered_set<int> enabledPlatforms;
-    if (m_scanGBA)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA));
-    if (m_scanGBC)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC));
-    if (m_scanGB)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGB));
-    if (m_scanNES)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuNES));
-    if (m_scanSNES)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES));
-    if (m_scanNDS)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS));
-    if (m_scan3DS)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS));
-    if (m_scanGenesis)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis));
-    if (m_scanArcade)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade));
-    if (m_scanDreamcast)
-        enabledPlatforms.insert(static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast));
-
-    if (m_scanGBA) exts.insert("gba");
-    if (m_scanGBC) exts.insert("gbc");
-    if (m_scanGB) exts.insert("gb");
-    if (m_scanNES) { exts.insert("nes"); exts.insert("fds"); }
-    if (m_scanSNES) { exts.insert("sfc"); exts.insert("smc"); }
-    if (m_scanNDS) exts.insert("nds");
-    if (m_scan3DS) { exts.insert("cia"); exts.insert("cci"); exts.insert("3ds"); }
-    if (m_scanGenesis) { exts.insert("md"); exts.insert("gen"); exts.insert("bin"); exts.insert("smd"); }
-    if (m_scanArcade) { exts.insert("zip"); exts.insert("7z"); }
-    if (m_scanDreamcast) { exts.insert("cdi"); exts.insert("gdi"); exts.insert("chd"); }
-
-    // ROMX aliases carry the payload platform in the container/header, so
-    // collect all packed extensions first and filter by the detected platform
-    // after readInfo() succeeds.
-    if (!enabledPlatforms.empty())
+    int configured = 0;
+    for (size_t i = 0; i < kScanPlatformCount; ++i)
+        if (!scanPathFor(static_cast<int>(i)).empty())
+            ++configured;
+    if (configured == 0)
     {
-        for (const auto* ext : {"gbx", "gbcx", "gbax", "nesx", "fdsx",
-                                "sfcx", "smcx", "ndsx", "ciax", "ccix",
-                                "3dsx", "mdx", "genx", "binx", "smdx"})
-            exts.insert(ext);
+        auto* dialog = new brls::Dialog(L("请先为至少一个机型选择扫描目录"));
+        dialog->addButton("确认", []() {});
+        dialog->open();
+        return;
     }
 
+    m_progressTask = ProgressTask::Import;
+    m_completionShown = false;
+    m_importSkipped.store(0, std::memory_order_release);
+    m_importDone.store(false, std::memory_order_release);
+    m_importError.store(false, std::memory_order_release);
+    m_progress.store(0, std::memory_order_release);
+    m_total.store(0, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(m_statusMutex);
+        m_errorMsg.clear();
+        m_progressName.clear();
+    }
     m_importing.store(true, std::memory_order_release);
+    showProgressDialog();
+    finishWorker();
 
-    m_importThread = std::thread([this, dirPath,
-                                  exts = std::move(exts),
-                                  enabledPlatforms = std::move(enabledPlatforms)]() {
-        std::vector<fs::path> roms;
-        try
+    m_importThread = std::thread([this]() {
+        struct Planned
         {
+            std::string dir;
+            int platform;
+            std::vector<fs::path> roms;
+        };
+        std::vector<Planned> plans;
+        int total = 0;
+        for (size_t i = 0; i < kScanPlatformCount; ++i)
+        {
+            std::string dir = scanPathFor(static_cast<int>(i));
+            if (dir.empty())
+                continue;
+            dir = fs::absolute(dir).string(); // 归一化为绝对路径
+            Planned p;
+            p.dir = dir;
+            p.platform = kScanPlatforms[i].platform;
+
+            // 单次遍历收集匹配扩展名的文件（同时用于计数与导入）
+            std::vector<fs::path> roms;
+            std::error_code ec;
             if (m_autoSubDir)
             {
-                for (auto& entry : fs::recursive_directory_iterator(dirPath))
+                fs::recursive_directory_iterator it(
+                    dir, fs::directory_options::skip_permission_denied, ec);
+                fs::recursive_directory_iterator itEnd;
+                if (ec)
                 {
-                    if (!entry.is_regular_file())
+                    std::lock_guard<std::mutex> lock(m_statusMutex);
+                    m_errorMsg += (m_errorMsg.empty() ? "" : "\n")
+                        + dir + ": " + ec.message();
+                    continue;
+                }
+                for (; it != itEnd; it.increment(ec))
+                {
+                    if (ec)
+                        break;
+                    std::error_code fec;
+                    if (!it->is_regular_file(fec) || fec)
                         continue;
-
-                    std::string ext = normalizeExtension(entry.path().extension().string());
-                    if (exts.count(ext))
-                        roms.push_back(entry.path());
+                    std::string ext = normalizeExtension(it->path().extension().string());
+                    if (std::find(kScanPlatforms[i].exts.begin(),
+                                  kScanPlatforms[i].exts.end(), ext)
+                        != kScanPlatforms[i].exts.end())
+                        roms.push_back(it->path());
                 }
             }
             else
             {
-                for (auto& entry : fs::directory_iterator(dirPath))
+                fs::directory_iterator it(
+                    dir, fs::directory_options::skip_permission_denied, ec);
+                fs::directory_iterator itEnd;
+                if (ec)
                 {
-                    if (!entry.is_regular_file())
+                    std::lock_guard<std::mutex> lock(m_statusMutex);
+                    m_errorMsg += (m_errorMsg.empty() ? "" : "\n")
+                        + dir + ": " + ec.message();
+                    continue;
+                }
+                for (; it != itEnd; it.increment(ec))
+                {
+                    if (ec)
+                        break;
+                    std::error_code fec;
+                    if (!it->is_regular_file(fec) || fec)
                         continue;
-
-                    std::string ext = normalizeExtension(entry.path().extension().string());
-                    if (exts.count(ext))
-                        roms.push_back(entry.path());
+                    std::string ext = normalizeExtension(it->path().extension().string());
+                    if (std::find(kScanPlatforms[i].exts.begin(),
+                                  kScanPlatforms[i].exts.end(), ext)
+                        != kScanPlatforms[i].exts.end())
+                        roms.push_back(it->path());
                 }
             }
+            total += static_cast<int>(roms.size());
+            p.roms = std::move(roms);
+            plans.push_back(std::move(p));
         }
-        catch (const std::exception& e)
+        m_total.store(total, std::memory_order_release);
+
+        int idx = 0;
+        for (size_t i = 0; i < plans.size(); ++i)
         {
-            setErrorMessage(e.what());
-            m_importError.store(true, std::memory_order_release);
-            m_importDone.store(true, std::memory_order_release);
-            return;
+            const auto& p = plans[i];
+            idx += scanOnePlatform(p.roms, p.dir, p.platform, idx);
         }
-
-        m_total.store(static_cast<int>(roms.size()), std::memory_order_release);
-
-        for (int i = 0; i < static_cast<int>(roms.size()); ++i)
-        {
-            const auto& romPath = roms[i];
-            std::string path = romPath.string();
-            std::string romStem = romPath.stem().string();
-            const std::optional<beiklive::packed_rom::Info> packedInfo =
-                beiklive::packed_rom::hasSupportedExtension(path)
-                    ? beiklive::packed_rom::readInfo(path, nullptr, false)
-                    : std::optional<beiklive::packed_rom::Info>{};
-            int platform = packedInfo
-                ? packedInfo->platform
-                : platformFromExistingPath(romPath);
-            if (platform < 0)
-            {
-                m_progress.store(i + 1, std::memory_order_release);
-                continue;
-            }
-            if (packedInfo && enabledPlatforms.count(platform) == 0)
-            {
-                m_progress.store(i + 1, std::memory_order_release);
-                continue;
-            }
-
-            // 游戏库中已存在该 ROM：跳过，绝不覆盖用户已有的独立配置
-            // （遮罩/着色器/显示/金手指/收藏/游玩统计等）。扫描导入只追加
-            // 新游戏。
-            if (beiklive::GameDB->findByPath(path))
-            {
-                m_importSkipped.fetch_add(1, std::memory_order_relaxed);
-                m_progress.store(i + 1, std::memory_order_release);
-                continue;
-            }
-
-            std::string displayName = packedInfo && !packedInfo->title.empty()
-                ? packedInfo->title : romStem;
-            if ((!packedInfo || packedInfo->title.empty()) && m_useNameMapping)
-            {
-                auto nameVal = beiklive::NameMappingManager->Get(romStem);
-                if (nameVal)
-                {
-                    auto nameStr = nameVal->AsString();
-                    if (nameStr && !nameStr->empty())
-                        displayName = *nameStr;
-                }
-            }
-
-            updateProgressName(displayName);
-            ImportSharedConfig config = buildSharedConfig(platform);
-
-            beiklive::GameEntry entry;
-            entry.path = path;
-            entry.title = displayName;
-            entry.platform = platform;
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
-                entry.threeDsTitleId = beiklive::three_ds::readNcsdTitleId(path);
-            entry.logoPath = beiklive::tools::getDefaultLogoPath(
-                static_cast<beiklive::enums::EmuPlatform>(platform),
-                path);
-            std::string savePath = beiklive::tools::defaultGameSavePath(platform, path);
-            try
-            {
-                fs::create_directories(savePath);
-            }
-            catch (...)
-            {
-            }
-            entry.savePath = savePath;
-            if (packedInfo)
-            {
-                const std::string packedCover = beiklive::packed_rom::extractCover(
-                    path, *packedInfo, entry.savePath);
-                if (!packedCover.empty())
-                    entry.logoPath = packedCover;
-                if (!packedInfo->crc32.empty())
-                    entry.crc32 = static_cast<int>(packedInfo->lookupCrc32);
-                entry.developer = packedInfo->developer;
-                entry.releaseDate = packedInfo->releaseDate;
-                entry.genre = packedInfo->genre;
-                entry.region = packedInfo->region;
-                entry.romxBodySha256 = packedInfo->bodySha256;
-                entry.romxMetadataJson = packedInfo->metadataJson;
-            }
-            entry.overlayEnabled = config.overlayEnabled;
-            entry.shaderEnabled = config.shaderEnabled;
-            entry.overlayPath = config.overlayPath;
-            entry.shaderPath = config.shaderPath;
-
-            applyDisplayDefaults(entry);
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS)) {
-                entry.ndsScreenLayout = "priority_top";
-                entry.ndsScreenOrientation = "0";
-                entry.ndsIntegerScale = true;
-                entry.ndsScreenGap = 0;
-                entry.ndsBottomOpacity = 1.0f;
-            }
-
-            beiklive::GameDB->upsertByPath(entry);
-            m_progress.store(i + 1, std::memory_order_release);
-        }
-
         m_importDone.store(true, std::memory_order_release);
     });
+}
+
+// 导入一个机型的文件列表（线程内调用）。返回本机型处理（含跳过）的文件数。
+int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
+                                        const std::string& dirPath,
+                                        int platform,
+                                        int startIndex)
+{
+    ImportSharedConfig config = buildSharedConfig(platform);
+
+    for (int i = 0; i < static_cast<int>(roms.size()); ++i)
+    {
+        const auto& romPath = roms[i];
+        std::string path = romPath.string();
+        std::string romStem = romPath.stem().string();
+        m_progress.store(startIndex + i + 1, std::memory_order_release);
+
+        // 游戏库中已存在该 ROM：跳过，绝不覆盖用户已有的独立配置。
+        if (beiklive::GameDB->findByPath(path))
+        {
+            m_importSkipped.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+
+        std::string displayName = romStem;
+        if (m_useNameMapping)
+        {
+            auto nameVal = beiklive::NameMappingManager->Get(romStem);
+            if (nameVal)
+            {
+                auto nameStr = nameVal->AsString();
+                if (nameStr && !nameStr->empty())
+                    displayName = *nameStr;
+            }
+        }
+        beiklive::GameEntry entry;
+        beiklive::romx::RomxGameEntryOptions adapterOptions;
+        adapterOptions.fallbackPlatform = platform;
+        adapterOptions.fallbackTitle = displayName;
+        adapterOptions.extractCover = true;
+        adapterOptions.verifyPayload = false;
+        const auto adapterResult = beiklive::romx::RomxGameEntryAdapter::apply(
+            entry, path, adapterOptions);
+        if (adapterResult.romxCandidate &&
+            (!adapterResult.romxValid || entry.platform != platform))
+            continue;
+
+        updateProgressName(entry.title.empty() ? displayName : entry.title);
+
+        // 上游的本地同名封面规则保留，但不覆盖 ROMX 内置封面。
+        const std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
+            static_cast<beiklive::enums::EmuPlatform>(entry.platform), path);
+        if (entry.logoPath == defaultLogo)
+        {
+            std::error_code coverEc;
+            fs::path coverPng = romPath.parent_path() / (romStem + ".png");
+            if (fs::exists(coverPng, coverEc) && !coverEc)
+                entry.logoPath = coverPng.string();
+            else
+            {
+                coverEc.clear();
+                coverPng = fs::path(dirPath) / "logos" / (romStem + ".png");
+                if (fs::exists(coverPng, coverEc) && !coverEc)
+                    entry.logoPath = coverPng.string();
+            }
+        }
+
+        // NDS / 3DS / PSP：始终提取内置元数据（图标与名称）。
+        // ROMX 先由启动会话按 payload 区域生成临时标准 ROM，避免上游解析器读取容器头。
+        std::string metadataPath = path;
+        if (adapterResult.romxCandidate)
+        {
+            std::string extractionError;
+            const std::string extracted = beiklive::romx::RomxLaunchSession(path)
+                .materialize(&extractionError);
+            if (!extracted.empty())
+                metadataPath = extracted;
+            else if (!extractionError.empty())
+                brls::Logger::warning("ROMX metadata extraction failed for {}: {}",
+                                      path, extractionError);
+        }
+        if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
+        {
+            // TITLE：开启读取映射名称且映射名存在时保留映射名，否则 TITLE 优先。
+            if (!(m_useNameMapping && displayName != romStem))
+            {
+                const std::string realTitle = beiklive::psp_meta::ExtractTitle(metadataPath);
+                if (!realTitle.empty())
+                    entry.title = realTitle;
+            }
+            // ICON0：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
+            const std::string icon = beiklive::psp_meta::ExtractIcon0(metadataPath, entry.savePath);
+            if (!icon.empty() && entry.logoPath == defaultLogo)
+                entry.logoPath = icon;
+        }
+        else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS))
+        {
+            // NDS 内置图标：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
+            const std::string ndsIcon = beiklive::GetOrCreateNdsIconPath(metadataPath);
+            if (!ndsIcon.empty() && entry.logoPath == defaultLogo)
+                entry.logoPath = ndsIcon;
+            // NDS 名称：ROM header 游戏名（仅当标题仍是默认文件名/映射名时）。
+            const std::string ndsTitle = beiklive::ExtractNdsHeaderTitle(metadataPath);
+            if (!ndsTitle.empty() && entry.title == GET_MAPPING_KEY_STR(romStem, romStem))
+                entry.title = ndsTitle;
+        }
+        else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
+        {
+            // 3DS 内置图标（SMDH）：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
+            const std::string icon = beiklive::GetOrCreateThreeDsIconPath(metadataPath);
+            if (!icon.empty() && entry.logoPath == defaultLogo)
+                entry.logoPath = icon;
+            const std::string title = beiklive::ExtractThreeDsTitle(metadataPath);
+            if (!title.empty() && entry.title == GET_MAPPING_KEY_STR(romStem, romStem))
+                entry.title = title;
+        }
+
+        entry.overlayEnabled = config.overlayEnabled;
+        entry.shaderEnabled = config.shaderEnabled;
+        entry.overlayPath = config.overlayPath;
+        entry.shaderPath = config.shaderPath;
+
+        applyDisplayDefaults(entry);
+        if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS))
+        {
+            entry.ndsScreenLayout = "priority_top";
+            entry.ndsScreenOrientation = "0";
+            entry.ndsIntegerScale = true;
+            entry.ndsScreenGap = 0;
+            entry.ndsBottomOpacity = 1.0f;
+        }
+
+        beiklive::GameDB->upsertByPath(entry);
+    }
+
+    return static_cast<int>(roms.size());
 }
 
 void DataManagementPage::removeInvalidGames()
@@ -2390,9 +2537,8 @@ void DataManagementPage::removeInvalidGames()
     dialog->addButton("取消", [this]() { restoreFocusAfterModal(); });
     dialog->addButton(L("确认移除"), [this]() {
         m_progressTask = ProgressTask::Cleanup;
-        resetProgressUi(L("正在扫描无效游戏..."));
+        showProgressDialog();
         finishWorker();
-        m_progressTitleLabel->setText(L("正在扫描无效游戏，请勿操作"));
         m_importing.store(true, std::memory_order_release);
 
         m_importThread = std::thread([this]() {

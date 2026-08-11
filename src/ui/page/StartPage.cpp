@@ -5,9 +5,12 @@
 #include "core/SteamGridDb.hpp"
 #include "ui/utils/FilePickerHelper.hpp"
 #include "core/Tools.hpp"
+#include "core/rom/PspMeta.hpp"
 #include "core/ThreadPool.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
-#include "core/PackedRom.hpp"
+#include "core/RomxFrontend.hpp"
+#include "core/RomxGameEntryAdapter.hpp"
+#include "core/RomxLaunchSession.hpp"
 #include "core/ExternalCoreSession.hpp"
 #include "core/forwarder/ForwarderInstaller.hpp"
 #include "ui/utils/MaterialIcons.hpp"
@@ -128,6 +131,383 @@ void preserveThreeDsMenuSettings(json& root, const std::filesystem::path& file)
 
 namespace beiklive
 {
+// 平台 → 文件类型（机种选择后构造启动条目）。
+beiklive::enums::FileType platformToFileType(int platform)
+{
+    switch (static_cast<beiklive::enums::EmuPlatform>(platform))
+    {
+        case beiklive::enums::EmuPlatform::EmuGBA:       return beiklive::enums::FileType::GBA_ROM;
+        case beiklive::enums::EmuPlatform::EmuGBC:       return beiklive::enums::FileType::GBC_ROM;
+        case beiklive::enums::EmuPlatform::EmuGB:        return beiklive::enums::FileType::GB_ROM;
+        case beiklive::enums::EmuPlatform::EmuNES:       return beiklive::enums::FileType::NES_ROM;
+        case beiklive::enums::EmuPlatform::EmuSNES:      return beiklive::enums::FileType::SNES_ROM;
+        case beiklive::enums::EmuPlatform::EmuNDS:       return beiklive::enums::FileType::NDS_ROM;
+        case beiklive::enums::EmuPlatform::Emu3DS:       return beiklive::enums::FileType::THREEDS_ROM;
+        case beiklive::enums::EmuPlatform::EmuGenesis:   return beiklive::enums::FileType::GENESIS_ROM;
+        case beiklive::enums::EmuPlatform::EmuArcade:    return beiklive::enums::FileType::ARCADE_ROM;
+        case beiklive::enums::EmuPlatform::EmuDreamcast: return beiklive::enums::FileType::DREAMCAST_ROM;
+        case beiklive::enums::EmuPlatform::EmuPSP:       return beiklive::enums::FileType::PSP_ROM;
+        default: return beiklive::enums::FileType::NORMAL_FILE;
+    }
+}
+
+    // 机种选择弹窗：歧义后缀（iso/bin/cue/zip/7z 等）从文件列表启动时，
+    // 列出候选机种供选择（深色卡片 + 图标行 + 焦点框，与文件列表风格一致）。
+#ifdef ABSOLUTE
+#undef ABSOLUTE
+#endif
+    class PlatformPickerOverlay final : public brls::View
+    {
+    public:
+        std::function<void(int platform)> onPicked;
+
+        PlatformPickerOverlay()
+        {
+            setFocusable(true);
+            setVisibility(brls::Visibility::GONE);
+            setPositionType(brls::PositionType::ABSOLUTE);
+            setPositionTop(0.f);
+            setPositionLeft(0.f);
+            setWidth(1280.f);
+            setHeight(720.f);
+            HIDE_BRLS_HIGHLIGHT(this);
+            setCustomNavigationRoute(brls::FocusDirection::UP, this);
+            setCustomNavigationRoute(brls::FocusDirection::DOWN, this);
+            setCustomNavigationRoute(brls::FocusDirection::LEFT, this);
+            setCustomNavigationRoute(brls::FocusDirection::RIGHT, this);
+
+            auto moveUp = [this](brls::View*) -> bool {
+                if (!m_open || m_closing)
+                    return false;
+                return true;
+            };
+            auto moveDown = [this](brls::View*) -> bool {
+                if (!m_open || m_closing)
+                    return false;
+                return true;
+            };
+            auto confirm = [this](brls::View*) -> bool {
+                if (!m_open || m_closing)
+                    return false;
+                _finish(m_selected);
+                return true;
+            };
+            auto cancel = [this](brls::View*) -> bool {
+                if (!m_open || m_closing)
+                    return false;
+                _finish(-1);
+                return true;
+            };
+            registerAction("", brls::BUTTON_UP, moveUp, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_DOWN, moveDown, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_NAV_UP, moveUp, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_NAV_DOWN, moveDown, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_LEFT, moveUp, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_RIGHT, moveDown, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_NAV_LEFT, moveUp, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_NAV_RIGHT, moveDown, true, true, brls::SOUND_NONE);
+            registerAction(L("选择"), brls::BUTTON_A, confirm, false, false, brls::SOUND_NONE);
+            registerAction(L("取消"), brls::BUTTON_B, cancel, false, false, brls::SOUND_NONE);
+            registerAction(L("取消"), brls::BUTTON_START, cancel, false, false, brls::SOUND_NONE);
+        }
+
+        void open(std::vector<int> candidates, int defaultIndex,
+                  const std::string& fileName)
+        {
+            m_candidates = std::move(candidates);
+            m_selected = std::max(0, std::min(
+                defaultIndex, static_cast<int>(m_candidates.size()) - 1));
+            m_fileName = fileName;
+            m_open = true;
+            m_closing = false;
+            m_progress = 0.f;
+            m_lastFrame = std::chrono::steady_clock::now();
+            m_prevUp = m_prevDown = m_prevLeft = m_prevRight = false;
+            m_prevA = m_prevB = m_prevStart = false;
+            setVisibility(brls::Visibility::VISIBLE);
+            brls::Application::giveFocus(this);
+        }
+
+        void close()
+        {
+            m_open = false;
+            m_closing = false;
+            m_progress = 0.f;
+            setVisibility(brls::Visibility::GONE);
+        }
+
+        bool isOpen() const { return m_open; }
+
+        void frame(brls::FrameContext* ctx) override
+        {
+            brls::View::frame(ctx);
+            const auto now = std::chrono::steady_clock::now();
+            const float dt = std::chrono::duration<float>(now - m_lastFrame).count();
+            m_lastFrame = now;
+            if (m_open && !m_closing && m_progress < 1.f)
+                m_progress = std::min(1.f, m_progress + dt * 6.f);
+            if (m_closing)
+            {
+                m_progress = std::max(0.f, m_progress - dt * 8.f);
+                if (m_progress <= 0.f)
+                    close();
+            }
+            else if (m_open)
+            {
+                _pollInput();
+            }
+            invalidate();
+        }
+
+        void draw(NVGcontext* vg, float x, float y, float w, float h,
+                  brls::Style, brls::FrameContext*) override
+        {
+            if (!m_open || !vg)
+                return;
+            if (m_defaultFont < 0)
+                m_defaultFont = brls::Application::getDefaultFont();
+            if (m_materialFont < 0)
+                m_materialFont = brls::Application::getFont(brls::FONT_MATERIAL_ICONS);
+            if (m_switchFont < 0)
+                m_switchFont = brls::Application::getFont(brls::FONT_SWITCH_ICONS);
+
+            const float alpha = std::max(0.f, std::min(1.f, m_progress));
+            const float eased = 1.f - std::pow(1.f - m_progress, 3.f);
+
+            nvgSave(vg);
+            nvgGlobalAlpha(vg, alpha);
+
+            // 遮罩（底部留出 hint 栏）
+            nvgBeginPath(vg);
+            nvgRect(vg, x, y, w, h - 56.f);
+            nvgFillColor(vg, nvgRGBA(0, 0, 0,
+                static_cast<unsigned char>(205.f * alpha)));
+            nvgFill(vg);
+
+            const float rowH = 56.f;
+            const float panelW = 640.f;
+            const float panelH = 96.f + static_cast<float>(m_candidates.size()) * rowH + 34.f;
+            const float panelX = x + (w - panelW) * 0.5f;
+            const float panelY = y + (h - panelH) * 0.5f + (1.f - eased) * 42.f;
+
+            // 面板阴影
+            const NVGpaint shadow = nvgBoxGradient(
+                vg, panelX + 5.f, panelY + 7.f, panelW, panelH, 18.f, 8.f,
+                nvgRGBA(0, 0, 0, 130), nvgRGBA(0, 0, 0, 0));
+            nvgBeginPath(vg);
+            nvgRect(vg, panelX - 8.f, panelY - 8.f, panelW + 20.f, panelH + 20.f);
+            nvgRoundedRect(vg, panelX, panelY, panelW, panelH, 18.f);
+            nvgPathWinding(vg, NVG_HOLE);
+            nvgFillPaint(vg, shadow);
+            nvgFill(vg);
+
+            // 面板背景
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, panelX, panelY, panelW, panelH, 18.f);
+            nvgFillColor(vg, nvgRGBA(30, 32, 38, 242));
+            nvgFill(vg);
+            nvgBeginPath(vg);
+            nvgRoundedRect(vg, panelX + 1.f, panelY + 1.f,
+                           panelW - 2.f, panelH - 2.f, 17.f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 34));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            // 标题
+            nvgFontFaceId(vg, m_defaultFont);
+            nvgFontSize(vg, 17.f);
+            nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+            nvgFillColor(vg, nvgRGBA(215, 222, 233, 235));
+            nvgText(vg, panelX + 28.f, panelY + 34.f, L("选择机种").c_str(), nullptr);
+            nvgFontSize(vg, 15.f);
+            nvgFillColor(vg, nvgRGBA(170, 178, 190, 190));
+            std::string fileTitle = m_fileName;
+            if (fileTitle.size() > 34)
+                fileTitle = fileTitle.substr(0, 34) + "...";
+            nvgText(vg, panelX + panelW - 28.f, panelY + 34.f, fileTitle.c_str(), nullptr);
+
+            // 分隔线
+            nvgBeginPath(vg);
+            nvgMoveTo(vg, panelX + 26.f, panelY + 60.f);
+            nvgLineTo(vg, panelX + panelW - 26.f, panelY + 60.f);
+            nvgStrokeColor(vg, nvgRGBA(255, 255, 255, 26));
+            nvgStrokeWidth(vg, 1.f);
+            nvgStroke(vg);
+
+            // 机种行
+            const std::string pathPrefix = "img/ui/" + std::string(
+                brls::Application::getPlatform()->getThemeVariant() ==
+                        brls::ThemeVariant::DARK
+                    ? "light/"
+                    : "dark/");
+            for (size_t i = 0; i < m_candidates.size(); ++i)
+            {
+                const float rowX = panelX + 18.f;
+                const float rowY = panelY + 72.f + static_cast<float>(i) * rowH;
+                const float rowW = panelW - 36.f;
+                const bool focused = static_cast<int>(i) == m_selected;
+
+                nvgBeginPath(vg);
+                nvgRoundedRect(vg, rowX, rowY, rowW, rowH - 8.f, 8.f);
+                nvgFillColor(vg, focused
+                    ? nvgRGBA(79, 193, 255, 32)
+                    : nvgRGBA(255, 255, 255, 5));
+                nvgFill(vg);
+                if (focused)
+                {
+                    nvgBeginPath(vg);
+                    nvgRoundedRect(vg, rowX + 0.5f, rowY + 0.5f,
+                                   rowW - 1.f, rowH - 9.f, 7.5f);
+                    nvgStrokeColor(vg, nvgRGBA(79, 193, 255, 150));
+                    nvgStrokeWidth(vg, 1.5f);
+                    nvgStroke(vg);
+                }
+
+                // 平台图标
+                const beiklive::enums::FileType fileType = platformToFileType(m_candidates[i]);
+                const std::string iconPath =
+                    beiklive::tools::getIconPathWithPrefix(fileType, pathPrefix);
+                int imageHandle = _iconHandle(fileType, iconPath, vg);
+                if (imageHandle > 0)
+                {
+                    int iw = 0, ih = 0;
+                    nvgImageSize(vg, imageHandle, &iw, &ih);
+                    if (iw > 0 && ih > 0)
+                    {
+                        float drawW = 34.f;
+                        float drawH = drawW * static_cast<float>(ih) / iw;
+                        const NVGpaint ip = nvgImagePattern(
+                            vg, rowX + 14.f, rowY + (rowH - 8.f) * 0.5f - drawH * 0.5f,
+                            drawW, drawH, 0.f, imageHandle, alpha);
+                        nvgBeginPath(vg);
+                        nvgRoundedRect(vg, rowX + 14.f,
+                                       rowY + (rowH - 8.f) * 0.5f - drawH * 0.5f,
+                                       drawW, drawH, 6.f);
+                        nvgFillPaint(vg, ip);
+                        nvgFill(vg);
+                    }
+                }
+
+                // 平台名
+                nvgFontFaceId(vg, m_defaultFont);
+                nvgFontSize(vg, 20.f);
+                nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                nvgFillColor(vg, focused
+                    ? nvgRGBA(255, 255, 255, 255)
+                    : nvgRGBA(226, 232, 240, 220));
+                const std::string name =
+                    beiklive::tools::platformName(m_candidates[i]);
+                nvgText(vg, rowX + 62.f, rowY + (rowH - 8.f) * 0.5f,
+                        name.c_str(), nullptr);
+
+                // 右侧提示
+                nvgFontSize(vg, 14.f);
+                nvgFillColor(vg, focused
+                    ? nvgRGBA(79, 193, 255, 235)
+                    : nvgRGBA(150, 158, 172, 150));
+                nvgText(vg, rowX + rowW - 14.f, rowY + (rowH - 8.f) * 0.5f,
+                        focused ? L("按 A 启动").c_str() : L("选择").c_str(), nullptr);
+            }
+
+            nvgRestore(vg);
+        }
+
+    private:
+        int _iconHandle(beiklive::enums::FileType fileType, const std::string& path, NVGcontext* vg)
+        {
+            const auto it = m_iconCache.find(path);
+            if (it != m_iconCache.end())
+                return it->second;
+            int handle = nvgCreateImage(vg, path.c_str(), 0);
+            if (handle == 0)
+                handle = -1;
+            m_iconCache[path] = handle;
+            return handle;
+        }
+
+        void _pollInput()
+        {
+            auto& st = brls::Application::getControllerState();
+            const bool up = st.buttons[brls::BUTTON_UP] ||
+                            st.buttons[brls::BUTTON_NAV_UP];
+            const bool down = st.buttons[brls::BUTTON_DOWN] ||
+                              st.buttons[brls::BUTTON_NAV_DOWN];
+            const bool left = st.buttons[brls::BUTTON_LEFT] ||
+                              st.buttons[brls::BUTTON_NAV_LEFT];
+            const bool right = st.buttons[brls::BUTTON_RIGHT] ||
+                               st.buttons[brls::BUTTON_NAV_RIGHT];
+            const bool a = st.buttons[brls::BUTTON_A];
+            const bool b = st.buttons[brls::BUTTON_B];
+            const bool start = st.buttons[brls::BUTTON_START];
+
+            if (up && !m_prevUp)
+                _move(-1);
+            if (down && !m_prevDown)
+                _move(1);
+            if (left && !m_prevLeft)
+                _move(-1);
+            if (right && !m_prevRight)
+                _move(1);
+            if (a && !m_prevA)
+                _finish(m_selected);
+            if ((b && !m_prevB) || (start && !m_prevStart))
+                _finish(-1);
+
+            m_prevUp = up;
+            m_prevDown = down;
+            m_prevLeft = left;
+            m_prevRight = right;
+            m_prevA = a;
+            m_prevB = b;
+            m_prevStart = start;
+        }
+
+        void _move(int dir)
+        {
+            if (m_candidates.empty())
+                return;
+            m_selected = (m_selected + dir + static_cast<int>(m_candidates.size())) %
+                         static_cast<int>(m_candidates.size());
+            brls::Application::getAudioPlayer()->play(brls::SOUND_CLICK);
+            invalidate();
+        }
+
+        void _finish(int index)
+        {
+            if (m_closing)
+                return;
+            m_closing = true;
+            brls::Application::getAudioPlayer()->play(brls::SOUND_CLICK);
+            const int platform =
+                (index >= 0 && index < static_cast<int>(m_candidates.size()))
+                    ? m_candidates[static_cast<size_t>(index)] : -1;
+            brls::sync([this, platform]() {
+                if (onPicked)
+                    onPicked(platform);
+            });
+        }
+
+        std::vector<int> m_candidates;
+        int m_selected = 0;
+        std::string m_fileName;
+        bool m_open = false;
+        bool m_closing = false;
+        float m_progress = 0.f;
+        std::chrono::steady_clock::time_point m_lastFrame;
+        int m_defaultFont = -1;
+        int m_materialFont = -1;
+        int m_switchFont = -1;
+        bool m_prevUp = false;
+        bool m_prevDown = false;
+        bool m_prevLeft = false;
+        bool m_prevRight = false;
+        bool m_prevA = false;
+        bool m_prevB = false;
+        bool m_prevStart = false;
+        std::unordered_map<std::string, int> m_iconCache;
+    };
+
+
     class HomeShortcutSettingsOverlay final : public brls::View
     {
     public:
@@ -152,6 +532,20 @@ namespace beiklive
             auto toggle = [this](brls::View*) -> bool {
                 if (!m_open || m_closing)
                     return m_open;
+                // iisu 模式：按钮列表（布局调整 / 卡片设置）
+                if (m_showLayoutButtons) {
+                    brls::Application::getAudioPlayer()->play(brls::SOUND_CLICK);
+                    if (m_selectedRow == 0) {
+                        if (onLayoutEditRequested)
+                            onLayoutEditRequested();
+                    } else {
+                        if (onCardSettingsRequested)
+                            onCardSettingsRequested();
+                    }
+                    close();
+                    return true;
+                }
+                // switch 模式：PICO-8 入口显示切换
                 m_pico8Visible = !m_pico8Visible;
                 m_press = 1.f;
                 brls::Application::getAudioPlayer()->play(brls::SOUND_CLICK);
@@ -167,14 +561,22 @@ namespace beiklive
                 close();
                 return true;
             };
+            auto rowMove = [this](int dir) -> bool {
+                if (!m_open || m_closing || !m_showLayoutButtons)
+                    return m_open;
+                m_selectedRow = (m_selectedRow + dir + 2) % 2;
+                brls::Application::getAudioPlayer()->play(brls::SOUND_FOCUS_CHANGE);
+                invalidate();
+                return true;
+            };
 
-            registerAction(L("切换"), brls::BUTTON_A, toggle, false, false, brls::SOUND_NONE);
+            registerAction(L("选择"), brls::BUTTON_A, toggle, false, false, brls::SOUND_NONE);
             registerAction("", brls::BUTTON_LEFT, consume, true, false, brls::SOUND_NONE);
             registerAction("", brls::BUTTON_RIGHT, consume, true, false, brls::SOUND_NONE);
             registerAction("", brls::BUTTON_NAV_LEFT, consume, true, false, brls::SOUND_NONE);
             registerAction("", brls::BUTTON_NAV_RIGHT, consume, true, false, brls::SOUND_NONE);
-            registerAction("", brls::BUTTON_UP, consume, true, false, brls::SOUND_NONE);
-            registerAction("", brls::BUTTON_DOWN, consume, true, false, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_UP, [rowMove](brls::View*) { return rowMove(-1); }, true, true, brls::SOUND_NONE);
+            registerAction("", brls::BUTTON_DOWN, [rowMove](brls::View*) { return rowMove(1); }, true, true, brls::SOUND_NONE);
             registerAction("", brls::BUTTON_NAV_UP, consume, true, false, brls::SOUND_NONE);
             registerAction("", brls::BUTTON_NAV_DOWN, consume, true, false, brls::SOUND_NONE);
             registerAction(L("返回"), brls::BUTTON_B, closeAction, false, false, brls::SOUND_NONE);
@@ -278,14 +680,66 @@ namespace beiklive
             nvgText(vg, panelX + 84.f, panelY + 50.f, L("首页功能").c_str(), nullptr);
             nvgFontSize(vg, 15.f);
             nvgFillColor(vg, nvgRGBA(192, 201, 215, 190));
+            const std::string subtitle =
+                m_showLayoutButtons ? L("布局与卡片设置")
+                                    : L("首页快捷按键显示设置");
             nvgText(vg, panelX + 35.f, panelY + 83.f,
-                    L("首页快捷按键显示设置").c_str(), nullptr);
+                    subtitle.c_str(), nullptr);
 
-            const float rowX = panelX + 28.f;
-            const float rowY = panelY + 124.f;
-            const float rowW = panelW - 56.f;
-            const float rowH = 78.f;
-            if (m_showPico8Option) {
+            if (m_showLayoutButtons) {
+                // iisu 模式：按钮列表（布局调整 / 卡片设置）
+                const float rowX = panelX + 28.f;
+                const float rowW = panelW - 56.f;
+                constexpr float rowH = 64.f;
+                constexpr float rowGap = 12.f;
+                const float rowsY = panelY + 108.f;
+                const std::string icons[2] = {
+                    _utf8(beiklive::material::EDIT),
+                    _utf8(beiklive::material::SETTINGS),
+                };
+                const char* labels[2] = {
+                    L("布局调整").c_str(),
+                    L("卡片设置").c_str(),
+                };
+                for (int i = 0; i < 2; ++i) {
+                    const bool selected = m_selectedRow == i;
+                    const float ry = rowsY + static_cast<float>(i) * (rowH + rowGap);
+                    const float rowScale = 1.f - (selected ? m_press : 0.f) * 0.018f;
+                    nvgSave(vg);
+                    nvgTranslate(vg, rowX + rowW * 0.5f, ry + rowH * 0.5f);
+                    nvgScale(vg, rowScale, rowScale);
+                    nvgTranslate(vg, -(rowX + rowW * 0.5f), -(ry + rowH * 0.5f));
+                    nvgBeginPath(vg);
+                    nvgRoundedRect(vg, rowX, ry, rowW, rowH, 12.f);
+                    nvgFillColor(vg, selected
+                        ? nvgRGBA(91, 193, 255, 220)
+                        : nvgRGBA(255, 255, 255, 14));
+                    nvgFill(vg);
+                    nvgStrokeColor(vg, selected
+                        ? nvgRGBA(168, 224, 255, 230)
+                        : nvgRGBA(255, 255, 255, 45));
+                    nvgStrokeWidth(vg, 1.f);
+                    nvgStroke(vg);
+                    nvgFontFaceId(vg, m_materialFont);
+                    nvgFontSize(vg, 30.f);
+                    nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
+                    nvgFillColor(vg, selected
+                        ? nvgRGBA(18, 24, 34, 245)
+                        : nvgRGBA(96, 195, 255, 235));
+                    nvgText(vg, rowX + 22.f, ry + rowH * 0.5f, icons[i].c_str(), nullptr);
+                    nvgFontFaceId(vg, m_defaultFont);
+                    nvgFontSize(vg, 22.f);
+                    nvgFillColor(vg, selected
+                        ? nvgRGBA(18, 24, 34, 245)
+                        : nvgRGBA(242, 245, 250, 242));
+                    nvgText(vg, rowX + 68.f, ry + rowH * 0.5f, labels[i], nullptr);
+                    nvgRestore(vg);
+                }
+            } else if (m_showPico8Option) {
+                const float rowX = panelX + 28.f;
+                const float rowY = panelY + 124.f;
+                const float rowW = panelW - 56.f;
+                const float rowH = 78.f;
                 const float rowScale = 1.f - m_press * 0.018f;
                 nvgSave(vg);
                 nvgTranslate(vg, rowX + rowW * 0.5f, rowY + rowH * 0.5f);
@@ -314,15 +768,20 @@ namespace beiklive
             }
 
             float cursor = panelX + panelW - 30.f;
+            const std::string hintA = m_showLayoutButtons ? L("选择") : L("切换");
             _drawHint(vg, brls::BUTTON_START, L("关闭").c_str(), cursor, panelY + panelH - 27.f, alpha);
             _drawHint(vg, brls::BUTTON_B, L("返回").c_str(), cursor, panelY + panelH - 27.f, alpha);
-            _drawHint(vg, brls::BUTTON_A, L("切换").c_str(), cursor, panelY + panelH - 27.f, alpha);
+            _drawHint(vg, brls::BUTTON_A, hintA.c_str(),
+                      cursor, panelY + panelH - 27.f, alpha);
         }
 
         std::function<void(bool)> onPico8VisibleChanged;
         std::function<void()> onClosed;
+        std::function<void()> onLayoutEditRequested;
+        std::function<void()> onCardSettingsRequested;
 
         void setShowPico8Option(bool show) { m_showPico8Option = show; }
+        void setShowLayoutButtons(bool show) { m_showLayoutButtons = show; }
 
     private:
         static float _clamp01(float value)
@@ -419,6 +878,8 @@ namespace beiklive
         bool m_closing = false;
         bool m_pico8Visible = true;
         bool m_showPico8Option = true;
+        bool m_showLayoutButtons = false;
+        int m_selectedRow = 0;
         float m_progress = 0.f;
         float m_press = 0.f;
         int m_defaultFont = -1;
@@ -581,84 +1042,38 @@ namespace beiklive
 
             auto entryOpt = beiklive::GameDB->findByPath(dirItem.fullPath);
             beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
-            bool changed = !entryOpt.has_value();
-
-            const auto packedInfo = beiklive::packed_rom::hasSupportedExtension(dirItem.fullPath)
-                ? beiklive::packed_rom::readInfo(dirItem.fullPath)
-                : std::optional<beiklive::packed_rom::Info>{};
-            const int platform = packedInfo
-                ? packedInfo->platform
-                : static_cast<int>(dirItem.itemType);
+            const int platform = static_cast<int>(dirItem.itemType);
             const std::string stem = beiklive::tools::getFileNameWithoutExtension(dirItem.fileName);
             const std::string fallbackTitle = GET_MAPPING_KEY_STR(stem, stem);
-            const bool firstPackedImport = packedInfo && entry.romxBodySha256.empty() &&
-                entry.romxMetadataJson.empty();
 
-            if (entry.path.empty()) {
-                entry.path = dirItem.fullPath;
-                changed = true;
-            }
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE) ||
-                (firstPackedImport && entry.platform != platform)) {
-                entry.platform = platform;
-                changed = true;
-            }
-            if (entry.core.empty()) {
-                entry.core = beiklive::GetDefaultCoreId(platform);
-                changed = true;
-            }
-            entry.core = beiklive::NormalizeCoreId(entry.platform, entry.core);
-            if (entry.title.empty() || (firstPackedImport && entry.title == fallbackTitle)) {
-                const std::string packedTitle = packedInfo ? packedInfo->title : std::string{};
-                entry.title = packedTitle.empty() ? fallbackTitle : packedTitle;
-                changed = true;
-            }
-            if (entry.savePath.empty()) {
-                entry.savePath = beiklive::tools::defaultGameSavePath(entry.platform, entry.path);
-                changed = true;
-            }
-            const std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
-                static_cast<beiklive::enums::EmuPlatform>(entry.platform), entry.path);
-            if (entry.logoPath.empty() || (firstPackedImport && entry.logoPath == defaultLogo)) {
-                std::string packedCover;
-                if (packedInfo)
-                    packedCover = beiklive::packed_rom::extractCover(
-                        entry.path, *packedInfo, entry.savePath);
-                entry.logoPath = packedCover.empty()
-                    ? defaultLogo
-                    : packedCover;
-                changed = true;
-            }
-            if (packedInfo) {
-                if (!packedInfo->crc32.empty())
-                    entry.crc32 = static_cast<int>(packedInfo->lookupCrc32);
-                entry.developer = packedInfo->developer;
-                entry.releaseDate = packedInfo->releaseDate;
-                entry.genre = packedInfo->genre;
-                entry.region = packedInfo->region;
-                entry.romxBodySha256 = packedInfo->bodySha256;
-                entry.romxMetadataJson = packedInfo->metadataJson;
-                changed = true;
-            }
+            // ROMX metadata、封面和 header 信息统一由适配器写入 GameEntry。
+            beiklive::romx::RomxGameEntryOptions options;
+            options.fallbackPlatform = platform;
+            options.fallbackTitle = fallbackTitle;
+            options.extractCover = true;
+            const auto adapterResult = beiklive::romx::RomxGameEntryAdapter::apply(
+                entry, dirItem.fullPath, options);
+            bool changed = !entryOpt.has_value() || adapterResult.changed;
+            if (adapterResult.romxCandidate && !adapterResult.romxValid)
+                brls::Logger::warning("StartPage: invalid ROMX file {}: {}",
+                                      dirItem.fullPath, adapterResult.error);
 
-            if (beiklive::tools::tryUseNdsInternalIconCover(entry))
-                changed = true;
-            if (entry.screenShotPath.empty()) {
-                entry.screenShotPath = beiklive::path::screenshotPath();
-                changed = true;
-            }
-
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS)) {
-                std::string titlePath = entry.path;
-                if (packedInfo) {
-                    const std::string extracted = beiklive::packed_rom::prepareRomForLaunch(entry.path);
-                    if (!extracted.empty()) titlePath = extracted;
-                }
-                const std::string titleId = beiklive::three_ds::resolveTitleId(
-                    entry.threeDsTitleId, titlePath);
-                if (!titleId.empty() && titleId != entry.threeDsTitleId) {
-                    entry.threeDsTitleId = titleId;
+            // PSP 的 ISO/CSO 标题和 ICON0 仍由上游解析器负责，ROMX 封面优先保留。
+            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)) {
+                const std::string realTitle = beiklive::psp_meta::ExtractTitle(entry.path);
+                if (!realTitle.empty() && entry.title == fallbackTitle) {
+                    entry.title = realTitle;
                     changed = true;
+                }
+                const std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
+                    static_cast<beiklive::enums::EmuPlatform>(entry.platform), entry.path);
+                if (entry.logoPath.empty() || entry.logoPath == defaultLogo) {
+                    const std::string icon = beiklive::psp_meta::ExtractIcon0(
+                        entry.path, entry.savePath);
+                    if (!icon.empty() && icon != entry.logoPath) {
+                        entry.logoPath = icon;
+                        changed = true;
+                    }
                 }
             }
 
@@ -684,16 +1099,17 @@ namespace beiklive
 #ifdef __SWITCH__
         bool launchNdsExternalNro(const std::string& romPath, const std::string& title)
         {
-            std::string packedError;
-            const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
-                romPath, &packedError);
-            if (launchPath.empty())
-            {
-                brls::Application::notify(L("NDS 打包 ROM 解包失败：") + packedError);
-                return false;
-            }
             const std::string nroPath = GET_SETTING_KEY_STR("nds.externalNro.path", "/GBAStation/core/GBAStationNDSStub.nro");
             const std::string returnPath = GET_SETTING_KEY_STR("nds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
+            std::string materializeError;
+            beiklive::romx::RomxLaunchSession session(romPath);
+            const std::string launchPath = session.materialize(&materializeError);
+            if (launchPath.empty())
+            {
+                brls::Logger::error("NDS ROMX materialization failed for {}: {}", title, materializeError);
+                brls::Application::notify(L("NDS ROMX 准备失败：") + materializeError);
+                return false;
+            }
 
             auto result = beiklive::switch_platform::launchNroOnExit({nroPath, launchPath, returnPath});
             if (!result.success)
@@ -712,18 +1128,19 @@ namespace beiklive
         bool launchThreeDsExternalNro(const std::string& romPath, const std::string& title)
         {
             exportThreeDsCoreConfig();
-            std::string packedError;
-            const std::string launchPath = beiklive::packed_rom::prepareRomForLaunch(
-                romPath, &packedError);
-            if (launchPath.empty())
-            {
-                brls::Application::notify(L("3DS 打包 ROM 解包失败：") + packedError);
-                return false;
-            }
             const std::string nroPath = GET_SETTING_KEY_STR(
                 "3ds.externalNro.path", "/GBAStation/core/GBAStation3DSStub.nro");
             const std::string returnPath = GET_SETTING_KEY_STR(
                 "3ds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
+            std::string materializeError;
+            beiklive::romx::RomxLaunchSession session(romPath);
+            const std::string launchPath = session.materialize(&materializeError);
+            if (launchPath.empty())
+            {
+                brls::Logger::error("3DS ROMX materialization failed for {}: {}", title, materializeError);
+                brls::Application::notify(L("3DS ROMX 准备失败：") + materializeError);
+                return false;
+            }
 
             auto result = beiklive::switch_platform::launchNroOnExit(
                 {nroPath, launchPath, returnPath});
@@ -748,9 +1165,19 @@ namespace beiklive
                                    const char* defaultPath,
                                    const char* returnKey)
         {
+            std::string materializeError;
+            beiklive::romx::RomxLaunchSession session(romPath);
+            const std::string launchPath = session.materialize(&materializeError);
+            if (launchPath.empty())
+            {
+                brls::Logger::error("{} ROMX materialization failed for {}: {}",
+                                    label, title, materializeError);
+                brls::Application::notify(label + std::string(L(" ROMX 准备失败：")) + materializeError);
+                return false;
+            }
             if (platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast))
             {
-                std::string extension = std::filesystem::path(romPath).extension().string();
+                std::string extension = std::filesystem::path(launchPath).extension().string();
                 std::transform(extension.begin(), extension.end(), extension.begin(),
                                [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
                 if (extension == ".iso")
@@ -769,11 +1196,11 @@ namespace beiklive
 
             const std::string nroPath = GET_SETTING_KEY_STR(pathKey, defaultPath);
             const std::string returnPath = GET_SETTING_KEY_STR(returnKey, "sdmc:/switch/GBAStation.nro");
-			const std::string sessionToken = beiklive::makeExternalCoreSessionToken(romPath);
+            const std::string sessionToken = beiklive::makeExternalCoreSessionToken(launchPath);
 
 			beiklive::switch_platform::NroLaunchRequest request;
 			request.nroPath = nroPath;
-			request.romPath = romPath;
+            request.romPath = launchPath;
 			request.returnNroPath = returnPath;
 			request.extraArgs = {"--gbastation-session", sessionToken};
 			auto result = beiklive::switch_platform::launchNroOnExit(request);
@@ -784,8 +1211,8 @@ namespace beiklive
                 return false;
             }
 
-			if (!beiklive::beginExternalCoreSession(romPath, platform, sessionToken))
-				brls::Logger::error("{} external session tracking could not start for {}", label, romPath);
+            if (!beiklive::beginExternalCoreSession(launchPath, platform, sessionToken))
+                brls::Logger::error("{} external session tracking could not start for {}", label, launchPath);
 
             brls::Logger::info("{} external NRO configured for {}: {}", label, title, result.message);
             brls::Application::notify(L("正在启动") + label + L("独立NRO..."));
@@ -909,7 +1336,8 @@ namespace beiklive
 
                 brls::sync([this, gen, recent = std::move(recent),
                             prepared = std::move(prepared)]() mutable {
-                    if (!m_alive.load() || gen != m_recentRefreshGen.load() || !switchLayout) return;
+                    if (!m_alive.load() || gen != m_recentRefreshGen.load() ||
+                        (!switchLayout && !iisuLayout)) return;
 
                     m_libraryPreparedData = std::move(prepared);
                     brls::View* currentFocus = brls::Application::getCurrentFocus();
@@ -1026,7 +1454,7 @@ namespace beiklive
         return true;
     }
 
-    void StartPage::_pushGameActivity(const beiklive::DirListData& dirItem, beiklive::Box* previousPage)
+void StartPage::_launchDirItem(const beiklive::DirListData& dirItem, beiklive::Box* previousPage)
     {
         if (!beiklive::tools::isFileExists(dirItem.fullPath)) {
             brls::Application::notify(L("文件不存在: ") + dirItem.fileName);
@@ -1097,17 +1525,14 @@ namespace beiklive
         }
 
         beiklive::GamePage* gamePage = nullptr;
-        if (beiklive::packed_rom::hasSupportedExtension(dirItem.fullPath)) {
+        if (beiklive::romx::hasSupportedExtension(dirItem.fullPath))
+        {
             ensureGameDbEntryForFileLaunch(dirItem);
-            const auto packedEntry = beiklive::GameDB
-                ? beiklive::GameDB->findByPath(dirItem.fullPath)
-                : std::optional<beiklive::GameEntry>{};
-            gamePage = packedEntry
-                ? new beiklive::GamePage(*packedEntry)
-                : new beiklive::GamePage(dirItem);
-        } else {
-            gamePage = new beiklive::GamePage(dirItem);
+            if (const auto entry = beiklive::GameDB->findByPath(dirItem.fullPath))
+                gamePage = new beiklive::GamePage(*entry);
         }
+        if (!gamePage)
+            gamePage = new beiklive::GamePage(dirItem);
         m_gamePage = gamePage;
         auto* frame = new brls::AppletFrame(gamePage);
         HIDE_BRLS_BAR(frame);
@@ -1117,6 +1542,63 @@ namespace beiklive
             new brls::Activity(frame), brls::TransitionAnimation::NONE);
         gamePage->startGame();
     }
+
+void StartPage::_pushGameActivity(const beiklive::DirListData& dirItem, beiklive::Box* previousPage)
+{
+    if (!beiklive::tools::isFileExists(dirItem.fullPath))
+    {
+        brls::Application::notify(L("文件不存在: ") + dirItem.fileName);
+        return;
+    }
+
+    // 歧义后缀（iso/bin/cue/zip/7z 等可属于多个机种）：弹窗让用户选择机种。
+    const std::string ext = beiklive::tools::getFileExtension(
+        std::filesystem::path(dirItem.fullPath));
+    const auto candidates = beiklive::tools::candidatePlatformsForExtension(ext);
+    if (candidates.size() > 1)
+    {
+        const int currentPlatform = beiklive::tools::platformFromFileType(dirItem.itemType);
+        int defaultIndex = 0;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            if (candidates[i] == currentPlatform)
+            {
+                defaultIndex = static_cast<int>(i);
+                break;
+            }
+        }
+        _showPlatformPicker(dirItem, previousPage, candidates, defaultIndex);
+        return;
+    }
+    _launchDirItem(dirItem, previousPage);
+}
+
+void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
+                                    beiklive::Box* previousPage,
+                                    const std::vector<int>& candidates,
+                                    int defaultIndex)
+{
+    if (!m_platformPicker || m_platformPicker->isOpen())
+        return;
+    m_platformPicker->onPicked = [this, dirItem, previousPage](int platform) {
+        if (m_fileListPage)
+        {
+            m_fileListPage->setInteractionDisabled(false);
+            m_fileListPage->setPickerActive(false);
+        }
+        if (platform < 0)
+            return; // 取消
+        beiklive::DirListData forced = dirItem;
+        forced.itemType = platformToFileType(platform);
+        _launchDirItem(forced, previousPage);
+    };
+    if (m_fileListPage)
+    {
+        m_fileListPage->setInteractionDisabled(true);
+        m_fileListPage->setPickerActive(true);
+    }
+    m_platformPicker->open(candidates, defaultIndex, dirItem.fileName);
+}
 
     void StartPage::_useSwitchLayout()
     {
@@ -1277,7 +1759,7 @@ namespace beiklive
         iisuLayout->onPico8Opened = [this]()
         {
             brls::Logger::info("PICO-8 shortcut opened (iisu layout)");
-            brls::Application::notify(L("iisu 布局暂不支持 PICO-8 入口"));
+            _openPico8Page();
         };
 
         iisuLayout->onExitRequested = [this]()
@@ -1300,6 +1782,15 @@ namespace beiklive
         this->getContentBox()->addView(iisuLayout);
         m_shortcutSettingsOverlay = new HomeShortcutSettingsOverlay();
         m_shortcutSettingsOverlay->setShowPico8Option(false);
+        m_shortcutSettingsOverlay->setShowLayoutButtons(true);
+        m_shortcutSettingsOverlay->onLayoutEditRequested = [this]() {
+            if (iisuLayout)
+                iisuLayout->enterEditMode();
+        };
+        m_shortcutSettingsOverlay->onCardSettingsRequested = [this]() {
+            if (iisuLayout)
+                iisuLayout->requestCardSettings();
+        };
         m_shortcutSettingsOverlay->onPico8VisibleChanged = [this](bool visible) {
             SET_SETTING_KEY_INT(
                 beiklive::SettingKey::KEY_UI_PICO8_SHORTCUT_VISIBLE,
@@ -1328,11 +1819,13 @@ namespace beiklive
 
     void StartPage::_openPico8Page()
     {
-        if (!switchLayout) {
+        if (!switchLayout && !iisuLayout) {
             brls::Application::unblockInputs();
             return;
         }
-        auto* pico8Page = new beiklive::Pico8Page(switchLayout);
+        auto* pico8Page = switchLayout
+            ? new beiklive::Pico8Page(switchLayout)
+            : new beiklive::Pico8Page(iisuLayout);
         brls::Application::pushActivity(
             new brls::Activity(pico8Page),
             brls::TransitionAnimation::NONE);
@@ -1378,6 +1871,8 @@ namespace beiklive
     {
         brls::Logger::debug("Opening File List Page");
         m_fileListPage = new beiklive::FileListPage();
+        m_platformPicker = new PlatformPickerOverlay();
+        m_fileListPage->addView(m_platformPicker);
         m_fileListPage->onRequestClose = [this]() {
             beiklive::popActivity(m_fileListPage);
         };
@@ -1392,10 +1887,20 @@ namespace beiklive
 
                 return true;
             });
-        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "gbx", "gbcx", "gbax", "nes", "fds", "nesx", "fdsx", "sfc", "smc", "sfcx", "smcx", "nds", "ndsx", "cia", "cci", "3ds", "ciax", "ccix", "3dsx", "md", "gen", "bin", "smd", "mdx", "genx", "binx", "smdx", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "zip", "7z", "png"});
+        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "nes", "fds", "sfc", "smc", "nds", "cia", "cci", "3ds", "md", "gen", "bin", "smd", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "cso", "pbp", "zip", "7z", "png"});
 
         m_fileListPage->onFileSelected = [this](beiklive::DirListData dirItem)
         {
+            // 歧义后缀（iso/bin/cue/zip/7z 等）：多机种可运行，弹出机种选择
+            const std::vector<int> candidates =
+                beiklive::tools::candidatePlatformsForExtension(
+                    beiklive::tools::getFileExtension(dirItem.fullPath));
+            if (candidates.size() > 1)
+            {
+                _showPlatformPicker(dirItem, this, candidates, 0);
+                return;
+            }
+
             switch (dirItem.itemType)
             {
             case beiklive::enums::FileType::IMAGE_FILE:
@@ -1496,6 +2001,9 @@ namespace beiklive
         if (switchLayout) {
             m_gameOptionsSidebar->setNanoVgPreviewImageHandle(
                 switchLayout->acquireSelectedCoverTexture());
+        } else if (iisuLayout) {
+            m_gameOptionsSidebar->setNanoVgPreviewImageHandle(
+                iisuLayout->acquireSelectedCoverTexture());
         }
         this->getBottomBar()->setVisibility(brls::Visibility::GONE);
 
@@ -1669,6 +2177,8 @@ namespace beiklive
                             ++m_recentRefreshGen;
                             if (switchLayout)
                                 switchLayout->removeGameByPath(path);
+                            else if (iisuLayout)
+                                iisuLayout->removeGameByPath(path);
 
                             auto alive = m_aliveToken;
                             ThreadPool::instance().enqueue([
@@ -1705,6 +2215,8 @@ namespace beiklive
                                         m_homeDeletePending = false;
                                         if (switchLayout)
                                             switchLayout->cancelGameRemoval();
+                                        else if (iisuLayout)
+                                            iisuLayout->cancelGameRemoval();
                                         brls::Application::notify(
                                             deleteRomFile && !removedFile
                                                 ? L("游戏文件删除失败，记录已保留")
@@ -1730,6 +2242,9 @@ namespace beiklive
                                     if (switchLayout)
                                         switchLayout->completeGameRemoval(
                                             std::move(finish));
+                                    else if (iisuLayout)
+                                        iisuLayout->completeGameRemoval(
+                                            std::move(finish));
                                     else
                                         finish();
                                 });
@@ -1750,8 +2265,12 @@ namespace beiklive
         m_gameOptionsSidebar->onClosed = [this]() {
             if (switchLayout)
                 switchLayout->releaseSelectedCoverTexture();
+            if (iisuLayout)
+                iisuLayout->releaseSelectedCoverTexture();
             if (switchLayout)
                 switchLayout->restoreCardFocus(false);
+            if (iisuLayout)
+                iisuLayout->restoreCardFocus(false);
             this->getBottomBar()->setVisibility(brls::Visibility::GONE);
         };
         m_gameOptionsSidebar->onCloseRequested = [this]() {
@@ -1770,6 +2289,8 @@ namespace beiklive
         m_gameOptionsSidebar = nullptr;
         if (switchLayout)
             switchLayout->releaseSelectedCoverTexture();
+        if (iisuLayout)
+            iisuLayout->releaseSelectedCoverTexture();
         stale->removeFromSuperView(true);
         this->getBottomBar()->setVisibility(brls::Visibility::GONE);
     }

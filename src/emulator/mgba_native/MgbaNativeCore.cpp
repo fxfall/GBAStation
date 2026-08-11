@@ -2,7 +2,7 @@
 
 #include "core/Tools.hpp"
 #include "emulator/mgba_native/MgbaCheatSystem.hpp"
-#include "core/PackedRom.hpp"
+#include "core/RomxLaunchSession.hpp"
 
 #include <mgba/core/blip_buf.h>
 #include <mgba/core/cheats.h>
@@ -18,6 +18,7 @@
 #include <mgba/internal/gb/overrides.h>
 #include <mgba/internal/sm83/sm83.h>
 #include <mgba-util/vfs.h>
+#include <romx/romx.h>
 
 #include <algorithm>
 #include <cctype>
@@ -628,13 +629,18 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
         return false;
     }
 
-    std::string packedError;
-    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(romPath, &packedError);
-    if (loadPath.empty())
+    beiklive::romx::RomxLaunchSession session(romPath);
+    std::string loadPath = romPath;
+    if (!session.isRomx())
     {
-        brls::Logger::error("MgbaNativeCore: packed ROM extraction failed: {} ({})",
-                            romPath, packedError);
-        return false;
+        std::string packedError;
+        loadPath = session.materialize(&packedError);
+        if (loadPath.empty())
+        {
+            brls::Logger::error("MgbaNativeCore: ROM preparation failed: {} ({})",
+                                romPath, packedError);
+            return false;
+        }
     }
 
     releaseCore();
@@ -674,7 +680,42 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
     brls::Logger::debug("MgbaNativeCore: pre-load config applied ok");
 
     brls::Logger::debug("MgbaNativeCore: loading ROM file");
-    if (!mCoreLoadFile(m_core, loadPath.c_str()))
+    bool loaded = false;
+    if (session.isRomx())
+    {
+        std::string mappingError;
+        if (session.mapPayload(&mappingError))
+        {
+            const void* data = session.mappedData();
+            const std::uint64_t size = session.mappedSize();
+            if (data && size != 0 && size <= static_cast<std::uint64_t>(SIZE_MAX))
+            {
+                VFile* vf = VFileFromConstMemory(data, static_cast<size_t>(size));
+                if (vf)
+                {
+                    loaded = m_core->loadROM(m_core, vf);
+                    if (!loaded) vf->close(vf);
+                    else m_romxMapping = session.takeMapping();
+                }
+            }
+        }
+    }
+    if (!loaded)
+    {
+        if (session.isRomx())
+        {
+            std::string extractionError;
+            loadPath = session.materialize(&extractionError);
+            if (loadPath.empty())
+            {
+                brls::Logger::error("MgbaNativeCore: ROMX mapping and extraction failed: {}", extractionError);
+                releaseCore();
+                return false;
+            }
+        }
+        loaded = mCoreLoadFile(m_core, loadPath.c_str());
+    }
+    if (!loaded)
     {
         brls::Logger::error("MgbaNativeCore: mCoreLoadFile failed: {}", loadPath);
         releaseCore();
@@ -1605,6 +1646,13 @@ void MgbaNativeCore::updateKeys()
 
 void MgbaNativeCore::releaseCore()
 {
+    auto releaseRomxMapping = [this]() {
+        if (m_romxMapping)
+        {
+            romx_payload_mapping_close(m_romxMapping);
+            m_romxMapping = nullptr;
+        }
+    };
     {
         std::lock_guard<std::mutex> lock(m_audioMutex);
         m_audioBuffer.clear();
@@ -1632,6 +1680,7 @@ void MgbaNativeCore::releaseCore()
         m_audioStream = {};
         releaseFallbackCheatDevice();
         shutdownNativeAudioOutput();
+        releaseRomxMapping();
         return;
     }
 
@@ -1658,6 +1707,7 @@ void MgbaNativeCore::releaseCore()
         std::free(m_core);
     }
     m_core = nullptr;
+    releaseRomxMapping();
     m_coreInitialized = false;
     m_configInitialized = false;
     shutdownNativeAudioOutput();

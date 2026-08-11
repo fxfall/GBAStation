@@ -4,7 +4,6 @@ cmake_minimum_required(VERSION 3.10)
 
 set(BOREALIS_LIBRARY ${CMAKE_CURRENT_SOURCE_DIR}/third_party/borealis/library)
 set(MGBA_PATH        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mgba)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-c++11-narrowing")
 
 # 构建选项
 include(${BOREALIS_LIBRARY}/cmake/commonOption.cmake)
@@ -28,9 +27,9 @@ include(${BOREALIS_LIBRARY}/cmake/toolchain.cmake)
 
 # 项目信息
 project(GBAStation)
-set(VERSION_MAJOR "3")
-set(VERSION_MINOR "7")
-set(VERSION_ALTER "0")
+set(VERSION_MAJOR "0")
+set(VERSION_MINOR "3")
+set(VERSION_ALTER "9")
 set(VERSION_BUILD "0")
 set(PACKAGE_NAME "com.beiklive.GBAStation")
 set(PROJECT_AUTHOR "beiklive")
@@ -46,6 +45,17 @@ endif()
 if (USE_LIBROMFS)
     add_libromfs(${PROJECT_NAME} ${PROJECT_RESOURCES})
 endif ()
+
+# ROMX 解析和区域访问由独立的 libromx 库提供。允许下游构建覆盖源目录，
+# 同时以仓库子模块作为可复现的默认位置。
+set(ROMX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libromx" CACHE PATH
+    "Path to the standalone libromx source tree")
+if (EXISTS "${ROMX_SOURCE_DIR}/CMakeLists.txt")
+    add_subdirectory("${ROMX_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/libromx" EXCLUDE_FROM_ALL)
+else()
+    message(FATAL_ERROR
+        "libromx was not found. Initialize the submodule or set ROMX_SOURCE_DIR.")
+endif()
 
 
 
@@ -253,6 +263,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE APP_VERSION="${VERSION_MAJOR}
 target_compile_definitions(${PROJECT_NAME} PRIVATE COLOR_16_BIT COLOR_5_6_5)
 target_link_libraries(${PROJECT_NAME} PRIVATE fake08_runtime)
 target_link_libraries(${PROJECT_NAME} PRIVATE genesis_core)
+target_link_libraries(${PROJECT_NAME} PRIVATE ROMX::romx)
 if (PLATFORM_SWITCH)
     add_subdirectory(src/core/forwarder/hbl forwarder_hbl)
     add_dependencies(${PROJECT_NAME} gbastation_forwarder_hbl_exefs)

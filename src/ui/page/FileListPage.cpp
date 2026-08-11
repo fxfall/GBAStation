@@ -1,5 +1,5 @@
 #include "FileListPage.hpp"
-#include "core/PackedRom.hpp"
+#include "core/RomxGameEntryAdapter.hpp"
 #include "core/Translation.hpp"
 #include "ui/utils/AnimationHelper.hpp"
 #include <algorithm>
@@ -54,7 +54,7 @@ namespace beiklive
         {
             if (fileType != beiklive::enums::FileType::NDS_ROM)
                 return fallbackIcon;
-            if (beiklive::packed_rom::hasSupportedExtension(fullPath))
+            if (beiklive::romx::RomxGameEntryAdapter::detectPlatform(fullPath, -1) >= 0)
                 return fallbackIcon;
 
             std::string ndsIcon = beiklive::GetOrCreateNdsIconPath(fullPath);
@@ -410,7 +410,10 @@ namespace beiklive
         _clearDetailInfo();
 
         auto ft = data.itemType;
-        if (ft == beiklive::enums::FileType::GBA_ROM ||
+        const bool isRomx = beiklive::romx::RomxGameEntryAdapter::detectPlatform(
+            data.fullPath, -1) >= 0;
+        if (isRomx ||
+            ft == beiklive::enums::FileType::GBA_ROM ||
             ft == beiklive::enums::FileType::GBC_ROM ||
             ft == beiklive::enums::FileType::GB_ROM  ||
             ft == beiklive::enums::FileType::NES_ROM ||
@@ -494,45 +497,19 @@ namespace beiklive
 
     void FileListPage::_showGameNoDBDetail(const beiklive::DirListData& data)
     {
-        const auto packedInfo = beiklive::packed_rom::hasSupportedExtension(data.fullPath)
-            ? beiklive::packed_rom::readInfo(data.fullPath, nullptr, false)
-            : std::optional<beiklive::packed_rom::Info>{};
-        if (packedInfo)
+        beiklive::GameEntry entry;
+        beiklive::romx::RomxGameEntryOptions options;
+        options.fallbackPlatform = static_cast<int>(data.itemType);
+        options.fallbackTitle = beiklive::tools::getFileNameWithoutExtension(data.fileName);
+        options.coverDirectory = (fs::path(beiklive::path::cachePath()) / "packed_covers").string();
+        options.extractCover = true;
+        options.forceCover = true;
+        const auto result = beiklive::romx::RomxGameEntryAdapter::apply(
+            entry, data.fullPath, options);
+        if (result.romxCandidate && result.romxValid)
         {
-            m_detailTitle->setText(packedInfo->title.empty() ? data.fileName : packedInfo->title);
-            m_detailSubtitle->setText("ROMX · " + _platformName(packedInfo->platform));
-
-            const std::string cover = beiklive::packed_rom::extractCover(
-                data.fullPath, *packedInfo,
-                (fs::path(beiklive::path::cachePath()) / "packed_covers").string());
-            m_detailImage->setVisibility(brls::Visibility::VISIBLE);
-            if (!cover.empty())
-                _requestThumbnail(cover);
-            else
-                m_detailImage->setImageFromFile(data.iconPath.empty()
-                    ? beiklive::tools::getIconPath(data.itemType) : data.iconPath);
-
-            const std::string ext = beiklive::tools::getFileExtension(data.fullPath);
-            _addBadge(ext, nvgRGBA(79, 193, 255, 200), nvgRGBA(255,255,255,255));
-            _addInfoRow(L("容量"), data.fileSize, nvgRGB(255, 183, 77));
-            _addInfoRow(L("平台"), _platformName(packedInfo->platform), nvgRGB(121, 201, 249));
-            if (!packedInfo->developer.empty())
-                _addInfoRow(L("开发商"), packedInfo->developer, nvgRGB(128, 203, 196));
-            if (!packedInfo->releaseDate.empty())
-                _addInfoRow(L("发售日期"), packedInfo->releaseDate, nvgRGB(255, 213, 79));
-            if (!packedInfo->genre.empty())
-            {
-                std::string genres;
-                for (const auto& value : packedInfo->genre)
-                {
-                    if (!genres.empty()) genres += " / ";
-                    genres += value;
-                }
-                _addInfoRow(L("类型"), genres, nvgRGB(186, 104, 200));
-            }
-            if (!packedInfo->region.empty())
-                _addInfoRow(L("地区"), packedInfo->region, nvgRGB(239, 154, 154));
-            _addInfoRow(L("路径"), data.fullPath, nvgRGB(129, 199, 132));
+            // ROMX 详情也统一走 GameEntry，页面不再直接读取容器元数据。
+            _showGameDBDetail(data, entry);
             return;
         }
 
@@ -838,6 +815,17 @@ namespace beiklive
         invalidate();
     }
 
+    void FileListPage::setInteractionDisabled(bool disabled)
+    {
+        fileListView->setInteractionDisabled(disabled);
+    }
+
+    void FileListPage::setPickerActive(bool active)
+    {
+        m_pickerActive = active;
+        invalidate();
+    }
+
     void FileListPage::draw(NVGcontext* vg, float x, float y, float w, float h,
                             brls::Style style, brls::FrameContext* ctx)
     {
@@ -917,19 +905,27 @@ namespace beiklive
         nvgGlobalAlpha(vg, alpha);
         const float hintY = y + h - 27.f + (1.f - eased) * 44.f;
         float cursor = x + w - 30.f;
-        const bool atRoot = m_isAtDriveList || m_currentPath.empty()
-            || fs::path(m_currentPath).parent_path().string() == m_currentPath;
-        drawHint(brls::BUTTON_B,
-                 fileListView->hasActiveFilter() ? L("关闭搜索").c_str()
-                     : (atRoot ? L("返回").c_str() : L("上一级").c_str()),
-                 cursor, hintY);
-        drawHint(brls::BUTTON_A, L("打开/选择").c_str(), cursor, hintY);
-        if (m_dirSelectionMode)
-            drawHint(brls::BUTTON_Y, L("选择目录").c_str(), cursor, hintY);
-        drawHint(brls::BUTTON_X, L("映射名称").c_str(), cursor, hintY);
-        drawHint(brls::BUTTON_RT, L("搜索").c_str(), cursor, hintY);
-        drawHint(brls::BUTTON_RB, m_panelVisible ? L("隐藏详情").c_str() : L("显示详情").c_str(),
-                 cursor, hintY);
+        if (m_pickerActive)
+        {
+            drawHint(brls::BUTTON_B, L("取消").c_str(), cursor, hintY);
+            drawHint(brls::BUTTON_A, L("选择").c_str(), cursor, hintY);
+        }
+        else
+        {
+            const bool atRoot = m_isAtDriveList || m_currentPath.empty()
+                || fs::path(m_currentPath).parent_path().string() == m_currentPath;
+            drawHint(brls::BUTTON_B,
+                     fileListView->hasActiveFilter() ? L("关闭搜索").c_str()
+                         : (atRoot ? L("返回").c_str() : L("上一级").c_str()),
+                     cursor, hintY);
+            drawHint(brls::BUTTON_A, L("打开/选择").c_str(), cursor, hintY);
+            if (m_dirSelectionMode)
+                drawHint(brls::BUTTON_Y, L("选择目录").c_str(), cursor, hintY);
+            drawHint(brls::BUTTON_X, L("映射名称").c_str(), cursor, hintY);
+            drawHint(brls::BUTTON_RT, L("搜索").c_str(), cursor, hintY);
+            drawHint(brls::BUTTON_RB, m_panelVisible ? L("隐藏详情").c_str() : L("显示详情").c_str(),
+                     cursor, hintY);
+        }
         nvgRestore(vg);
     }
 

@@ -1,5 +1,4 @@
 #include "CoreFceumm.hpp"
-#include "core/PackedRom.hpp"
 #include "core/CoreUtils.hpp"
 
 #include <array>
@@ -266,19 +265,9 @@ bool CoreFceumm::_loadRom(const std::string &romPath)
         m_core.unload();
         return false;
     }
-    std::string packedError;
-    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(
-        romPath, &packedError);
-    if (loadPath.empty())
+    if (!m_core.loadGame(romPath))
     {
-        brls::Logger::error("Packed ROM extraction failed: {} ({})", romPath, packedError);
-        m_lastError = "打包 ROM 解包失败:\n" + packedError;
-        m_core.unload();
-        return false;
-    }
-    if (!m_core.loadGame(loadPath))
-    {
-        brls::Logger::error("retro_load_game() failed for: {}", loadPath);
+        brls::Logger::error("retro_load_game() failed for: {}", romPath);
         if (m_lastError.empty())
             m_lastError = "FC/FDS 游戏加载失败:\n" + romPath;
         m_core.unload();

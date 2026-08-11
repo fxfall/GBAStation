@@ -1,6 +1,5 @@
 #include "GameRun.hpp"
 #include "core/cheat/CheatSystem.hpp"
-#include "core/PackedRom.hpp"
 
 namespace beiklive::gba
 {
@@ -195,15 +194,6 @@ void CoreMgba::Cleanup()
 
     bool CoreMgba::_loadRom(const std::string &romPath)
     {
-        std::string packedError;
-        const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(
-            romPath, &packedError);
-        if (loadPath.empty())
-        {
-            brls::Logger::error("CoreMgba: packed ROM extraction failed: {} ({})",
-                                romPath, packedError);
-            return false;
-        }
         if (romPath.empty())
         {
             brls::Logger::error("ROM path is empty");
@@ -217,7 +207,7 @@ void CoreMgba::Cleanup()
             return false;
         }
 
-        if (!m_core.loadGame(loadPath))
+        if (!m_core.loadGame(romPath))
         {
             brls::Logger::error("retro_load_game() failed for: {}", romPath);
             m_core.unload();

@@ -8,7 +8,7 @@
 #include "MemConstants.h"
 #include "NDS.h"
 #include "NDSCart.h"
-#include "core/PackedRom.hpp"
+#include "core/RomxLaunchSession.hpp"
 #include "OpenGLSupport.h"
 #include "SPI_Firmware.h"
 #include "Savestate.h"
@@ -416,16 +416,8 @@ bool MelonDSCore::SetupGame(beiklive::GameEntry GameEntry)
 
     if (!Initialize())
         return false;
-    std::string packedError;
-    const std::string loadPath = beiklive::packed_rom::prepareRomForLaunch(
-        m_gameEntry.path, &packedError);
-    if (loadPath.empty())
-    {
-        brls::Logger::error("melonDS: packed ROM extraction failed: {} ({})",
-                            m_gameEntry.path, packedError);
-        return false;
-    }
-    m_loadedRomPath = loadPath;
+    // ROMX 的 mapping、解包回退统一由 RomxLaunchSession 处理。
+    m_loadedRomPath = m_gameEntry.path;
     if (!LoadGame(m_loadedRomPath))
         return false;
     ReloadCheats();
@@ -542,8 +534,11 @@ bool MelonDSCore::LoadGame(const std::string& path)
         return false;
     }
 
+    beiklive::romx::RomxLaunchSession session(path);
+    const bool isRomx = session.isRomx();
     std::unique_ptr<uint8_t[]> romData;
     std::uintmax_t fileSize = 0;
+    if (!isRomx)
     {
         std::error_code ec;
         fileSize = std::filesystem::file_size(path, ec);
@@ -554,29 +549,61 @@ bool MelonDSCore::LoadGame(const std::string& path)
         }
     }
 
-    std::ifstream rom(path, std::ios::binary);
-    if (!rom)
-    {
-        brls::Logger::error("melonDS: failed to open ROM: {}", path);
-        return false;
-    }
-
-    romData = std::make_unique<uint8_t[]>(static_cast<size_t>(fileSize));
-    rom.read(reinterpret_cast<char*>(romData.get()), static_cast<std::streamsize>(fileSize));
-    if (rom.gcount() != static_cast<std::streamsize>(fileSize))
-    {
-        brls::Logger::error("melonDS: failed to read ROM: {}", path);
-        return false;
-    }
-
     melonDS::NDSCart::NDSCartArgs cartArgs;
     loadBatterySave(cartArgs);
 
     brls::Logger::debug("melonDS: parsing ROM");
-    auto cart = melonDS::NDSCart::ParseROM(std::move(romData),
-                                           static_cast<melonDS::u32>(fileSize),
-                                           &m_platformData,
-                                           std::move(cartArgs));
+    std::unique_ptr<melonDS::NDSCart::CartCommon> cart;
+    if (isRomx)
+    {
+        std::string mappingError;
+        if (session.mapPayload(&mappingError))
+        {
+            const auto* data = static_cast<const melonDS::u8*>(session.mappedData());
+            const auto size = session.mappedSize();
+            if (data && size > 0 && size <= std::numeric_limits<melonDS::u32>::max())
+            {
+                melonDS::NDSCart::NDSCartArgs mappedArgs;
+                loadBatterySave(mappedArgs);
+                cart = melonDS::NDSCart::ParseROM(data, static_cast<melonDS::u32>(size),
+                                                  &m_platformData, std::move(mappedArgs));
+            }
+        }
+    }
+    if (!cart)
+    {
+        std::string sourcePath = path;
+        if (isRomx)
+        {
+            std::string extractionError;
+            sourcePath = session.materialize(&extractionError);
+            if (sourcePath.empty())
+            {
+                brls::Logger::error("melonDS: ROMX mapping and extraction both failed: {}", extractionError);
+                return false;
+            }
+            std::error_code sourceError;
+            fileSize = std::filesystem::file_size(sourcePath, sourceError);
+            if (sourceError || fileSize == 0 || fileSize > std::numeric_limits<melonDS::u32>::max())
+                return false;
+        }
+        std::ifstream rom(sourcePath, std::ios::binary);
+        if (!rom)
+        {
+            brls::Logger::error("melonDS: failed to open ROM: {}", sourcePath);
+            return false;
+        }
+        romData = std::make_unique<uint8_t[]>(static_cast<size_t>(fileSize));
+        rom.read(reinterpret_cast<char*>(romData.get()), static_cast<std::streamsize>(fileSize));
+        if (rom.gcount() != static_cast<std::streamsize>(fileSize))
+        {
+            brls::Logger::error("melonDS: failed to read ROM: {}", sourcePath);
+            return false;
+        }
+        cart = melonDS::NDSCart::ParseROM(std::move(romData),
+                                          static_cast<melonDS::u32>(fileSize),
+                                          &m_platformData, std::move(cartArgs));
+    }
     if (!cart)
     {
         brls::Logger::error("melonDS: failed to parse NDS ROM: {}", path);

@@ -14,6 +14,9 @@
 #include "core/ConfigManager.hpp"
 #include "core/enums.h"
 
+struct romx_payload_mapping;
+typedef struct romx_payload_mapping romx_payload_mapping_t;
+
 namespace beiklive {
 
 /// 封装单个已加载的libretro核心。
@@ -228,6 +231,12 @@ private:
     // ---- 存档/系统目录 ----------------------------------------------
     std::string m_saveDirectory;    ///< 通过GET_SAVE_DIRECTORY返回给核心
     std::string m_systemDirectory;  ///< 通过GET_SYSTEM_DIRECTORY返回给核心
+
+    // ROMX 内容状态。映射的 payload 会一直保留到核心返回
+    // retro_unload_game()；仅支持路径的核心使用前端 VFS，不会收到临时解包 ROM。
+    romx_payload_mapping_t* m_romxMapping = nullptr;
+    bool m_romxVfsActive = false;
+    std::string m_romxLogicalPath;
 
     // ---- 磁盘控制 ----------------------------------------------------
     retro_disk_control_callback m_diskControl{};
