@@ -97,3 +97,22 @@ GBA 标准工具提取出的标题为 `fciq_tgbus`，这是该 ROM 的标准 hea
 根据 `romx` 的 `PLATFORMS-0.1.1.md`，前端补齐了当前项目已有核心可以承载的扩展识别：NES/FDS 的 `unf/unif`，3DS 的 `cxi/app`，Genesis 32X 的 `32x`，PSP 的 `iso/cso/pbp/elf/prx`，Dreamcast 的 `cdi`，以及对应的 ROMX `x` 后缀（`unfx/unifx/cxix/appx/32xx/csox/pbpx/elfx/prxx/cdix` 等）。扫描导入配置与 `RomxFrontend::hasSupportedExtension` 已保持一致；metadata 中的 platform 仍是最终权威值，避免仅凭多义扩展误判核心。
 
 验证结果：`build_linux_romx` 的 `romx` 目标和相关源文件语法检查通过；libromx payload、phase 1–8、C/C++ phase 8、reader/writer conformance 仍全部通过。完整 GBAStation 在当前 macOS 主机上仍被上游 Borealis/Yoga 的 AppleClang libc++ 旧平台警告（`-Werror`）阻断，未发现 ROMX 模块编译错误。
+
+## macOS 应用构建与实际运行（2026-08-12）
+
+本机使用 `cmake --build build_macos -j2` 完整构建成功，生成 arm64 应用：`build_macos/GBAStation.app/Contents/MacOS/GBAStation`。通过直接启动参数运行标准工具生成的真实 ROMX：
+
+```text
+GBAStation -d --rom "/Volumes/rom/romx-test/output/GBA 001.gbax"
+GBAStation -d -o /tmp/gbastation-gba008.log --rom /tmp/romx-gba008.gbax
+```
+
+两个游戏均进入 `MgbaGameView` 游戏线程，mGBA 完成 `SetupGame loadRom`、视频 240×160、音频 48 kHz 初始化并持续运行；第一个测试退出时记录了 `GBA Savedata: Savedata synced`。
+
+运行时使用 `lsof` 和 `vmmap` 检查 payload：
+
+- `GBA 001.gbax` 的 14,357,872 字节 payload 显示为 `.gbax` 文件的 13.7 MiB file-backed mapping，进程没有打开 `cache/packed_roms` 中的解包文件。GBAStation 先调用 `romx_reader_map_payload`，再通过 mGBA `VFileFromConstMemory`/`GBALoadROM` 读取。
+- 该 ROM 的大小不是 2 的幂，mGBA 自身的 `GBALoadROM` 为兼容 GBA 卡带寻址又创建了 32 MiB `Untagged` 私有区域，其中 13.7 MiB 为脏页。这是核心内部标准化副本，不是 GBAStation 把整个 ROMX 解包到临时文件或由 ROMX 前端主动读入内存。
+- 用同一流程转换的 4 MiB `GBA 008.gbax` 显示 4 MiB `.gbax` file-backed mapping，未出现 32 MiB 私有 ROM 区域，证明满足核心格式要求时可以保持 payload 的映射读取。
+
+因此当前路径是“ROMX payload mmap → mGBA VFS（只读 VFile）→ mGBA 根据 ROM 尺寸决定直接映射或核心内部复制”，不是统一释放整个 ROMX 到内存；只有核心自身对非 2 的幂 ROM 做了额外复制。
