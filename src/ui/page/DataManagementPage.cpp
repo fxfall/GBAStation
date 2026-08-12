@@ -10,7 +10,6 @@
 #include "core/rom/PspMeta.hpp"
 #include "core/rom/ThreeDsIcon.hpp"
 #include "core/RomxGameEntryAdapter.hpp"
-#include "core/RomxLaunchSession.hpp"
 #include "core/Tools.hpp"
 #include "network/WebService.h"
 #include "third_party/qrcodegen/qrcodegen.hpp"
@@ -2457,22 +2456,13 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
             }
         }
 
-        // NDS / 3DS / PSP：始终提取内置元数据（图标与名称）。
-        // ROMX 先由启动会话按 payload 区域生成临时标准 ROM，避免上游解析器读取容器头。
-        std::string metadataPath = path;
-        if (adapterResult.romxCandidate)
+        // NDS / 3DS / PSP：保留上游的内置元数据读取逻辑。
+        // ROMX 的标准 metadata/cover 已由 RomxGameEntryAdapter 直接读取；
+        // 不再为了扫描阶段的标题或封面生成 payload 临时文件。
+        if (!adapterResult.romxCandidate &&
+            entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
         {
-            std::string extractionError;
-            const std::string extracted = beiklive::romx::RomxLaunchSession(path)
-                .materialize(&extractionError);
-            if (!extracted.empty())
-                metadataPath = extracted;
-            else if (!extractionError.empty())
-                brls::Logger::warning("ROMX metadata extraction failed for {}: {}",
-                                      path, extractionError);
-        }
-        if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
-        {
+            const std::string metadataPath = path;
             // TITLE：开启读取映射名称且映射名存在时保留映射名，否则 TITLE 优先。
             if (!(m_useNameMapping && displayName != romStem))
             {
@@ -2485,8 +2475,10 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
             if (!icon.empty() && entry.logoPath == defaultLogo)
                 entry.logoPath = icon;
         }
-        else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS))
+        else if (!adapterResult.romxCandidate &&
+                 entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS))
         {
+            const std::string metadataPath = path;
             // NDS 内置图标：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
             const std::string ndsIcon = beiklive::GetOrCreateNdsIconPath(metadataPath);
             if (!ndsIcon.empty() && entry.logoPath == defaultLogo)
@@ -2496,8 +2488,10 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
             if (!ndsTitle.empty() && entry.title == GET_MAPPING_KEY_STR(romStem, romStem))
                 entry.title = ndsTitle;
         }
-        else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
+        else if (!adapterResult.romxCandidate &&
+                 entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
         {
+            const std::string metadataPath = path;
             // 3DS 内置图标（SMDH）：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
             const std::string icon = beiklive::GetOrCreateThreeDsIconPath(metadataPath);
             if (!icon.empty() && entry.logoPath == defaultLogo)

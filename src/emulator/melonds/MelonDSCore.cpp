@@ -416,7 +416,7 @@ bool MelonDSCore::SetupGame(beiklive::GameEntry GameEntry)
 
     if (!Initialize())
         return false;
-    // ROMX 的 mapping、解包回退统一由 RomxLaunchSession 处理。
+    // ROMX 统一由 RomxLaunchSession 解包为核心可读取的普通 ROM 文件。
     m_loadedRomPath = m_gameEntry.path;
     if (!LoadGame(m_loadedRomPath))
         return false;
@@ -535,58 +535,29 @@ bool MelonDSCore::LoadGame(const std::string& path)
     }
 
     beiklive::romx::RomxLaunchSession session(path);
-    const bool isRomx = session.isRomx();
-    std::unique_ptr<uint8_t[]> romData;
-    std::uintmax_t fileSize = 0;
-    if (!isRomx)
+    std::string preparationError;
+    const std::string sourcePath = session.materialize(&preparationError);
+    if (sourcePath.empty())
     {
-        std::error_code ec;
-        fileSize = std::filesystem::file_size(path, ec);
-        if (ec || fileSize == 0 || fileSize > std::numeric_limits<melonDS::u32>::max())
-        {
-            brls::Logger::error("melonDS: invalid ROM size: {}", path);
-            return false;
-        }
+        brls::Logger::error("melonDS: ROM preparation failed: {} ({})", path, preparationError);
+        return false;
     }
+
+    std::error_code ec;
+    const std::uintmax_t fileSize = std::filesystem::file_size(sourcePath, ec);
+    if (ec || fileSize == 0 || fileSize > std::numeric_limits<melonDS::u32>::max())
+    {
+        brls::Logger::error("melonDS: invalid ROM size: {}", sourcePath);
+        return false;
+    }
+    std::unique_ptr<uint8_t[]> romData;
 
     melonDS::NDSCart::NDSCartArgs cartArgs;
     loadBatterySave(cartArgs);
 
     brls::Logger::debug("melonDS: parsing ROM");
     std::unique_ptr<melonDS::NDSCart::CartCommon> cart;
-    if (isRomx)
     {
-        std::string mappingError;
-        if (session.mapPayload(&mappingError))
-        {
-            const auto* data = static_cast<const melonDS::u8*>(session.mappedData());
-            const auto size = session.mappedSize();
-            if (data && size > 0 && size <= std::numeric_limits<melonDS::u32>::max())
-            {
-                melonDS::NDSCart::NDSCartArgs mappedArgs;
-                loadBatterySave(mappedArgs);
-                cart = melonDS::NDSCart::ParseROM(data, static_cast<melonDS::u32>(size),
-                                                  &m_platformData, std::move(mappedArgs));
-            }
-        }
-    }
-    if (!cart)
-    {
-        std::string sourcePath = path;
-        if (isRomx)
-        {
-            std::string extractionError;
-            sourcePath = session.materialize(&extractionError);
-            if (sourcePath.empty())
-            {
-                brls::Logger::error("melonDS: ROMX mapping and extraction both failed: {}", extractionError);
-                return false;
-            }
-            std::error_code sourceError;
-            fileSize = std::filesystem::file_size(sourcePath, sourceError);
-            if (sourceError || fileSize == 0 || fileSize > std::numeric_limits<melonDS::u32>::max())
-                return false;
-        }
         std::ifstream rom(sourcePath, std::ios::binary);
         if (!rom)
         {

@@ -120,6 +120,31 @@
 
 ---
 
+## ROMX 启动传递与生命周期（混合方案）
+
+### 结论
+
+- Gambatte、Nestopia、Snes9x、Snes9x 2005 的 libretro ABI 声明
+  `need_fullpath=false`，启动时直接传递 `retro_game_info.data`；ROMX payload
+  通过 `RomxLaunchSession::loadPayload()` 读取到 `LibretroLoader::m_gameRomData`，
+  同时把 `retro_game_info.path` 改成 payload 的标准扩展名，避免 Nestopia/FDS
+  等核心按 `.fds` 等后缀分支时误判 `.fdsx`。
+- FCEUmm 声明 `need_fullpath=true`，Genesis 原生核心只接受路径；两者继续使用
+  `prepareRomForLaunch()` 生成缓存的普通 payload 文件。
+- mGBA 原生核心的 `mCore::loadROM()` 接受 `VFile*`，现在 ROMX 直接使用
+  `VFileFromConstMemory()`，并把字节缓冲区保留到 `unloadROM()` 之后。
+
+### 生命周期
+
+- `LibretroLoader` 在 `retro_load_game()` 成功后持有数据型核心的 ROM 字节，调用
+  `retro_unload_game()` 后才清空；失败路径也立即清空。
+- path-only 核心使用 `cache/packed_roms/<payload-key>.<extension>` 的持久化缓存，
+  核心卸载前路径始终有效，避免临时文件过早删除；缓存后续可由专门的清理策略回收。
+- mGBA 的 `VFile` 由 mGBA 在 `unloadROM()` 中关闭，前端只保证其 backing vector
+  在此之前不移动、不释放。
+
+---
+
 ---
 
 ## PicoDrive mmap 崩溃修复
@@ -1069,3 +1094,44 @@ RetroArch 不只传 `TextureSize/InputSize`，还会对以下对象分别查找�
 - `src/game/render/RetroShaderPipeline.cpp.o`
 
 通过，仍然只有项目现存第三方 warning。
+## 2026-08-12 ROMX VFS 按 RetroArch 思路优化
+
+### 任务分析
+
+- **任务目标**：PPSSPP 当前通过 Switch 独立 NRO 启动，尚未接入 libretro VFS，无法直接验证其是否调用 `libromx`。先参考本地 `retroarch-romx` 的 `romx_frontend` 与 `romx_ra_vfs` 设计，增强 GBAStation 内置 libretro 核心的 ROMX 虚拟路径、payload 映射、按句柄回退读取和延迟释放行为。
+- **当前输入**：GBAStation 已有 `RomxLaunchSession`、`RomxVfs` 和 `LibretroLoader`；外置 NRO 仍由 Switch 启动器负责，并在跨进程边界前使用解包回退。
+- **预期输出**：内置 libretro 核心继续优先使用 payload mapping；映射不可用时按 ROMX payload 区域读取；VFS 只拦截当前虚拟路径，普通文件继续走原始文件操作；核心关闭后再释放映射。
+- **可能挑战**：仓库内置 `third_party/libromx` 版本尚未暴露 `romx_payload_file_*` 独立游标 API，因此不能直接复制 RetroArch 最新实现；需要保持现有 `romx_reader_read_region` 兼容，并补齐安全的偏移计算、后端选择和 ROMX 完整性标志传递。
+- **解决方案**：在 `src/game/retro/RomxVfs.*` 和 `src/game/retro/LibretroLoader.cpp` 内完成模块化增强，不修改 PPSSPP 上游源码、不把外置 NRO 假装成 libretro 核心；PPSSPP 继续保留 materialize 回退，待其自身提供 libretro/VFS 接口后再复用同一虚拟路径协议。
+
+### 实现结果
+
+- `src/core/RomxLaunchSession.*`
+  - 集中生成 `source#stem.payload_format` 逻辑路径和 `romx:/stem.payload_format` 虚拟路径。
+  - 统一读取 ROMX footer `flags` 与 payload 大小，调用方不再重复拼接路径。
+- `src/game/retro/RomxVfs.*`
+  - 只拦截当前激活的 `romx:/...` 路径，普通文件仍使用宿主文件操作。
+  - 默认使用 `romx_reader_map_payload()`；设置 `ROMX_VFS_BACKEND=read`（或 `vfs`、`file`）时改用 `romx_reader_read_region()` 有界读取。
+  - 当 footer 声明 `ROMX_FLAG_HAS_BODY_SHA256` 时，read backend 在打开句柄时执行同样的 body SHA-256 校验，和 RetroArch 的 payload-file 选项保持一致。
+  - 每个句柄独立维护偏移，支持 64 位 seek、EOF 后读取和延迟 mapping 释放，并记录后端、读取次数与字节数，便于对比 mmap/VFS 性能。
+- `src/game/retro/LibretroLoader.cpp`
+  - `need_fullpath` 核心收到稳定的 `romx:/...` 路径，并通过 `RETRO_ENVIRONMENT_GET_VFS_INTERFACE` 接入 ROMX VFS。
+  - mapping 失败或显式选择 read backend 时不再解包临时 ROM，而是直接按 ROM 区域读取。
+  - 非 `need_fullpath` 核心仍把 payload mapping 作为 `retro_game_info.data`，保留原有 ABI 行为。
+
+### 验证与边界
+
+- 已通过 `RomxLaunchSession.cpp`、`RomxVfs.cpp`、`LibretroLoader.cpp` 的 macOS/Linux 目标文件编译和 `git diff --check`。
+- 当前仓库内置的 `third_party/libromx` 头文件没有 RetroArch 新实现使用的 `romx_payload_file_*` API，因此 read backend 使用兼容的 `romx_reader_read_region()`，不会修改第三方目录。
+- PPSSPP 仍是 Switch 外置 NRO，`src/main.cpp` 在跨进程启动前会使用 materialize 回退；VFS 不能跨进程传递。只有 PPSSPP 自身接入同一 libretro/VFS 或 libromx 接口后，才能把 `romx:/...` 协议用于 PPSSPP 实测。
+
+## 2026-08-12 回退前端 ROMX VFS/mmap
+
+根据独立 NRO 与当前前端进程边界的实际限制，回退前端进程内的 ROMX VFS 和 payload mmap，保留有效的 ROMX 功能：
+
+- 删除 `src/game/retro/RomxVfs.*`，`LibretroLoader` 不再提供 `RETRO_ENVIRONMENT_GET_VFS_INTERFACE`。
+- `LibretroLoader` 遇到 ROMX 时统一调用 `RomxLaunchSession::materialize()`，核心只接收普通 payload 路径或该文件读取出的数据。
+- mGBA 原生核心、melonDS 不再直接建立 payload mapping，统一使用 materialize 后的普通 ROM 文件。
+- `RomxLaunchSession` 仅保留 ROMX 检测与 materialize 接口；ROMX metadata、标题、封面、数据库和 UI 处理不变。
+
+重新配置并构建 macOS 目标通过；仅保留项目已有的第三方兼容性 warning。

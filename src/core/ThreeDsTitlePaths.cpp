@@ -11,6 +11,8 @@
 #include <sstream>
 #include <vector>
 
+#include <romx/romx.h>
+
 namespace fs = std::filesystem;
 
 namespace
@@ -288,6 +290,33 @@ namespace
         return success;
     }
 
+    bool readNcsdHeaderFromRomx(const std::string& path,
+                                std::array<unsigned char, 0x110>& header)
+    {
+        romx_reader_t* reader = nullptr;
+        romx_error_t error{};
+        if (romx_reader_open_path(path.c_str(), nullptr, &reader, &error) != ROMX_OK)
+            return false;
+
+        romx_io_t payload = ROMX_IO_INIT;
+        std::uint64_t payloadSize = 0;
+        const bool ready =
+            romx_reader_get_payload_io(reader, &payload, &error) == ROMX_OK &&
+            payload.get_size(payload.user_data, &payloadSize, &error) == ROMX_OK &&
+            payloadSize >= header.size();
+        if (!ready)
+        {
+            romx_reader_close(reader);
+            return false;
+        }
+
+        std::uint64_t bytesRead = 0;
+        const romx_result_t result = payload.read_at(
+            payload.user_data, 0, header.data(), header.size(), &bytesRead, &error);
+        romx_reader_close(reader);
+        return result == ROMX_OK && bytesRead == header.size();
+    }
+
     beiklive::three_ds::ShaderCacheStats shaderStatsForRoot(
         const fs::path& root, const std::string& titleId)
     {
@@ -369,13 +398,18 @@ namespace beiklive::three_ds
 
     std::string readNcsdTitleId(const std::string& path)
     {
-        std::ifstream file(path, std::ios::binary);
-        if (!file)
-            return {};
-
         std::array<unsigned char, 0x110> header{};
-        file.read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
-        if (file.gcount() != static_cast<std::streamsize>(header.size()) ||
+        bool headerRead = readNcsdHeaderFromRomx(path, header);
+        if (!headerRead)
+        {
+            std::ifstream file(path, std::ios::binary);
+            if (!file)
+                return {};
+            file.read(reinterpret_cast<char*>(header.data()),
+                      static_cast<std::streamsize>(header.size()));
+            headerRead = file.gcount() == static_cast<std::streamsize>(header.size());
+        }
+        if (!headerRead ||
             header[0x100] != 'N' || header[0x101] != 'C' ||
             header[0x102] != 'S' || header[0x103] != 'D')
             return {};

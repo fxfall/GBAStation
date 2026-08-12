@@ -1,8 +1,5 @@
 #include "LibretroLoader.hpp"
-#include "game/retro/RomxVfs.hpp"
 #include "core/RomxLaunchSession.hpp"
-
-#include <romx/romx.h>
 
 #include <cstring>
 #include <cstdio>
@@ -614,15 +611,10 @@ void LibretroLoader::unload()
         m_gameLoaded, m_coreReady);
     if (m_gameLoaded && fn_unload_game) {
         fn_unload_game();
-        m_gameLoaded = false;
     }
-    if (m_romxVfsActive) {
-        beiklive::romx_vfs::deactivate(this);
-        m_romxVfsActive = false;
-    }
-    romx_payload_mapping_close(m_romxMapping);
-    m_romxMapping = nullptr;
-    m_romxLogicalPath.clear();
+    m_gameLoaded = false;
+    m_gameLogicalPath.clear();
+    m_gameRomData.clear();
     m_diskControl = {};
     m_diskControlExt = {};
     m_hasDiskControl = false;
@@ -728,109 +720,54 @@ bool LibretroLoader::loadGame(const std::string& romPath)
     retro_system_info systemInfo{};
     fn_get_system_info(&systemInfo);
 
-    std::vector<uint8_t> romData;
+    m_gameLogicalPath.clear();
+    m_gameRomData.clear();
     std::string logicalPath = romPath;
     beiklive::romx::RomxLaunchSession session(romPath);
-    bool romx = session.isRomx();
-    romx_payload_mapping_t* mapped = nullptr;
-    if (romx)
+    if (systemInfo.need_fullpath)
     {
-        std::string sessionError;
-        const std::string format = session.logicalExtension(&sessionError);
-        const std::uint64_t payloadSize = session.payloadSize(&sessionError);
-        if (payloadSize == 0)
+        std::string extractionError;
+        logicalPath = session.materialize(&extractionError);
+        if (logicalPath.empty())
         {
             brls::Logger::error("[LibretroLoader] invalid ROMX {}: {}", romPath,
-                sessionError.empty() ? "container validation failed" : sessionError);
+                extractionError.empty() ? "payload extraction failed" : extractionError);
             return false;
         }
-        const std::string base = std::filesystem::path(romPath).stem().string();
-        const std::string member = base + "." + (format.empty() ? "rom" : format);
-        logicalPath = romPath + "#" + member;
-
-        if (systemInfo.need_fullpath)
-        {
-            std::string mappingError;
-            if (session.mapPayload(&mappingError))
-                mapped = session.takeMapping();
-            // mapping 不可用时，VFS 使用 libromx 的有界区域读取。
-            const std::string virtualPath = "romx:/" + member;
-            if (!beiklive::romx_vfs::activate(this, virtualPath, romPath,
-                    payloadSize, mapped))
-            {
-                romx_payload_mapping_close(mapped);
-                brls::Logger::error("[LibretroLoader] ROMX VFS is already in use");
-                return false;
-            }
-            m_romxVfsActive = true;
-            mapped = nullptr;
-            logicalPath = virtualPath;
-        }
-        else
-        {
-            std::string mappingError;
-            if (!session.mapPayload(&mappingError))
-            {
-                std::string extractionError;
-                const std::string extracted = session.materialize(&extractionError);
-                if (extracted.empty())
-                {
-                    brls::Logger::error("[LibretroLoader] ROMX mapping and extraction both failed: {} ({})",
-                        romPath, extractionError.empty() ? mappingError : extractionError);
-                    return false;
-                }
-                brls::Logger::warning("[LibretroLoader] payload mapping unavailable; using cached payload for {}",
-                    romPath);
-                romx = false;
-                logicalPath = extracted;
-            }
-            else
-            {
-                mapped = session.takeMapping();
-                const auto size = romx_payload_mapping_size(mapped);
-                if (size == 0 || size > static_cast<std::uint64_t>(SIZE_MAX))
-                {
-                    romx_payload_mapping_close(mapped);
-                    return false;
-                }
-                m_romxMapping = mapped;
-                mapped = nullptr;
-                // 当前 libretro ABI 需要指针和大小；受保护的 mapping 会一直保留到
-                // retro_unload_game() 返回。
-            }
-        }
     }
-    if (!romx && !systemInfo.need_fullpath) {
-        const std::string& dataPath = logicalPath;
-        std::ifstream file(dataPath, std::ios::binary);
-        if (!file) { brls::Logger::error("[LibretroLoader] loadGame: failed to open ROM data: {}", dataPath); return false; }
-        file.seekg(0, std::ios::end);
-        const std::streamoff size = file.tellg();
-        if (size <= 0) { brls::Logger::error("[LibretroLoader] loadGame: ROM data is empty: {}", dataPath); return false; }
-        file.seekg(0, std::ios::beg);
-        romData.resize(static_cast<std::size_t>(size));
-        if (!file.read(reinterpret_cast<char*>(romData.data()), size)) { brls::Logger::error("[LibretroLoader] loadGame: failed to read ROM data: {}", dataPath); return false; }
+    else if (session.isRomx())
+    {
+        std::string logicalError;
+        const std::string candidate = session.logicalPath(&logicalError);
+        if (candidate.empty())
+        {
+            brls::Logger::error("[LibretroLoader] invalid ROMX logical path {}: {}",
+                                romPath, logicalError);
+            return false;
+        }
+        logicalPath = candidate;
     }
 
-    m_romxLogicalPath = logicalPath;
+    std::string payloadError;
+    if (!systemInfo.need_fullpath && !session.loadPayload(m_gameRomData, &payloadError))
+    {
+        brls::Logger::error("[LibretroLoader] loadGame: failed to read ROM payload: {}",
+                            payloadError.empty() ? romPath : payloadError);
+        m_gameRomData.clear();
+        return false;
+    }
+
+    m_gameLogicalPath = logicalPath;
     retro_game_info info{};
-    info.path = m_romxLogicalPath.c_str();
-    if (romx && !systemInfo.need_fullpath)
-    {
-        info.data = const_cast<uint8_t*>(static_cast<const uint8_t*>(romx_payload_mapping_data(m_romxMapping)));
-        info.size = static_cast<size_t>(romx_payload_mapping_size(m_romxMapping));
-    }
-    else
-    {
-        info.data = romData.empty() ? nullptr : romData.data();
-        info.size = romData.size();
-    }
+    info.path = m_gameLogicalPath.c_str();
+    info.data = m_gameRomData.empty() ? nullptr : m_gameRomData.data();
+    info.size = m_gameRomData.size();
     info.meta = nullptr;
 
     if (!fn_load_game(&info)) {
         brls::Logger::error("[LibretroLoader] loadGame: retro_load_game failed");
-        if (m_romxVfsActive) { beiklive::romx_vfs::deactivate(this); m_romxVfsActive = false; }
-        romx_payload_mapping_close(m_romxMapping); m_romxMapping = nullptr;
+        m_gameLogicalPath.clear();
+        m_gameRomData.clear();
         return false;
     }
 
@@ -843,12 +780,16 @@ bool LibretroLoader::loadGame(const std::string& romPath)
 
 void LibretroLoader::unloadGame()
 {
-    if (!m_gameLoaded) return;
+    if (!m_gameLoaded)
+    {
+        m_gameLogicalPath.clear();
+        m_gameRomData.clear();
+        return;
+    }
     brls::Logger::debug("[LibretroLoader] unloadGame");
     fn_unload_game();
-    if (m_romxVfsActive) { beiklive::romx_vfs::deactivate(this); m_romxVfsActive = false; }
-    romx_payload_mapping_close(m_romxMapping); m_romxMapping = nullptr;
-    m_romxLogicalPath.clear();
+    m_gameLogicalPath.clear();
+    m_gameRomData.clear();
     m_gameLoaded = false;
     m_diskControl = {};
     m_diskControlExt = {};
@@ -1277,17 +1218,12 @@ bool LibretroLoader::s_environmentCallback(unsigned cmd, void* data)
         case RETRO_ENVIRONMENT_GET_SENSOR_INTERFACE:
         case RETRO_ENVIRONMENT_GET_CAMERA_INTERFACE:
         case RETRO_ENVIRONMENT_GET_LOCATION_INTERFACE:
+        case RETRO_ENVIRONMENT_GET_VFS_INTERFACE:
             return false;
         case RETRO_ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE: {
             int* flags = static_cast<int*>(data);
             if (flags) *flags = (1 << 0) | (1 << 1); // VIDEO | AUDIO
             return true;
-        }
-        case RETRO_ENVIRONMENT_GET_VFS_INTERFACE: {
-            auto* vfs = static_cast<retro_vfs_interface_info*>(data);
-            if (!vfs || vfs->required_interface_version > 3) return false;
-            vfs->iface = beiklive::romx_vfs::interfacePtr();
-            return vfs->iface != nullptr;
         }
         case RETRO_ENVIRONMENT_GET_LED_INTERFACE:
             // LED 接口不可用，核心不检查返回值

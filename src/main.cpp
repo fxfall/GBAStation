@@ -121,7 +121,8 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 	const auto result = beiklive::romx::RomxGameEntryAdapter::apply(
 		entry, romPath, options);
 	bool changed = !entryOpt.has_value() || result.changed;
-	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
+	if (!result.romxCandidate &&
+		entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
 	{
 		// PSP ROM：入库时提取真实游戏标题与 ICON0 封面（保存到该 ROM 的存档目录）。
 		// TITLE 仅在仍是默认文件名/映射名时覆盖；封面仅当仍是默认资源图时替换。
@@ -168,7 +169,10 @@ bool launchDirectGameActivity(const std::string& romPath)
 	                                    const char* returnKey) {
 		std::string materializeError;
 		beiklive::romx::RomxLaunchSession session(romPath);
-		const std::string launchPath = session.materialize(&materializeError);
+		const bool coreSupportsRomx =
+			platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP) ||
+			platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS);
+		const std::string launchPath = session.pathForCore(coreSupportsRomx, &materializeError);
 		if (launchPath.empty())
 		{
 			brls::Logger::error("Direct {} ROMX preparation failed: {}", label, materializeError);
@@ -216,7 +220,9 @@ bool launchDirectGameActivity(const std::string& romPath)
 	{
 		std::string launchError;
 		beiklive::romx::RomxLaunchSession session(romPath);
-		const std::string launchPath = session.materialize(&launchError);
+		// GBAStation_3DS opens ROMX itself through libromx. Keep the original
+		// container path so the core can expose only its payload to the loader.
+		const std::string launchPath = session.pathForCore(true, &launchError);
 		if (launchPath.empty())
 		{
 			brls::Logger::error("Direct 3DS ROM preparation failed: {}", launchError);

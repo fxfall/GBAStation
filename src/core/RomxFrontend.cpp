@@ -14,6 +14,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <mutex>
 #include <unordered_map>
@@ -404,6 +405,82 @@ std::string prepareRomForLaunch(const std::string& path, std::string* error)
     romx_reader_close(reader);
     if (result != ROMX_OK) { setError(error, romxError(errorValue, result)); return {}; }
     return output.string();
+}
+
+bool loadPayloadToMemory(const std::string& path, std::vector<std::uint8_t>& output,
+                         std::string* error)
+{
+    output.clear();
+    if (error) error->clear();
+
+    if (!hasSupportedExtension(path))
+    {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file)
+        {
+            setError(error, "failed to open ROM file");
+            return false;
+        }
+        const std::streampos end = file.tellg();
+        if (end <= 0 || static_cast<std::uintmax_t>(end) >
+                             static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max()))
+        {
+            setError(error, "ROM file is empty or too large");
+            return false;
+        }
+        output.resize(static_cast<std::size_t>(end));
+        file.seekg(0, std::ios::beg);
+        if (!file.read(reinterpret_cast<char*>(output.data()), static_cast<std::streamsize>(output.size())))
+        {
+            output.clear();
+            setError(error, "failed to read ROM file");
+            return false;
+        }
+        return true;
+    }
+
+    romx_reader_t* reader = nullptr;
+    romx_error_t errorValue{};
+    romx_result_t result = romx_reader_open_path(path.c_str(), nullptr, &reader, &errorValue);
+    if (result != ROMX_OK)
+    {
+        setError(error, romxError(errorValue, result));
+        return false;
+    }
+
+    romx_info_t info = ROMX_INFO_INIT;
+    result = romx_reader_get_info(reader, &info, &errorValue);
+    if (result != ROMX_OK || info.rom.size == 0 || info.rom.size >
+        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()))
+    {
+        setError(error, result != ROMX_OK ? romxError(errorValue, result) :
+            (info.rom.size == 0 ? "ROMX payload is empty" : "ROMX payload is too large"));
+        romx_reader_close(reader);
+        return false;
+    }
+
+    output.resize(static_cast<std::size_t>(info.rom.size));
+    std::uint64_t offset = 0;
+    constexpr std::uint64_t ChunkSize = 1024U * 1024U;
+    while (offset < info.rom.size)
+    {
+        const std::uint64_t chunk = std::min<std::uint64_t>(ChunkSize, info.rom.size - offset);
+        std::uint64_t bytesRead = 0;
+        result = romx_reader_read_region(reader, ROMX_REGION_ROM, offset,
+            output.data() + static_cast<std::size_t>(offset), chunk, &bytesRead, &errorValue);
+        if (result != ROMX_OK || bytesRead != chunk)
+        {
+            output.clear();
+            setError(error, result != ROMX_OK ? romxError(errorValue, result) :
+                "ROMX payload read was truncated");
+            romx_reader_close(reader);
+            return false;
+        }
+        offset += bytesRead;
+    }
+
+    romx_reader_close(reader);
+    return true;
 }
 
 } // 命名空间 beiklive::romx

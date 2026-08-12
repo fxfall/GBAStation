@@ -66,7 +66,7 @@
 ## 与 upstream 的改动量评估
 
 - 本轮模块化改造相对之前的 ROMX 实现明显减少了核心解析层的直接改动：原 `PackedRom.cpp` 的约 1200 行 Footer、校验和区域逻辑已缩减为兼容 façade，实际解析集中到 `RomxFrontend`，VFS 集中到 `RomxVfs`。
-- 但整个 `romx-support` 分支相对 `upstream/main` 仍保留早期提交中的 UI、数据库、平台识别、启动流程和构建环境改动；当前工作树与 upstream 的历史差异不能仅靠本轮重构消除。
+- 但整个 `romx` 分支相对 `upstream/main` 仍保留早期提交中的 UI、数据库、平台识别、启动流程和构建环境改动；当前工作树与 upstream 的历史差异不能仅靠本轮重构消除。
 - 后续新增 ROMX 字段、metadata 显示、封面处理或核心适配，应优先放进 `RomxFrontend`、`RomxVfs` 及新的 GameEntry 适配模块，让 `main.cpp`、页面和核心入口只保留薄接口，以降低后续 upstream 合并冲突。
 
 ## 本轮入口与启动会话重构

@@ -158,18 +158,8 @@ RomxGameEntryResult RomxGameEntryAdapter::apply(
 
     if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
     {
-        std::string titlePath = path;
-        if (info)
-        {
-            std::string extractionError;
-            const std::string extracted = prepareRomForLaunch(path, &extractionError);
-            if (!extracted.empty())
-                titlePath = extracted;
-            else if (result.error.empty())
-                result.error = extractionError;
-        }
         const std::string titleId = beiklive::three_ds::resolveTitleId(
-            entry.threeDsTitleId, titlePath);
+            entry.threeDsTitleId, path);
         if (!titleId.empty())
             assignIfChanged(entry.threeDsTitleId, titleId, result.changed);
     }

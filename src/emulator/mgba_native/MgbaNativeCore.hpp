@@ -10,6 +10,7 @@
 
 #include <array>
 #include <ctime>
+#include <vector>
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -17,8 +18,6 @@
 
 struct mCore;
 struct mCheatDevice;
-struct romx_payload_mapping;
-typedef struct romx_payload_mapping romx_payload_mapping_t;
 
 namespace beiklive::mgba_native
 {
@@ -119,7 +118,6 @@ private:
 
     beiklive::GameEntry m_gameEntry;
     mCore* m_core = nullptr;
-    romx_payload_mapping_t* m_romxMapping = nullptr;
     bool m_coreInitialized = false;
     bool m_configInitialized = false;
     bool m_ready = false;
@@ -187,6 +185,10 @@ private:
     bool m_useSystemRtc = false;
 
     mutable std::vector<uint8_t> m_sramSnapshot;
+
+    // mCore::loadROM() 接管 VFile，但 VFileFromConstMemory() 只引用这块
+    // 内存；因此必须保留到 unloadROM() 完成之后。
+    std::vector<uint8_t> m_romxRomData;
 };
 
 } // namespace beiklive::mgba_native

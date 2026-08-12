@@ -79,10 +79,10 @@ jobs:
               >> core-release-info/CORE-RELEASES.txt
           }
 
-          download_latest beiklive/GBAStation_3DS GBAStation3DSStub.nro
+          download_latest fxfall/GBAStation_3DS GBAStation3DSStub.nro
           download_latest beiklive/GBAStation_FBNeo GBAStationFBNeoStub.nro
           download_latest beiklive/GBAStation_flycast GBAStationFlycastStub.nro
-          download_latest beiklive/GBAStation_ppsspp GBAStationPPSSPPStub.nro
+          download_latest fxfall/GBAStation_ppsspp GBAStationPPSSPPStub.nro
           sha256sum external-cores/*.nro | tee core-release-info/CORE-NRO-SHA256SUMS.txt
 
       - name: Build frontend and stage external cores

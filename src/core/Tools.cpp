@@ -277,6 +277,10 @@ beiklive::enums::FileType getFileType(const fs::path& path) {
                 return beiklive::enums::FileType::THREEDS_ROM;
             case beiklive::enums::EmuPlatform::EmuGenesis:
                 return beiklive::enums::FileType::GENESIS_ROM;
+            case beiklive::enums::EmuPlatform::EmuDreamcast:
+                return beiklive::enums::FileType::DREAMCAST_ROM;
+            case beiklive::enums::EmuPlatform::EmuPSP:
+                return beiklive::enums::FileType::PSP_ROM;
             default:
                 return beiklive::enums::FileType::NORMAL_FILE;
         }

@@ -18,7 +18,6 @@
 #include <mgba/internal/gb/overrides.h>
 #include <mgba/internal/sm83/sm83.h>
 #include <mgba-util/vfs.h>
-#include <romx/romx.h>
 
 #include <algorithm>
 #include <cctype>
@@ -629,21 +628,37 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
         return false;
     }
 
+    releaseCore();
     beiklive::romx::RomxLaunchSession session(romPath);
-    std::string loadPath = romPath;
-    if (!session.isRomx())
+    std::string preparationError;
+    std::string loadPath;
+    bool loadFromMemory = false;
+    if (session.isRomx())
     {
-        std::string packedError;
-        loadPath = session.materialize(&packedError);
-        if (loadPath.empty())
+        loadFromMemory = session.loadPayload(m_romxRomData, &preparationError);
+        if (!loadFromMemory)
         {
-            brls::Logger::error("MgbaNativeCore: ROM preparation failed: {} ({})",
-                                romPath, packedError);
-            return false;
+            m_romxRomData.clear();
+            loadPath = session.materialize(&preparationError);
         }
     }
+    else
+    {
+        loadPath = session.materialize(&preparationError);
+    }
+    if (!loadFromMemory && loadPath.empty())
+    {
+        brls::Logger::error("MgbaNativeCore: ROM preparation failed: {} ({})",
+                            romPath, preparationError);
+        return false;
+    }
 
-    releaseCore();
+    if (loadFromMemory)
+        brls::Logger::debug("MgbaNativeCore: ROMX payload loaded into memory ({} bytes)",
+                            m_romxRomData.size());
+    else
+        brls::Logger::debug("MgbaNativeCore: ROM loaded from payload file: {}", loadPath);
+
     const auto platform = static_cast<beiklive::enums::EmuPlatform>(m_gameEntry.platform);
     const mPlatform mgbaPlatform =
         platform == beiklive::enums::EmuPlatform::EmuGBA ? mPLATFORM_GBA : mPLATFORM_GB;
@@ -652,6 +667,7 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
     if (!m_core)
     {
         brls::Logger::error("MgbaNativeCore: mCoreCreate failed");
+        releaseCore();
         return false;
     }
 
@@ -679,45 +695,27 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
     applyConfig();
     brls::Logger::debug("MgbaNativeCore: pre-load config applied ok");
 
-    brls::Logger::debug("MgbaNativeCore: loading ROM file");
+    brls::Logger::debug("MgbaNativeCore: loading ROM {}",
+                        loadFromMemory ? "from memory" : "file");
     bool loaded = false;
-    if (session.isRomx())
+    if (loadFromMemory)
     {
-        std::string mappingError;
-        if (session.mapPayload(&mappingError))
+        VFile* vf = VFileFromConstMemory(m_romxRomData.data(), m_romxRomData.size());
+        if (vf)
         {
-            const void* data = session.mappedData();
-            const std::uint64_t size = session.mappedSize();
-            if (data && size != 0 && size <= static_cast<std::uint64_t>(SIZE_MAX))
-            {
-                VFile* vf = VFileFromConstMemory(data, static_cast<size_t>(size));
-                if (vf)
-                {
-                    loaded = m_core->loadROM(m_core, vf);
-                    if (!loaded) vf->close(vf);
-                    else m_romxMapping = session.takeMapping();
-                }
-            }
+            loaded = m_core->loadROM(m_core, vf);
+            if (!loaded)
+                vf->close(vf);
         }
     }
-    if (!loaded)
+    else
     {
-        if (session.isRomx())
-        {
-            std::string extractionError;
-            loadPath = session.materialize(&extractionError);
-            if (loadPath.empty())
-            {
-                brls::Logger::error("MgbaNativeCore: ROMX mapping and extraction failed: {}", extractionError);
-                releaseCore();
-                return false;
-            }
-        }
         loaded = mCoreLoadFile(m_core, loadPath.c_str());
     }
     if (!loaded)
     {
-        brls::Logger::error("MgbaNativeCore: mCoreLoadFile failed: {}", loadPath);
+        brls::Logger::error("MgbaNativeCore: ROM load failed: {}",
+                            loadFromMemory ? romPath : loadPath);
         releaseCore();
         return false;
     }
@@ -1646,13 +1644,6 @@ void MgbaNativeCore::updateKeys()
 
 void MgbaNativeCore::releaseCore()
 {
-    auto releaseRomxMapping = [this]() {
-        if (m_romxMapping)
-        {
-            romx_payload_mapping_close(m_romxMapping);
-            m_romxMapping = nullptr;
-        }
-    };
     {
         std::lock_guard<std::mutex> lock(m_audioMutex);
         m_audioBuffer.clear();
@@ -1676,11 +1667,11 @@ void MgbaNativeCore::releaseCore()
 
     if (!m_core)
     {
+        m_romxRomData.clear();
         m_audioStreamEnabled = false;
         m_audioStream = {};
         releaseFallbackCheatDevice();
         shutdownNativeAudioOutput();
-        releaseRomxMapping();
         return;
     }
 
@@ -1707,9 +1698,9 @@ void MgbaNativeCore::releaseCore()
         std::free(m_core);
     }
     m_core = nullptr;
-    releaseRomxMapping();
     m_coreInitialized = false;
     m_configInitialized = false;
+    m_romxRomData.clear();
     shutdownNativeAudioOutput();
 }
 

@@ -1059,7 +1059,8 @@ beiklive::enums::FileType platformToFileType(int platform)
                                       dirItem.fullPath, adapterResult.error);
 
             // PSP 的 ISO/CSO 标题和 ICON0 仍由上游解析器负责，ROMX 封面优先保留。
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)) {
+            if (!adapterResult.romxCandidate &&
+                entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)) {
                 const std::string realTitle = beiklive::psp_meta::ExtractTitle(entry.path);
                 if (!realTitle.empty() && entry.title == fallbackTitle) {
                     entry.title = realTitle;
@@ -1134,10 +1135,12 @@ beiklive::enums::FileType platformToFileType(int platform)
                 "3ds.externalNro.returnPath", "sdmc:/switch/GBAStation.nro");
             std::string materializeError;
             beiklive::romx::RomxLaunchSession session(romPath);
-            const std::string launchPath = session.materialize(&materializeError);
+            // The 3DS NRO has a libromx-backed IOFile and must receive the
+            // original ROMX path rather than a frontend-extracted payload.
+            const std::string launchPath = session.pathForCore(true, &materializeError);
             if (launchPath.empty())
             {
-                brls::Logger::error("3DS ROMX materialization failed for {}: {}", title, materializeError);
+                brls::Logger::error("3DS ROMX preparation failed for {}: {}", title, materializeError);
                 brls::Application::notify(L("3DS ROMX 准备失败：") + materializeError);
                 return false;
             }
@@ -1167,10 +1170,13 @@ beiklive::enums::FileType platformToFileType(int platform)
         {
             std::string materializeError;
             beiklive::romx::RomxLaunchSession session(romPath);
-            const std::string launchPath = session.materialize(&materializeError);
+            const bool coreSupportsRomx =
+                platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP) ||
+                platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS);
+            const std::string launchPath = session.pathForCore(coreSupportsRomx, &materializeError);
             if (launchPath.empty())
             {
-                brls::Logger::error("{} ROMX materialization failed for {}: {}",
+                brls::Logger::error("{} ROMX preparation failed for {}: {}",
                                     label, title, materializeError);
                 brls::Application::notify(label + std::string(L(" ROMX 准备失败：")) + materializeError);
                 return false;

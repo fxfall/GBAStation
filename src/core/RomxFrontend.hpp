@@ -61,6 +61,15 @@ std::string extractCover(const std::string& packedPath, const Info& info,
 std::string prepareRomForLaunch(const std::string& path,
                                 std::string* error = nullptr);
 
+/**
+ * 读取 ROMX 的 ROM 区域到内存。
+ *
+ * 仅给明确支持 retro_game_info.data 的核心使用；path-only 核心仍应调用
+ * prepareRomForLaunch()，这样不会把整个容器传给核心。
+ */
+bool loadPayloadToMemory(const std::string& path, std::vector<std::uint8_t>& output,
+                         std::string* error = nullptr);
+
 /** 返回 ROMX 路径对应的逻辑扩展名（不含开头的点）。 */
 std::string logicalExtension(const std::string& path, const Info* info = nullptr);
 
