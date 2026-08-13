@@ -52,6 +52,12 @@ set(ROMX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libromx" CACHE PATH
     "Path to the standalone libromx source tree")
 if (EXISTS "${ROMX_SOURCE_DIR}/CMakeLists.txt")
     add_subdirectory("${ROMX_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/libromx" EXCLUDE_FROM_ALL)
+    if (PLATFORM_SWITCH)
+        # Horizon exposes POSIX-style file I/O but not sys/mman.h.  libromx
+        # keeps its read_at/payload-IO path on Switch and disables the host
+        # guarded mmap implementation for this target.
+        target_compile_definitions(romx PRIVATE ROMX_DISABLE_MMAP)
+    endif()
 else()
     message(FATAL_ERROR
         "libromx was not found. Initialize the submodule or set ROMX_SOURCE_DIR.")
