@@ -3123,7 +3123,7 @@ AboutPage::AboutPage() {
             BK_RES("changelog"), L("暂无更新日志").c_str());
         m_aboutCanvas = new AboutMainCanvas(
             localVersion,
-            "download.nswiki.cn",
+            "github.com/fxfall/GBAStation",
             [this]() { _checkUpdate(); },
             [localVersion, changelogText]() {
                 openChangelogApplet(
@@ -3185,7 +3185,7 @@ brls::View* AboutPage::_buildInfoTab() {
     nameLabel->setFocusable(false);
 
     auto* githubLabel = new brls::Label();
-    githubLabel->setText("GitHub:  https://github.com/beiklive/GBAStation");
+    githubLabel->setText("GitHub:  https://github.com/fxfall/GBAStation");
     githubLabel->setFontSize(18.f);
     githubLabel->setTextColor(GET_THEME_COLOR("brls/text"));
     githubLabel->setFocusable(false);
@@ -3285,7 +3285,7 @@ brls::View* AboutPage::_buildUpdateTab() {
 
     return new UpdateTabCanvas(
         localVersion,
-        "download.nswiki.cn",
+        "github.com/fxfall/GBAStation",
         [this]() {
             _checkUpdate();
         },

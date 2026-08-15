@@ -1,16 +1,15 @@
 #include "AppUpdater.hpp"
 #include "core/Tools.hpp"
 #include "core/constexpr.h"
+#include "json.hpp"
 #include <borealis.hpp>
 #include <curl/curl.h>
 #include <miniz.h>
 #include <filesystem>
 #include <fstream>
 #include <chrono>
-#include <sstream>
 #include <cstdio>
 #include <cstring>
-#include <cctype>
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -18,9 +17,12 @@
 
 namespace beiklive {
 
-static const char* VERSION_INI_URL = "https://download.nswiki.cn/hahappify/xlcj/version.ini";
-static const char* DOWNLOAD_URL = "https://download.nswiki.cn/hahappify/xlcj/nro/GBAStation.zip";
-static const char* CHANGELOG_BASE_URL = "https://cdn.jsdelivr.net/gh/beiklive/GBAStation_Release@main";
+// The ROMX frontend is published from our fork. Resolve the latest release
+// through GitHub so the in-app updater never falls back to the upstream
+// frontend package or its legacy release mirror.
+static const char* RELEASE_API_URL =
+    "https://api.github.com/repos/fxfall/GBAStation/releases/latest";
+static const char* RELEASE_ASSET_NAME = "GBAStation.zip";
 
 // 缓存目录中的 update.nro 路径
 static std::string cacheNroPath() {
@@ -86,24 +88,6 @@ static void setCommonOptions(CURL* curl) {
     curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
     curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "GBAStation-Updater");
-}
-
-static std::string trimCopy(const std::string& value) {
-    size_t start = 0;
-    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])))
-        ++start;
-
-    size_t end = value.size();
-    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])))
-        --end;
-
-    return value.substr(start, end - start);
-}
-
-static std::string normalizeVersionLabel(const std::string& version) {
-    if (!version.empty() && (version[0] == 'v' || version[0] == 'V'))
-        return version.substr(1);
-    return version;
 }
 
 static std::string zipBaseName(const std::string& name) {
@@ -236,33 +220,6 @@ static size_t fetchContentLength(const std::string& url) {
     return fileSize;
 }
 
-static std::string readVersionFromIni(const std::string& iniText, const std::string& targetKey) {
-    std::istringstream stream(iniText);
-    std::string line;
-    while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r')
-            line.pop_back();
-
-        std::string trimmed = trimCopy(line);
-        if (trimmed.empty() || trimmed[0] == ';' || trimmed[0] == '#')
-            continue;
-        if (trimmed.front() == '[' && trimmed.back() == ']')
-            continue;
-
-        auto pos = trimmed.find('=');
-        if (pos == std::string::npos)
-            continue;
-
-        std::string key = trimCopy(trimmed.substr(0, pos));
-        if (key != targetKey)
-            continue;
-
-        return trimCopy(trimmed.substr(pos + 1));
-    }
-
-    return "";
-}
-
 static bool isRemoteVersionNewer(const std::string& remoteVersion, const std::string& localVersion) {
     try {
         return tools::versionCode(remoteVersion) > tools::versionCode(localVersion);
@@ -287,35 +244,41 @@ bool AppUpdater::checkSync() {
 
     auto ts = std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    std::string url = tools::appendDeviceIdParameter(
-        std::string(VERSION_INI_URL) + "?t=" + std::to_string(ts));
-    m_info.downloadUrl = tools::appendDeviceIdParameter(
-        std::string(DOWNLOAD_URL) + "?t=" + std::to_string(ts));
-
-    std::string iniText = fetchUrl(url);
-    if (iniText.empty()) {
-        brls::Logger::warning("AppUpdater: 无法获取版本信息 {}", VERSION_INI_URL);
+    const std::string releaseUrl = tools::appendDeviceIdParameter(
+        std::string(RELEASE_API_URL) + "?t=" + std::to_string(ts));
+    const std::string releaseText = fetchUrl(releaseUrl);
+    if (releaseText.empty()) {
+        brls::Logger::warning("AppUpdater: 无法获取 GitHub Release 信息 {}", RELEASE_API_URL);
         return false;
     }
 
-    m_info.version = readVersionFromIni(iniText, "GBAStation");
-    if (m_info.version.empty()) {
-        brls::Logger::warning("AppUpdater: version.ini 中未找到 GBAStation 版本号");
+    const nlohmann::json release = nlohmann::json::parse(releaseText, nullptr, false);
+    if (!release.is_object()) {
+        brls::Logger::warning("AppUpdater: GitHub Release 响应不是有效 JSON");
+        return false;
+    }
+
+    m_info.version = release.value("tag_name", "");
+    const std::string releaseNotes = release.value("body", "");
+    for (const auto& asset : release.value("assets", nlohmann::json::array())) {
+        if (asset.value("name", "") == RELEASE_ASSET_NAME) {
+            m_info.downloadUrl = asset.value("browser_download_url", "");
+            break;
+        }
+    }
+    if (m_info.version.empty() || m_info.downloadUrl.empty()) {
+        brls::Logger::warning(
+            "AppUpdater: GitHub Release 缺少 {} 或 {} 资产",
+            RELEASE_ASSET_NAME, RELEASE_ASSET_NAME);
         return false;
     }
 
     m_info.fileSize = fetchContentLength(m_info.downloadUrl);
     m_info.hasUpdate = isRemoteVersionNewer(m_info.version, APP_VERSION);
     if (m_info.hasUpdate) {
-        std::string versionLabel = normalizeVersionLabel(m_info.version);
-        std::string changelogUrl = tools::appendDeviceIdParameter(
-            std::string(CHANGELOG_BASE_URL) + "/" + versionLabel
-            + ".txt?t=" + std::to_string(ts));
-        std::string changelogText = fetchUrl(changelogUrl);
-        if (!changelogText.empty())
-            m_info.changelog = changelogText;
-        else
-            m_info.changelog = "检测到新版本 " + m_info.version + "，但暂时无法获取更新说明。";
+        m_info.changelog = releaseNotes.empty()
+            ? "检测到新版本 " + m_info.version + "，但暂时无法获取更新说明。"
+            : releaseNotes;
     }
 
     brls::Logger::info("AppUpdater: 本地={}, 远程={}, 有更新={}",
