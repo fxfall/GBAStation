@@ -1,4 +1,7 @@
 #include "LibretroLoader.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
+#include "RomxVfs.hpp"
+#include <romx/romx.h>
 
 #include <cstring>
 #include <cstdio>
@@ -311,6 +314,24 @@ LibretroLoader::coreOptions(CoreType coreType)
 // ---- 静态实例指针 ----------------------------------------
 LibretroLoader* LibretroLoader::s_current = nullptr;
 
+LibretroLoader::~LibretroLoader()
+{
+    if (m_gameLoaded && fn_unload_game)
+        fn_unload_game();
+    if (m_romxVfsActive)
+    {
+        beiklive::romx_vfs::deactivate(this);
+        m_romxVfsActive = false;
+    }
+    m_romxVirtualPath.clear();
+    m_romxSession.reset();
+    if (m_romxMapping)
+    {
+        romx_payload_mapping_close(m_romxMapping);
+        m_romxMapping = nullptr;
+    }
+}
+
 // ============================================================
 // 动态库辅助函数
 // ============================================================
@@ -611,6 +632,18 @@ void LibretroLoader::unload()
         fn_unload_game();
         m_gameLoaded = false;
     }
+    if (m_romxVfsActive) {
+        beiklive::romx_vfs::deactivate(this);
+        m_romxVfsActive = false;
+    }
+    m_romxVirtualPath.clear();
+    m_romxSession.reset();
+    if (m_romxMapping) {
+        romx_payload_mapping_close(m_romxMapping);
+        m_romxMapping = nullptr;
+    }
+    m_romxMaterializedPath.clear();
+    m_romxVfsRequested = false;
     m_diskControl = {};
     m_diskControlExt = {};
     m_hasDiskControl = false;
@@ -716,9 +749,93 @@ bool LibretroLoader::loadGame(const std::string& romPath)
     retro_system_info systemInfo{};
     fn_get_system_info(&systemInfo);
 
+    if (m_romxMapping) {
+        romx_payload_mapping_close(m_romxMapping);
+        m_romxMapping = nullptr;
+    }
+    if (m_romxVfsActive) {
+        beiklive::romx_vfs::deactivate(this);
+        m_romxVfsActive = false;
+    }
+    m_romxVirtualPath.clear();
+    m_romxSession.reset();
+    m_romxMaterializedPath.clear();
+
     std::vector<uint8_t> romData;
-    if (!systemInfo.need_fullpath) {
-        std::ifstream file(romPath, std::ios::binary);
+    std::string launchPath = romPath;
+    if (beiklive::romx::isRomxPath(romPath) && systemInfo.need_fullpath) {
+        std::string error;
+        m_romxSession = std::make_unique<beiklive::romx::LaunchSession>();
+        if (!m_romxSession->open(romPath, &error)) {
+            brls::Logger::error("[LibretroLoader] ROMX open failed: {}", error);
+            m_romxSession.reset();
+            return false;
+        }
+
+        // A path-oriented core can consume the logical entrypoint through
+        // Libretro VFS.  This keeps large/split ROMX payloads out of a
+        // temporary extraction and lets companion RIDX files resolve by
+        // their normal relative paths.  Cores that do not request VFS use
+        // the ordinary materialized-path fallback below.
+        if (m_romxVfsRequested) {
+            m_romxVirtualPath = beiklive::romx_vfs::makeVirtualPath(
+                romPath, m_romxSession->info().entrypointPath);
+            if (beiklive::romx_vfs::activate(this, m_romxVirtualPath,
+                                             m_romxSession.get())) {
+                m_romxVfsActive = true;
+                launchPath = m_romxVirtualPath;
+                brls::Logger::info("[LibretroLoader] ROMX entrypoint exposed through VFS: {}",
+                                   launchPath);
+            }
+        }
+
+        if (!m_romxVfsActive &&
+            !m_romxSession->materializeEntrypoint(
+                beiklive::romx::GameEntryAdapter::payloadCacheDirectory(),
+                m_romxMaterializedPath, &error)) {
+            brls::Logger::error("[LibretroLoader] ROMX path fallback failed: {}", error);
+            m_romxSession.reset();
+            return false;
+        }
+        if (!m_romxVfsActive)
+            launchPath = m_romxMaterializedPath;
+    }
+
+    if (!systemInfo.need_fullpath && beiklive::romx::isRomxPath(romPath)) {
+        romx_reader_t* reader = nullptr;
+        romx_error_t error{};
+        romx_result_t result = romx_reader_open_path(romPath.c_str(), nullptr, &reader, &error);
+        if (result == ROMX_OK) {
+            romx_info_t romxInfo = ROMX_INFO_INIT;
+            result = romx_reader_get_info(reader, &romxInfo, &error);
+            if (result == ROMX_OK && romxInfo.entry_count == 1)
+                result = romx_reader_map_payload(reader, &m_romxMapping, &error);
+            if (result == ROMX_OK && m_romxMapping) {
+                brls::Logger::info("[LibretroLoader] ROMX payload mapped: {} bytes",
+                                   romx_payload_mapping_size(m_romxMapping));
+            } else {
+                // A descriptor/multi-file entrypoint is small and is allowed
+                // to use the explicit materialization fallback.
+                beiklive::romx::LaunchSession session;
+                std::string fallbackError;
+                if (!session.open(romPath, &fallbackError) ||
+                    !session.materializeEntrypoint(beiklive::romx::GameEntryAdapter::payloadCacheDirectory(),
+                                                   m_romxMaterializedPath, &fallbackError)) {
+                    if (reader) romx_reader_close(reader);
+                    brls::Logger::error("[LibretroLoader] ROMX descriptor fallback failed: {}", fallbackError);
+                    return false;
+                }
+                launchPath = m_romxMaterializedPath;
+            }
+            if (reader) romx_reader_close(reader);
+        } else {
+            brls::Logger::error("[LibretroLoader] ROMX open failed: {}", error.message);
+            return false;
+        }
+    }
+
+    if (!systemInfo.need_fullpath && !m_romxMapping) {
+        std::ifstream file(launchPath, std::ios::binary);
         if (!file) {
             brls::Logger::error("[LibretroLoader] loadGame: failed to open ROM data: {}", romPath);
             return false;
@@ -738,13 +855,53 @@ bool LibretroLoader::loadGame(const std::string& romPath)
     }
 
     retro_game_info info{};
-    info.path = romPath.c_str();
-    info.data = romData.empty() ? nullptr : romData.data();
-    info.size = romData.size();
+    info.path = launchPath.c_str();
+    info.data = m_romxMapping
+        ? romx_payload_mapping_data(m_romxMapping)
+        : (romData.empty() ? nullptr : romData.data());
+    info.size = m_romxMapping ? static_cast<size_t>(romx_payload_mapping_size(m_romxMapping))
+                              : romData.size();
     info.meta = nullptr;
 
-    if (!fn_load_game(&info)) {
+    bool loaded = fn_load_game(&info);
+    if (!loaded && m_romxVfsActive) {
+        // A few older libretro cores request VFS for ordinary file I/O but
+        // still reject URI-like paths before consulting their VFS callbacks
+        // (for example, a path_is_valid() guard).  Keep ROMX transparent by
+        // retrying once with the same entrypoint materialized in the cache.
+        brls::Logger::warning(
+            "[LibretroLoader] ROMX VFS path rejected; retrying materialized entrypoint");
+        if (fn_unload_game)
+            fn_unload_game();
+        beiklive::romx_vfs::deactivate(this);
+        m_romxVfsActive = false;
+        m_romxVirtualPath.clear();
+        std::string fallbackError;
+        if (m_romxSession && m_romxSession->materializeEntrypoint(
+                beiklive::romx::GameEntryAdapter::payloadCacheDirectory(),
+                m_romxMaterializedPath, &fallbackError)) {
+            launchPath = m_romxMaterializedPath;
+            info.path = launchPath.c_str();
+            loaded = fn_load_game(&info);
+        } else {
+            brls::Logger::error(
+                "[LibretroLoader] ROMX VFS fallback extraction failed: {}",
+                fallbackError);
+        }
+    }
+
+    if (!loaded) {
         brls::Logger::error("[LibretroLoader] loadGame: retro_load_game failed");
+        if (m_romxVfsActive) {
+            beiklive::romx_vfs::deactivate(this);
+            m_romxVfsActive = false;
+        }
+        m_romxVirtualPath.clear();
+        m_romxSession.reset();
+        if (m_romxMapping) {
+            romx_payload_mapping_close(m_romxMapping);
+            m_romxMapping = nullptr;
+        }
         return false;
     }
 
@@ -757,10 +914,22 @@ bool LibretroLoader::loadGame(const std::string& romPath)
 
 void LibretroLoader::unloadGame()
 {
-    if (!m_gameLoaded) return;
-    brls::Logger::debug("[LibretroLoader] unloadGame");
-    fn_unload_game();
-    m_gameLoaded = false;
+    if (m_gameLoaded) {
+        brls::Logger::debug("[LibretroLoader] unloadGame");
+        fn_unload_game();
+        m_gameLoaded = false;
+    }
+    if (m_romxVfsActive) {
+        beiklive::romx_vfs::deactivate(this);
+        m_romxVfsActive = false;
+    }
+    m_romxVirtualPath.clear();
+    m_romxSession.reset();
+    if (m_romxMapping) {
+        romx_payload_mapping_close(m_romxMapping);
+        m_romxMapping = nullptr;
+    }
+    m_romxMaterializedPath.clear();
     m_diskControl = {};
     m_diskControlExt = {};
     m_hasDiskControl = false;
@@ -1195,9 +1364,16 @@ bool LibretroLoader::s_environmentCallback(unsigned cmd, void* data)
             return true;
         }
         case RETRO_ENVIRONMENT_GET_VFS_INTERFACE: {
-            // VFS 不可用，返回 true 但 iface 保持 NULL
-            // 核心会回退到 stdio 文件操作
-            return true;
+            auto* info = static_cast<retro_vfs_interface_info*>(data);
+            // The bridge implements the complete libretro VFS v3 surface,
+            // including stat/mkdir and directory enumeration.  Keep v1/v2
+            // cores working while allowing multi-file cores that request v3.
+            if (!info || info->required_interface_version > 3)
+                return false;
+            info->iface = beiklive::romx_vfs::interfacePtr();
+            info->required_interface_version = 3;
+            s_current->m_romxVfsRequested = info->iface != nullptr;
+            return s_current->m_romxVfsRequested;
         }
         case RETRO_ENVIRONMENT_GET_LED_INTERFACE:
             // LED 接口不可用，核心不检查返回值

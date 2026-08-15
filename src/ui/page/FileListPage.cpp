@@ -1,5 +1,7 @@
 #include "FileListPage.hpp"
 #include "core/Translation.hpp"
+#include "core/romx/RomxFrontend.hpp"
+#include <romx/romx.h>
 #include "ui/utils/AnimationHelper.hpp"
 #include <algorithm>
 #include <sstream>
@@ -425,6 +427,14 @@ namespace beiklive
             else
                 _showGameNoDBDetail(data);
         }
+        else if (ft == beiklive::enums::FileType::ROMX_FILE)
+        {
+            auto entryOpt = beiklive::GameDB ? beiklive::GameDB->findByPath(data.fullPath) : std::nullopt;
+            if (entryOpt)
+                _showGameDBDetail(data, *entryOpt);
+            else
+                _showGameNoDBDetail(data);
+        }
         else if (ft == beiklive::enums::FileType::IMAGE_FILE)
         {
             _showImageDetail(data);
@@ -475,13 +485,34 @@ namespace beiklive
 
     void FileListPage::_showGameNoDBDetail(const beiklive::DirListData& data)
     {
-        m_detailTitle->setText(data.fileName);
-        m_detailSubtitle->setText(L("未录入数据库"));
+        std::string displayTitle = data.fileName;
+        std::string coverPath;
+        std::string romxPlatform;
+        if (data.itemType == beiklive::enums::FileType::ROMX_FILE)
+        {
+            beiklive::romx::Info info;
+            if (beiklive::romx::readInfo(data.fullPath, info))
+            {
+                if (!info.title.empty())
+                    displayTitle = info.title;
+                if (!info.hasCover || !beiklive::romx::extractCover(data.fullPath, coverPath))
+                    coverPath.clear();
+                if (info.platformId != 0)
+                {
+                    if (const char* platformName = romx_platform_name(info.platformId))
+                        romxPlatform = platformName;
+                }
+            }
+        }
+        m_detailTitle->setText(displayTitle);
+        m_detailSubtitle->setText(data.itemType == beiklive::enums::FileType::ROMX_FILE
+            ? (romxPlatform.empty() ? L("ROMX 0.2.0") : "ROMX · " + romxPlatform)
+            : L("未录入数据库"));
 
         m_detailImage->setVisibility(brls::Visibility::VISIBLE);
-        m_detailImage->setImageFromFile(data.iconPath.empty()
-            ? beiklive::tools::getIconPath(data.itemType)
-            : data.iconPath);
+        m_detailImage->setImageFromFile(coverPath.empty()
+            ? (data.iconPath.empty() ? beiklive::tools::getIconPath(data.itemType) : data.iconPath)
+            : coverPath);
 
         if(!data.iconPath.empty())
             imageScaleFit(m_detailImage);
@@ -491,6 +522,8 @@ namespace beiklive
         _addInfoRow(L("容量"), data.fileSize, nvgRGB(255, 183, 77));
 
         _addInfoRow(L("文件名"), beiklive::tools::getFileNameWithoutExtension(data.fullPath), nvgRGB(255, 183, 77));
+        if (data.itemType == beiklive::enums::FileType::ROMX_FILE && !romxPlatform.empty())
+            _addInfoRow(L("平台"), romxPlatform, nvgRGB(121, 201, 249));
         _addInfoRow(L("路径"), data.fullPath, nvgRGB(129, 199, 132));
     }
 
@@ -595,6 +628,10 @@ namespace beiklive
     {
         if (m_filterMode == beiklive::enums::FilterMode::None) return true;
         if (m_filterMode == beiklive::enums::FilterMode::Whitelist) {
+            // The canonical ROMX 0.2.0 extension stays visible even when the
+            // caller's native-ROM whitelist does not list it explicitly.
+            if (beiklive::romx::isRomxPath("file." + suffix))
+                return true;
             for (const auto& ext : m_filterExtensions)
                 if (suffix == ext) return true;
             return false;

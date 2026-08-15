@@ -2,6 +2,8 @@
 
 #include "core/Tools.hpp"
 #include "core/common.h"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -65,7 +67,20 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
         return false;
     }
 
-    if (m_gameEntry.path.empty() || !std::filesystem::exists(m_gameEntry.path))
+    std::string launchPath = m_gameEntry.path;
+    if (beiklive::romx::isRomxPath(launchPath))
+    {
+        beiklive::romx::LaunchSession session;
+        std::string error;
+        if (!session.open(launchPath, &error) ||
+            !session.materializeEntrypoint(beiklive::romx::GameEntryAdapter::payloadCacheDirectory(),
+                                           launchPath, &error))
+        {
+            brls::Logger::error("GenesisCore: ROMX payload unavailable: {}", error);
+            return false;
+        }
+    }
+    if (launchPath.empty() || !std::filesystem::exists(launchPath))
     {
         brls::Logger::error("GenesisCore: ROM not found: {}", m_gameEntry.path);
         return false;
@@ -95,11 +110,11 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
         GET_SETTING_KEY_STR("core.genesis.no_sprite_limit", "disabled") == "enabled");
     system_hw = 0;
 
-    std::vector<char> mutablePath(m_gameEntry.path.begin(), m_gameEntry.path.end());
+    std::vector<char> mutablePath(launchPath.begin(), launchPath.end());
     mutablePath.push_back('\0');
     if (load_rom(mutablePath.data()) <= 0 || system_hw != SYSTEM_MD)
     {
-        brls::Logger::error("GenesisCore: failed to load MD ROM: {}", m_gameEntry.path);
+        brls::Logger::error("GenesisCore: failed to load MD ROM: {}", launchPath);
         clearRuntimeState();
         return false;
     }

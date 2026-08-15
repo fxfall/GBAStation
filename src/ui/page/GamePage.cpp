@@ -1,6 +1,8 @@
 #include "GamePage.hpp"
 #include "core/Translation.hpp"
 #include "core/Tools.hpp"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "core/GameSignal.hpp"
 #include "ui/utils/AnimationHelper.hpp"
 
@@ -85,6 +87,8 @@ namespace beiklive
         db->set(m_gameEntry.path, "lastPlayed", m_gameEntry.lastPlayed);
         db->set(m_gameEntry.path, "playCount", m_gameEntry.playCount);
         db->flush();
+        if (beiklive::romx::isRomxPath(m_gameEntry.path))
+            (void)beiklive::romx::GameEntryAdapter::writeStats(m_gameEntry);
     }
 
     void GamePage::GameEntryInitialize()
@@ -98,11 +102,22 @@ namespace beiklive
             brls::Logger::debug("GamePage 数据库中没有此游戏的记录，插入新记录: {}", m_gameData.fullPath);
             GameEntry minimal;
             minimal.path     = m_gameData.fullPath;
-            minimal.platform = (int)m_gameData.itemType;
-            minimal.core     = beiklive::GetDefaultCoreId(minimal.platform);
-            minimal.title    = GET_MAPPING_KEY_STR(
-                beiklive::tools::getFileNameWithoutExtension(m_gameData.fileName),
-                beiklive::tools::getFileNameWithoutExtension(m_gameData.fileName));
+            if (m_gameData.itemType == beiklive::enums::FileType::ROMX_FILE)
+            {
+                minimal.platform = static_cast<int>(beiklive::enums::EmuPlatform::NONE);
+                std::string romxError;
+                if (!beiklive::romx::GameEntryAdapter::apply(
+                        minimal.path, minimal, {}, &romxError))
+                    brls::Logger::warning("GamePage ROMX metadata failed: {}", romxError);
+            }
+            else
+            {
+                minimal.platform = (int)m_gameData.itemType;
+                minimal.core     = beiklive::GetDefaultCoreId(minimal.platform);
+                minimal.title    = GET_MAPPING_KEY_STR(
+                    beiklive::tools::getFileNameWithoutExtension(m_gameData.fileName),
+                    beiklive::tools::getFileNameWithoutExtension(m_gameData.fileName));
+            }
             minimal.savePath = beiklive::tools::defaultGameSavePath(minimal.platform, minimal.path);
             if (minimal.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS)) {
                 minimal.ndsScreenLayout = "priority_top";
@@ -120,19 +135,25 @@ namespace beiklive
         }
 
         // 使用 setDefault 为可选字段设置首次默认值（已有值时不覆盖）
+        int inferredPlatform = static_cast<int>(m_gameData.itemType);
+        if (m_gameData.itemType == beiklive::enums::FileType::ROMX_FILE)
+        {
+            if (const auto resolved = db->findByPath(m_gameData.fullPath))
+                inferredPlatform = resolved->platform;
+        }
         std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
-            static_cast<beiklive::enums::EmuPlatform>((int)m_gameData.itemType),
+            static_cast<beiklive::enums::EmuPlatform>(inferredPlatform),
             m_gameData.fullPath);
 
         auto& path = m_gameData.fullPath;
-        db->setDefault(path, "core", beiklive::GetDefaultCoreId((int)m_gameData.itemType));
+        db->setDefault(path, "core", beiklive::GetDefaultCoreId(inferredPlatform));
         db->setDefault(path, "logoPath", defaultLogo);
 
         namespace sk = beiklive::SettingKey;
         db->setDefault(path, "overlayEnabled",
-                       beiklive::tools::shouldAutoEnableOverlayForPlatform((int)m_gameData.itemType));
+                       beiklive::tools::shouldAutoEnableOverlayForPlatform(inferredPlatform));
         db->setDefault(path, "shaderEnabled",
-                       beiklive::tools::shouldAutoEnableShaderForPlatform((int)m_gameData.itemType));
+                       beiklive::tools::shouldAutoEnableShaderForPlatform(inferredPlatform));
 
         // 画面模式：全局配置为字符串，DB 存整数 ScreenMode 枚举值
         {
@@ -147,7 +168,7 @@ namespace beiklive
         // 整数倍缩放
         db->setDefault(path, "integerAspectRatio",
                        GET_SETTING_KEY_INT("display.integer_scale_mult", 0));
-        if ((int)m_gameData.itemType == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS)) {
+        if (inferredPlatform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS)) {
             db->setDefault(path, "ndsScreenLayout", std::string("priority_top"));
             db->setDefault(path, "ndsScreenOrientation", std::string("0"));
             db->setDefault(path, "ndsIntegerScale", true);

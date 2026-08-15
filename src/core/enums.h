@@ -1,6 +1,7 @@
 #pragma once
 #include <borealis.hpp>
 #include <cstdint>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 namespace beiklive
@@ -85,6 +86,9 @@ namespace beiklive::enums
         SATURN_ROM, // Sega Saturn 文件
         DOLPHIN_ROM, // GameCube / Wii 文件
 
+        // ROMX 0.2.0 canonical container；实际平台从 footer 解析。
+        ROMX_FILE,
+
         // 上面的顺序必须与EmuPlatform保持一致，方便后续通过平台类型直接转换为文件类型
 
         DRIVE, // 磁盘驱动器（Windows: C:\、D:\ 等）
@@ -162,6 +166,10 @@ namespace beiklive // 结构体
         std::string shaderParaPath = "";          // 着色器参数所属预设路径
         std::vector<std::string> shaderParaNames; // 着色器参数名称列表
         std::vector<float> shaderParaValues;      // 着色器参数值列表
+
+        // ROMX footer/RIDX 投影和原始 metadata，集中放置以避免以后扩展
+        // ROMX 字段与通用数据库字段冲突。
+        nlohmann::json romx = nlohmann::json::object();
     };
 
     typedef std::vector<GameEntry> GameList; // 游戏列表类型定义

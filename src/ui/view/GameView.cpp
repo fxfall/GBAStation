@@ -8,6 +8,7 @@
 #include "ui/utils/BKAudioPlayer.hpp"
 #include "ui/utils/AnimationHelper.hpp"
 #include "core/Tools.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -2373,6 +2374,11 @@ namespace beiklive
             // beiklive::GameDB->upsert(m_gameEntry);
             beiklive::GameDB->set(m_gameEntry.path, "playTime", nlohmann::json(m_gameEntry.playTime));
             beiklive::GameDB->flush();
+        }
+        if (beiklive::romx::isRomxPath(m_gameEntry.path))
+        {
+            (void)beiklive::romx::GameEntryAdapter::writeStats(m_gameEntry);
+            (void)beiklive::romx::GameEntryAdapter::writeMutable(m_gameEntry);
         }
         PlayTimeCheckpointWriter::instance().forget(m_playTimeTempPath);
         std::error_code ec;

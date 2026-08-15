@@ -1,6 +1,7 @@
 #include "MgbaNativeCore.hpp"
 
 #include "core/Tools.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "emulator/mgba_native/MgbaCheatSystem.hpp"
 
 #include <mgba/core/blip_buf.h>
@@ -664,7 +665,40 @@ bool MgbaNativeCore::loadRom(const std::string& romPath)
     brls::Logger::debug("MgbaNativeCore: pre-load config applied ok");
 
     brls::Logger::debug("MgbaNativeCore: loading ROM file");
-    if (!mCoreLoadFile(m_core, romPath.c_str()))
+    bool loaded = false;
+    if (beiklive::romx::isRomxPath(romPath))
+    {
+        m_romxSession = std::make_unique<beiklive::romx::LaunchSession>();
+        std::string romxError;
+        const void* data = nullptr;
+        uint64_t size = 0;
+        if (m_romxSession->open(romPath, &romxError) &&
+            m_romxSession->mapPayload(&data, &size, &romxError))
+        {
+            VFile* vf = VFileFromConstMemory(data, static_cast<size_t>(size));
+            if (vf)
+            {
+                loaded = m_core->loadROM(m_core, vf);
+                if (!loaded)
+                    vf->close(vf);
+            }
+        }
+        else if (m_romxSession->isOpen())
+        {
+            std::string extracted;
+            if (m_romxSession->materializeEntrypoint(
+                    beiklive::romx::GameEntryAdapter::payloadCacheDirectory(),
+                    extracted, &romxError))
+                loaded = mCoreLoadFile(m_core, extracted.c_str());
+        }
+        if (!loaded && !romxError.empty())
+            brls::Logger::warning("MgbaNativeCore: ROMX VFS/mmap fallback: {}", romxError);
+    }
+    else
+    {
+        loaded = mCoreLoadFile(m_core, romPath.c_str());
+    }
+    if (!loaded)
     {
         brls::Logger::error("MgbaNativeCore: mCoreLoadFile failed: {}", romPath);
         releaseCore();
@@ -1651,6 +1685,7 @@ void MgbaNativeCore::releaseCore()
     m_coreInitialized = false;
     m_configInitialized = false;
     shutdownNativeAudioOutput();
+    m_romxSession.reset();
 }
 
 std::string MgbaNativeCore::saveFilePath() const

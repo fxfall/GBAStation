@@ -62,6 +62,16 @@ enum class PlatformFilter : int
         std::function<void(const beiklive::GameEntry&)> onGameSelected;
 
     private:
+        enum class RomxBatchOperation
+        {
+            RestoreSave,
+            ExportSave,
+            RestoreCheat,
+            ExportCheat,
+            RestoreStats,
+            ExportStats,
+        };
+
         class GameLibraryDS : public GameGridDataSource {
         public:
             GameLibraryDS(class GameLibraryPage* page) : m_page(page) {}
@@ -123,6 +133,11 @@ enum class PlatformFilter : int
         void _closeGameOptionsPanelAnimated(std::function<void()> completion,
                                             bool launchTransition = false);
         void _showMultiSelectSidebar();
+        void _showRomxBatchSidebar(std::vector<beiklive::GameEntry> entries);
+        void _confirmRomxBatchOperation(std::vector<beiklive::GameEntry> entries,
+                                        RomxBatchOperation operation);
+        void _runRomxBatchOperation(std::vector<beiklive::GameEntry> entries,
+                                    RomxBatchOperation operation);
         void _deleteEntriesAsync(std::vector<int> indices, bool deleteRomFiles);
         void _openGameDataPage(const beiklive::GameEntry& entry);
 

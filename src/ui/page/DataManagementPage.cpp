@@ -10,6 +10,8 @@
 #include "core/rom/PspMeta.hpp"
 #include "core/rom/ThreeDsIcon.hpp"
 #include "core/Tools.hpp"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "network/WebService.h"
 #include "third_party/qrcodegen/qrcodegen.hpp"
 
@@ -2341,9 +2343,12 @@ void DataManagementPage::startScanAll()
                     if (!it->is_regular_file(fec) || fec)
                         continue;
                     std::string ext = normalizeExtension(it->path().extension().string());
-                    if (std::find(kScanPlatforms[i].exts.begin(),
-                                  kScanPlatforms[i].exts.end(), ext)
-                        != kScanPlatforms[i].exts.end())
+                    const bool extensionMatch = std::find(
+                        kScanPlatforms[i].exts.begin(), kScanPlatforms[i].exts.end(), ext)
+                        != kScanPlatforms[i].exts.end();
+                    const bool romxMatch = beiklive::romx::isRomxPath(it->path().string()) &&
+                        beiklive::tools::detectGamePlatform(it->path()) == p.platform;
+                    if (extensionMatch || romxMatch)
                         roms.push_back(it->path());
                 }
             }
@@ -2367,9 +2372,12 @@ void DataManagementPage::startScanAll()
                     if (!it->is_regular_file(fec) || fec)
                         continue;
                     std::string ext = normalizeExtension(it->path().extension().string());
-                    if (std::find(kScanPlatforms[i].exts.begin(),
-                                  kScanPlatforms[i].exts.end(), ext)
-                        != kScanPlatforms[i].exts.end())
+                    const bool extensionMatch = std::find(
+                        kScanPlatforms[i].exts.begin(), kScanPlatforms[i].exts.end(), ext)
+                        != kScanPlatforms[i].exts.end();
+                    const bool romxMatch = beiklive::romx::isRomxPath(it->path().string()) &&
+                        beiklive::tools::detectGamePlatform(it->path()) == p.platform;
+                    if (extensionMatch || romxMatch)
                         roms.push_back(it->path());
                 }
             }
@@ -2428,12 +2436,25 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
         entry.path = path;
         entry.title = displayName;
         entry.platform = platform;
-        if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
+        const bool isRomx = beiklive::romx::isRomxPath(path);
+        if (isRomx)
+        {
+            beiklive::romx::GameEntryAdapter::Options options;
+            options.preserveUserTitle = m_useNameMapping && displayName != romStem;
+            std::string romxError;
+            if (!beiklive::romx::GameEntryAdapter::apply(path, entry, options, &romxError))
+                brls::Logger::warning("ROMX scan metadata failed for {}: {}", path, romxError);
+            else
+                displayName = entry.title;
+        }
+        if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
             entry.threeDsTitleId = beiklive::three_ds::readNcsdTitleId(path);
 
         // 封面：ROM 同目录同名 png/jpg/jpeg → 扫描根目录 logos/ 同名 png/jpg/jpeg → 默认图。
-        std::string logoPath = beiklive::tools::getDefaultLogoPath(
-            static_cast<beiklive::enums::EmuPlatform>(platform), path);
+        std::string logoPath = entry.logoPath.empty()
+            ? beiklive::tools::getDefaultLogoPath(
+                static_cast<beiklive::enums::EmuPlatform>(entry.platform), path)
+            : entry.logoPath;
         std::error_code coverEc;
         const char* coverExts[] = {".png", ".jpg", ".jpeg"};
         fs::path coverFile;
@@ -2461,9 +2482,11 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
                 }
             }
         }
-        entry.logoPath = logoPath;
+        if (entry.logoPath.empty() || !isRomx)
+            entry.logoPath = logoPath;
 
-        std::string savePath = beiklive::tools::defaultGameSavePath(platform, path);
+        std::string savePath = entry.savePath.empty()
+            ? beiklive::tools::defaultGameSavePath(entry.platform, path) : entry.savePath;
         try
         {
             fs::create_directories(savePath);
@@ -2474,7 +2497,7 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
         entry.savePath = savePath;
 
         // NDS / 3DS / PSP：始终提取内置元数据（图标与名称）。
-        if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
+        if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
         {
             // TITLE：开启读取映射名称且映射名存在时保留映射名，否则 TITLE 优先。
             if (!(m_useNameMapping && displayName != romStem))
@@ -2489,7 +2512,7 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
                 static_cast<beiklive::enums::EmuPlatform>(platform), path))
                 entry.logoPath = icon;
         }
-        else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS))
+        else if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS))
         {
             // NDS 内置图标：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
             const std::string ndsIcon = beiklive::GetOrCreateNdsIconPath(path);
@@ -2501,7 +2524,7 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
                 if (!ndsTitle.empty() && entry.title == romStem)
                     entry.title = ndsTitle;
         }
-        else if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
+        else if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
         {
             // 3DS 内置图标（SMDH）：提取始终执行（缓存）；仅当封面仍是默认图时作为封面。
             const std::string icon = beiklive::GetOrCreateThreeDsIconPath(path);

@@ -6,6 +6,8 @@
 #include "core/SteamGridDb.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/forwarder/ForwarderInstaller.hpp"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "ui/utils/MaterialIcons.hpp"
 #include "ui/utils/NdsEnvironment.hpp"
 #include "ui/widget/ButtonBox.hpp"
@@ -1868,6 +1870,30 @@ namespace beiklive
 
         if (count > 0) {
             m_gameOptionsSidebar->addButton(
+                L("ROMX 管理"),
+                beiklive::material::STORAGE,
+                [this](const beiklive::GameEntry&) {
+                    std::vector<beiklive::GameEntry> entries;
+                    for (int index : m_libraryView->getDeleteSelection()) {
+                        if (index < 0 || static_cast<size_t>(index) >= m_entries.size())
+                            continue;
+                        const auto& entry = m_entries[static_cast<size_t>(index)];
+                        if (beiklive::romx::isRomxPath(entry.path))
+                            entries.push_back(entry);
+                    }
+                    _closeGameOptionsPanelAnimated(
+                        [this, entries = std::move(entries)]() mutable {
+                            if (entries.empty()) {
+                                m_libraryView->setInteractionDisabled(false);
+                                brls::Application::giveFocus(m_libraryView);
+                                brls::Application::notify(L("所选游戏中没有 ROMX 文件"));
+                                return;
+                            }
+                            _showRomxBatchSidebar(std::move(entries));
+                        });
+                });
+
+            m_gameOptionsSidebar->addButton(
                 L("删除已选游戏 (") + std::to_string(count) + ")",
                 beiklive::material::DELETE_SWEEP_ICON,
                 [this](const beiklive::GameEntry&) {
@@ -1979,6 +2005,204 @@ namespace beiklive
         };
         this->addView(m_gameOptionsSidebar);
         m_gameOptionsSidebar->open(beiklive::GameEntry{});
+    }
+
+    void GameLibraryPage::_showRomxBatchSidebar(
+        std::vector<beiklive::GameEntry> entries)
+    {
+        if (entries.empty()) {
+            m_libraryView->setInteractionDisabled(false);
+            brls::Application::giveFocus(m_libraryView);
+            return;
+        }
+
+        m_libraryView->setInteractionDisabled(true);
+        _hideGameOptionsPanel();
+        m_gameOptionsSidebar = new beiklive::GameOptionsSidebar();
+        m_gameOptionsSidebar->setNanoVgMenu(true);
+        this->getBottomBar()->setVisibility(brls::Visibility::GONE);
+
+        auto targets = std::make_shared<std::vector<beiklive::GameEntry>>(
+            std::move(entries));
+        m_gameOptionsSidebar->setNanoVgPreviewIcon(
+            beiklive::material::STORAGE,
+            L("ROMX 管理 · ") + std::to_string(targets->size()) + L(" 款游戏"));
+
+        const auto addOperation =
+            [this, targets](const std::string& title, char32_t icon,
+                            RomxBatchOperation operation) {
+                m_gameOptionsSidebar->addButton(
+                    title, icon,
+                    [this, targets, operation](const beiklive::GameEntry&) {
+                        _closeGameOptionsPanelAnimated(
+                            [this, targets, operation]() {
+                                _confirmRomxBatchOperation(*targets, operation);
+                            });
+                    });
+            };
+
+        addOperation(L("存档覆盖本地"), beiklive::material::CLOUD_DOWNLOAD,
+                     RomxBatchOperation::RestoreSave);
+        addOperation(L("存档写入 ROMX"), beiklive::material::CLOUD_UPLOAD,
+                     RomxBatchOperation::ExportSave);
+        addOperation(L("金手指存档覆盖本地"), beiklive::material::CLOUD_DOWNLOAD,
+                     RomxBatchOperation::RestoreCheat);
+        addOperation(L("金手指写入 ROMX"), beiklive::material::CLOUD_UPLOAD,
+                     RomxBatchOperation::ExportCheat);
+        addOperation(L("游玩记录覆盖本地"), beiklive::material::CLOUD_DOWNLOAD,
+                     RomxBatchOperation::RestoreStats);
+        addOperation(L("游玩记录写入 ROMX"), beiklive::material::CLOUD_UPLOAD,
+                     RomxBatchOperation::ExportStats);
+
+        m_gameOptionsSidebar->onClosed = [this]() {
+            m_libraryView->setInteractionDisabled(false);
+            brls::Application::giveFocus(m_libraryView);
+            this->getBottomBar()->setVisibility(brls::Visibility::GONE);
+        };
+        m_gameOptionsSidebar->onCloseRequested = [this]() {
+            _closeGameOptionsPanelAnimated({});
+        };
+        this->addView(m_gameOptionsSidebar);
+        m_gameOptionsSidebar->open(targets->front());
+    }
+
+    void GameLibraryPage::_confirmRomxBatchOperation(
+        std::vector<beiklive::GameEntry> entries,
+        RomxBatchOperation operation)
+    {
+        std::string question;
+        switch (operation) {
+            case RomxBatchOperation::RestoreSave:
+                question = L("是否确认将 ROMX 内置游戏存档覆盖本地？");
+                break;
+            case RomxBatchOperation::ExportSave:
+                question = L("是否将本地游戏存档写入 ROMX 文件？");
+                break;
+            case RomxBatchOperation::RestoreCheat:
+                question = L("是否确认将 ROMX 内置金手指档覆盖本地？");
+                break;
+            case RomxBatchOperation::ExportCheat:
+                question = L("是否将本地金手指写入 ROMX 文件？");
+                break;
+            case RomxBatchOperation::RestoreStats:
+                question = L("是否确认将 ROMX 内置游玩记录覆盖本地？");
+                break;
+            case RomxBatchOperation::ExportStats:
+                question = L("是否将本地游玩记录写入 ROMX 文件？");
+                break;
+        }
+        question += "\n\n" + L("将处理选中的 ") +
+                    std::to_string(entries.size()) + L(" 个 ROMX 文件。");
+
+        auto* dialog = new brls::Dialog(question);
+        dialog->addButton(L("取消"), [this]() {
+            m_libraryView->setInteractionDisabled(false);
+            brls::Application::giveFocus(m_libraryView);
+        });
+        dialog->addButton(L("确定"),
+            [this, entries = std::move(entries), operation]() mutable {
+                _runRomxBatchOperation(std::move(entries), operation);
+            });
+        dialog->setCancelable(false);
+        dialog->open();
+    }
+
+    void GameLibraryPage::_runRomxBatchOperation(
+        std::vector<beiklive::GameEntry> entries,
+        RomxBatchOperation operation)
+    {
+        if (entries.empty()) {
+            m_libraryView->setInteractionDisabled(false);
+            return;
+        }
+        m_libraryView->setInteractionDisabled(true);
+        brls::Application::notify(L("正在处理 ROMX 数据…"));
+
+        auto alive = m_aliveToken;
+        ThreadPool::instance().enqueue([
+            this, alive, entries = std::move(entries), operation]() mutable {
+            size_t success = 0;
+            size_t skipped = 0;
+            size_t failed = 0;
+            bool databaseChanged = false;
+
+            for (auto& entry : entries) {
+                if (!alive->load())
+                    return;
+                std::string error;
+                beiklive::romx::SyncResult result =
+                    beiklive::romx::SyncResult::Failed;
+                switch (operation) {
+                    case RomxBatchOperation::RestoreSave:
+                        result = beiklive::romx::RomxGameEntryAdapter::restoreSave(
+                            entry, &error);
+                        break;
+                    case RomxBatchOperation::ExportSave:
+                        result = beiklive::romx::RomxGameEntryAdapter::exportSave(
+                            entry, &error);
+                        break;
+                    case RomxBatchOperation::RestoreCheat:
+                        result = beiklive::romx::RomxGameEntryAdapter::restoreCheat(
+                            entry, &error);
+                        break;
+                    case RomxBatchOperation::ExportCheat:
+                        result = beiklive::romx::RomxGameEntryAdapter::exportCheat(
+                            entry, &error);
+                        break;
+                    case RomxBatchOperation::RestoreStats:
+                        result = beiklive::romx::RomxGameEntryAdapter::restoreStats(
+                            entry, &error);
+                        break;
+                    case RomxBatchOperation::ExportStats:
+                        result = beiklive::romx::RomxGameEntryAdapter::exportStats(
+                            entry, &error);
+                        break;
+                }
+
+                if (result == beiklive::romx::SyncResult::Success &&
+                    (operation == RomxBatchOperation::RestoreCheat ||
+                     operation == RomxBatchOperation::RestoreStats)) {
+                    if (beiklive::GameDB) {
+                        beiklive::GameDB->upsertByPath(entry);
+                        databaseChanged = true;
+                    } else {
+                        result = beiklive::romx::SyncResult::Failed;
+                        error = "game database is unavailable";
+                    }
+                }
+
+                if (result == beiklive::romx::SyncResult::Success) {
+                    ++success;
+                } else if (result == beiklive::romx::SyncResult::Skipped) {
+                    ++skipped;
+                    brls::Logger::info(
+                        "[ROMX Batch] no matching data: path={}", entry.path);
+                } else {
+                    ++failed;
+                    brls::Logger::warning(
+                        "[ROMX Batch] operation failed: path={} error={}",
+                        entry.path, error);
+                }
+            }
+
+            if (databaseChanged && beiklive::GameDB)
+                beiklive::GameDB->flush();
+            if (!alive->load())
+                return;
+            brls::sync([this, alive, success, skipped, failed, databaseChanged]() {
+                if (!alive->load())
+                    return;
+                m_libraryView->clearDeleteSelection();
+                m_libraryView->setInteractionDisabled(false);
+                brls::Application::giveFocus(m_libraryView);
+                brls::Application::notify(
+                    L("ROMX 处理完成：成功 ") + std::to_string(success) +
+                    L("，跳过 ") + std::to_string(skipped) +
+                    L("，失败 ") + std::to_string(failed));
+                if (databaseChanged)
+                    _reloadEntries(0, true);
+            });
+        });
     }
 
     void GameLibraryPage::_openGameDataPage(const beiklive::GameEntry& entry)

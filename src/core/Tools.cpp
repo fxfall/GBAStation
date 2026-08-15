@@ -1,5 +1,6 @@
 ﻿#include "Tools.hpp"
 #include "enums.h"
+#include "core/romx/RomxFrontend.hpp"
 #include "miniz.h"
 
 #ifdef _WIN32
@@ -54,6 +55,8 @@ beiklive::enums::FileType fileTypeFromExtension(const std::string& ext, bool arc
         return beiklive::enums::FileType::NDS_ROM;
     if (ext == "cia" || ext == "cci" || ext == "3ds")
         return beiklive::enums::FileType::THREEDS_ROM;
+    if (beiklive::romx::isRomxPath("file." + ext))
+        return beiklive::enums::FileType::ROMX_FILE;
     return beiklive::enums::FileType::NORMAL_FILE;
 }
 
@@ -147,6 +150,8 @@ int platformFromFileType(beiklive::enums::FileType type)
             return static_cast<int>(beiklive::enums::EmuPlatform::EmuSaturn);
         case beiklive::enums::FileType::DOLPHIN_ROM:
             return static_cast<int>(beiklive::enums::EmuPlatform::EmuDolphin);
+        case beiklive::enums::FileType::ROMX_FILE:
+            return -1;
         default:
             return -1;
     }
@@ -154,6 +159,11 @@ int platformFromFileType(beiklive::enums::FileType type)
 
 int detectGamePlatform(const fs::path& path)
 {
+    if (getFileType(path) == beiklive::enums::FileType::ROMX_FILE)
+    {
+        beiklive::romx::Info info;
+        return beiklive::romx::readInfo(path.string(), info) ? info.platform : -1;
+    }
     return platformFromFileType(getFileType(path));
 }
 
@@ -283,6 +293,8 @@ std::string getIconPath(beiklive::enums::FileType type) {
         case beiklive::enums::FileType::SATURN_ROM:
         case beiklive::enums::FileType::DOLPHIN_ROM:
             return BK_RES(path_prefix + "icon_gba.png");
+        case beiklive::enums::FileType::ROMX_FILE:
+            return BK_RES(path_prefix + "wenjian.png");
         default:
             return BK_RES(path_prefix + "wenjian.png");
     }
@@ -325,6 +337,8 @@ std::string getIconPathWithPrefix(beiklive::enums::FileType type, const std::str
         case beiklive::enums::FileType::SATURN_ROM:
         case beiklive::enums::FileType::DOLPHIN_ROM:
             return BK_RES(prefix + "icon_gba.png");
+        case beiklive::enums::FileType::ROMX_FILE:
+            return BK_RES(prefix + "wenjian.png");
         default:
             return BK_RES(prefix + "wenjian.png");
     }

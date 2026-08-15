@@ -316,7 +316,8 @@ namespace beiklive
             {"NdsShaderType", sanitizeUtf8(ndsShaderType)},
             {"shaderParaPath", sanitizeUtf8(isNds ? ndsShaderType : entry.shaderParaPath)},
             {"shaderParaNames", isNds ? std::vector<std::string>() : entry.shaderParaNames},
-            {"shaderParaValues", isNds ? std::vector<float>() : entry.shaderParaValues}};
+            {"shaderParaValues", isNds ? std::vector<float>() : entry.shaderParaValues},
+            {"romx", entry.romx.is_object() ? entry.romx : nlohmann::json::object()}};
     }
 
     void from_json(const nlohmann::json &j, GameEntry &entry)
@@ -361,6 +362,8 @@ namespace beiklive
         entry.shaderParaPath = j.value("shaderParaPath", "");
         entry.shaderParaNames = j.value("shaderParaNames", std::vector<std::string>());
         entry.shaderParaValues = j.value("shaderParaValues", std::vector<float>());
+        entry.romx = (j.contains("romx") && j["romx"].is_object())
+            ? j["romx"] : nlohmann::json::object();
         if (entry.platform == (int)beiklive::enums::EmuPlatform::EmuNDS)
         {
             if (entry.NdsShaderType.empty())

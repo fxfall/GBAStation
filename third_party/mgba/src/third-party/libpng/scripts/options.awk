@@ -82,6 +82,11 @@ BEGIN{
    protect = ""
 }
 
+# Normalize CRLF input files for awk implementations that keep the carriage return.
+{
+   sub(/\r$/, "")
+}
+
 # The output file must be specified before any input:
 out == "" {
    print "out=output.file must be given on the command line"

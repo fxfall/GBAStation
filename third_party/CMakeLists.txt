@@ -14,6 +14,12 @@ set(MELONDS_PATH       ${CMAKE_CURRENT_SOURCE_DIR}/melonDS)
 
 option(BUILD_MELONDS_CORE "Build the embedded melonDS native core" OFF)
 
+# ROMX 0.2.0 is consumed through its small C ABI.  Keep it as an independent
+# vendored target so upstream core/UI code does not need to know its internals.
+set(ROMX_BUILD_TESTS OFF CACHE BOOL "Build libromx tests inside GBAStation" FORCE)
+set(ROMX_BUILD_EXAMPLES OFF CACHE BOOL "Build libromx examples inside GBAStation" FORCE)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libromx)
+
 # =========================================================
 # borealis UI 框架
 # =========================================================
@@ -98,9 +104,10 @@ function(add_ffmpeg_static_library TARGET_NAME LIBRARY_PATH)
     add_library(${TARGET_NAME} STATIC IMPORTED GLOBAL)
     set_target_properties(${TARGET_NAME} PROPERTIES
         IMPORTED_LOCATION ${LIBRARY_PATH}
-        # Public FFmpeg headers are source files.  Generated configuration
-        # headers are consumed only while building the isolated static libs.
-        INTERFACE_INCLUDE_DIRECTORIES "${FFMPEG_SOURCE_DIR}"
+        # Public FFmpeg headers are source files; avconfig.h and the other
+        # configure-time headers live at the root of the private build tree.
+        INTERFACE_INCLUDE_DIRECTORIES
+            "${FFMPEG_SOURCE_DIR};${FFMPEG_BUILD_DIR}"
     )
     add_dependencies(${TARGET_NAME} ffmpeg_minimal)
 endfunction()
@@ -268,16 +275,39 @@ function(add_isolated_libretro_core TARGET OBJECT_TARGET PREFIX)
     add_dependencies(${_raw_target} ${OBJECT_TARGET})
     set_target_properties(${_raw_target} PROPERTIES LINKER_LANGUAGE C)
 
-    add_custom_command(
-        OUTPUT "${_out_obj}"
-        COMMAND ${CMAKE_COMMAND} -E rm -f "${_tmp_obj}" "${_out_obj}"
-        COMMAND ${CMAKE_CXX_COMPILER} -r -o "${_tmp_obj}"
-                -Wl,--whole-archive "$<TARGET_FILE:${_raw_target}>" -Wl,--no-whole-archive
-        COMMAND ${CMAKE_OBJCOPY} ${_keep_args} "${_tmp_obj}" "${_out_obj}"
-        DEPENDS ${_raw_target}
-        COMMAND_EXPAND_LISTS
-        VERBATIM
-    )
+    if(APPLE)
+        # Homebrew/binutils objcopy emits malformed Mach-O relocatable
+        # objects on Darwin.  Ask Apple's linker to retain only this core's
+        # prefixed libretro entry points instead.
+        set(_export_file "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}_exports.txt")
+        file(WRITE "${_export_file}" "")
+        foreach(_sym IN LISTS LIBRETRO_API_SYMBOLS)
+            file(APPEND "${_export_file}" "_${PREFIX}_${_sym}\n")
+        endforeach()
+        add_custom_command(
+            OUTPUT "${_out_obj}"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${_tmp_obj}" "${_out_obj}"
+            COMMAND ${CMAKE_CXX_COMPILER}
+                    -r
+                    -o "${_out_obj}"
+                    "-Wl,-force_load,$<TARGET_FILE:${_raw_target}>"
+                    "-Wl,-exported_symbols_list,${_export_file}"
+            DEPENDS ${_raw_target}
+            VERBATIM
+        )
+    else()
+        add_custom_command(
+            OUTPUT "${_out_obj}"
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${_tmp_obj}" "${_out_obj}"
+            COMMAND ${CMAKE_CXX_COMPILER} -r -o "${_tmp_obj}"
+                    -Wl,--whole-archive "$<TARGET_FILE:${_raw_target}>"
+                    -Wl,--no-whole-archive
+            COMMAND ${CMAKE_OBJCOPY} ${_keep_args} "${_tmp_obj}" "${_out_obj}"
+            DEPENDS ${_raw_target}
+            COMMAND_EXPAND_LISTS
+            VERBATIM
+        )
+    endif()
     set_source_files_properties("${_out_obj}" PROPERTIES
         GENERATED TRUE
         EXTERNAL_OBJECT TRUE

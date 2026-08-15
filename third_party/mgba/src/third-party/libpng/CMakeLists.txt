@@ -272,10 +272,19 @@ find_program(AWK NAMES gawk awk)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-if(NOT AWK OR ANDROID)
-  # No awk available to generate sources; use pre-built pnglibconf.h
-  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/scripts/pnglibconf.h.prebuilt
-                 ${CMAKE_CURRENT_BINARY_DIR}/pnglibconf.h)
+if(NOT AWK OR ANDROID OR APPLE)
+  # Apple clang defines TARGET_OS_MAC, but the bundled libpng generator and
+  # legacy fp.h/NEON paths are not available on modern macOS.  Use the
+  # generated configuration shipped with libpng instead.
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/pnglibconf.h.prebuilt"
+    "${CMAKE_CURRENT_BINARY_DIR}/pnglibconf.h"
+    COPYONLY
+  )
+  file(WRITE
+    "${CMAKE_CURRENT_BINARY_DIR}/pngprefix.h"
+    "/* empty pngprefix.h for non-prefixed build */\n"
+  )
   add_custom_target(genfiles) # Dummy
 else()
   include(CMakeParseArguments)
@@ -554,6 +563,9 @@ if(PNG_STATIC)
   set(PNG_LIB_NAME_STATIC png_static)
   add_library(png_static STATIC ${libpng_sources})
   add_dependencies(png_static genfiles)
+  if(APPLE)
+    target_compile_definitions(png_static PRIVATE PNG_ARM_NEON_OPT=0)
+  endif()
   # MSVC doesn't use a different file extension for shared vs. static
   # libs.  We are able to change OUTPUT_NAME to remove the _static
   # for all other platforms.

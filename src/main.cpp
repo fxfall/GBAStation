@@ -12,6 +12,8 @@
 #include "core/Tools.hpp"
 #include "core/rom/PspMeta.hpp"
 #include "core/ExternalCoreSession.hpp"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "ui/utils/BKAudioPlayer.hpp"
 #include "ui/page/StartPage.hpp"
 #include "ui/widget/VideoBackgroundView.hpp"
@@ -68,6 +70,30 @@ bool isLibraryRomType(beiklive::enums::FileType type)
 		   type == beiklive::enums::FileType::DOLPHIN_ROM;
 }
 
+beiklive::enums::FileType fileTypeForPlatform(int platform)
+{
+
+	using beiklive::enums::EmuPlatform;
+	switch (static_cast<EmuPlatform>(platform))
+	{
+	case EmuPlatform::EmuGBA: return beiklive::enums::FileType::GBA_ROM;
+	case EmuPlatform::EmuGBC: return beiklive::enums::FileType::GBC_ROM;
+	case EmuPlatform::EmuGB: return beiklive::enums::FileType::GB_ROM;
+	case EmuPlatform::EmuNES: return beiklive::enums::FileType::NES_ROM;
+	case EmuPlatform::EmuSNES: return beiklive::enums::FileType::SNES_ROM;
+	case EmuPlatform::EmuNDS: return beiklive::enums::FileType::NDS_ROM;
+	case EmuPlatform::Emu3DS: return beiklive::enums::FileType::THREEDS_ROM;
+	case EmuPlatform::EmuGenesis: return beiklive::enums::FileType::GENESIS_ROM;
+	case EmuPlatform::EmuArcade: return beiklive::enums::FileType::ARCADE_ROM;
+	case EmuPlatform::EmuDreamcast: return beiklive::enums::FileType::DREAMCAST_ROM;
+	case EmuPlatform::EmuPSP: return beiklive::enums::FileType::PSP_ROM;
+	case EmuPlatform::EmuPS1: return beiklive::enums::FileType::PS1_ROM;
+	case EmuPlatform::EmuSaturn: return beiklive::enums::FileType::SATURN_ROM;
+	case EmuPlatform::EmuDolphin: return beiklive::enums::FileType::DOLPHIN_ROM;
+	default: return beiklive::enums::FileType::NORMAL_FILE;
+	}
+}
+
 std::optional<std::string> parseDirectLaunchRom(int argc, char* argv[])
 {
 	for (int i = 1; i < argc; ++i)
@@ -119,11 +145,20 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 	const int platform = static_cast<int>(fileType);
 	const std::filesystem::path path(romPath);
 	const std::string stem = path.stem().string().empty() ? "game" : path.stem().string();
+	const bool isRomx = beiklive::romx::isRomxPath(romPath);
 
 	if (entry.path.empty())
 	{
 		entry.path = romPath;
 		changed = true;
+	}
+	if (isRomx)
+	{
+		std::string romxError;
+		if (beiklive::romx::GameEntryAdapter::apply(entry.path, entry, {}, &romxError))
+			changed = true;
+		else
+			brls::Logger::warning("Direct ROMX metadata failed: {}", romxError);
 	}
 	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE))
 	{
@@ -146,7 +181,7 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 		entry.savePath = beiklive::tools::defaultGameSavePath(entry.platform, entry.path);
 		changed = true;
 	}
-	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
+	if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP))
 	{
 		// PSP ROM：入库时提取真实游戏标题与 ICON0 封面（保存到该 ROM 的存档目录）。
 		// TITLE 仅在仍是默认文件名时覆盖（映射名优先保留）；封面仅当仍是默认资源图时替换。
@@ -177,14 +212,14 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 			entry.path);
 		changed = true;
 	}
-	if (beiklive::tools::tryUseNdsInternalIconCover(entry))
+	if (!isRomx && beiklive::tools::tryUseNdsInternalIconCover(entry))
 		changed = true;
 	if (entry.screenShotPath.empty())
 	{
 		entry.screenShotPath = beiklive::path::screenshotPath();
 		changed = true;
 	}
-	if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
+	if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS))
 	{
 		const std::string titleId = beiklive::three_ds::resolveTitleId(
 			entry.threeDsTitleId, entry.path);
@@ -203,7 +238,12 @@ void ensureDirectGameDbEntry(const std::string& romPath, beiklive::enums::FileTy
 
 bool launchDirectGameActivity(const std::string& romPath)
 {
-	const auto fileType = beiklive::tools::getFileType(romPath);
+	auto fileType = beiklive::tools::getFileType(romPath);
+	if (fileType == beiklive::enums::FileType::ROMX_FILE)
+	{
+		const int platform = beiklive::tools::detectGamePlatform(romPath);
+		fileType = fileTypeForPlatform(platform);
+	}
 	if (!isLibraryRomType(fileType))
 	{
 		brls::Logger::error("Direct launch path is not a supported ROM: {}", romPath);

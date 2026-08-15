@@ -5,6 +5,8 @@
 #include "core/SteamGridDb.hpp"
 #include "ui/utils/FilePickerHelper.hpp"
 #include "core/Tools.hpp"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "core/rom/PspMeta.hpp"
 #include "core/ThreadPool.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
@@ -942,7 +944,11 @@ beiklive::enums::FileType platformToFileType(int platform)
         bool shouldUseNdsExternalNro(const beiklive::DirListData& dirItem)
         {
 #ifdef __SWITCH__
-            return dirItem.itemType == beiklive::enums::FileType::NDS_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::NDS_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS);
 #else
             (void)dirItem;
             return false;
@@ -956,7 +962,11 @@ beiklive::enums::FileType platformToFileType(int platform)
 
         bool shouldUseThreeDsExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItem.itemType == beiklive::enums::FileType::THREEDS_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::THREEDS_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS);
         }
 
         bool shouldUseArcadeExternalNro(const beiklive::GameEntry& entry)
@@ -966,7 +976,11 @@ beiklive::enums::FileType platformToFileType(int platform)
 
         bool shouldUseArcadeExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItem.itemType == beiklive::enums::FileType::ARCADE_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::ARCADE_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade);
         }
 
         bool shouldUseDreamcastExternalNro(const beiklive::GameEntry& entry)
@@ -976,7 +990,11 @@ beiklive::enums::FileType platformToFileType(int platform)
 
         bool shouldUseDreamcastExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItem.itemType == beiklive::enums::FileType::DREAMCAST_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::DREAMCAST_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast);
         }
 
         bool shouldUsePspExternalNro(const beiklive::GameEntry& entry)
@@ -986,7 +1004,11 @@ beiklive::enums::FileType platformToFileType(int platform)
 
         bool shouldUsePspExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItem.itemType == beiklive::enums::FileType::PSP_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::PSP_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP);
         }
 
         bool shouldUsePs1ExternalNro(const beiklive::GameEntry& entry)
@@ -996,7 +1018,11 @@ beiklive::enums::FileType platformToFileType(int platform)
 
         bool shouldUsePs1ExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItem.itemType == beiklive::enums::FileType::PS1_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::PS1_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1);
         }
 
         bool shouldUseSaturnExternalNro(const beiklive::GameEntry& entry)
@@ -1011,12 +1037,20 @@ beiklive::enums::FileType platformToFileType(int platform)
 
         bool shouldUseSaturnExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItem.itemType == beiklive::enums::FileType::SATURN_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::SATURN_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::EmuSaturn);
         }
 
         bool shouldUseDolphinExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItem.itemType == beiklive::enums::FileType::DOLPHIN_ROM;
+            if (dirItem.itemType == beiklive::enums::FileType::DOLPHIN_ROM)
+                return true;
+            return dirItem.itemType == beiklive::enums::FileType::ROMX_FILE &&
+                   beiklive::tools::detectGamePlatform(dirItem.fullPath) ==
+                       static_cast<int>(beiklive::enums::EmuPlatform::EmuDolphin);
         }
 
         [[maybe_unused]] bool exportThreeDsCoreConfig()
@@ -1110,19 +1144,32 @@ beiklive::enums::FileType platformToFileType(int platform)
             beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
             bool changed = !entryOpt.has_value();
 
-            const int platform = static_cast<int>(dirItem.itemType);
+            const bool isRomx = dirItem.itemType == beiklive::enums::FileType::ROMX_FILE;
+            const int platform = isRomx
+                ? beiklive::tools::detectGamePlatform(dirItem.fullPath)
+                : static_cast<int>(dirItem.itemType);
             const std::string stem = beiklive::tools::getFileNameWithoutExtension(dirItem.fileName);
 
             if (entry.path.empty()) {
                 entry.path = dirItem.fullPath;
                 changed = true;
             }
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE)) {
+            if (isRomx)
+            {
+                std::string romxError;
+                if (!beiklive::romx::GameEntryAdapter::apply(
+                        dirItem.fullPath, entry, {}, &romxError))
+                    brls::Logger::warning("StartPage ROMX metadata failed: {}", romxError);
+                else
+                    changed = true;
+            }
+            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::NONE) &&
+                platform >= 0) {
                 entry.platform = platform;
                 changed = true;
             }
             if (entry.core.empty()) {
-                entry.core = beiklive::GetDefaultCoreId(platform);
+                entry.core = beiklive::GetDefaultCoreId(entry.platform);
                 changed = true;
             }
             entry.core = beiklive::NormalizeCoreId(entry.platform, entry.core);
@@ -1140,7 +1187,7 @@ beiklive::enums::FileType platformToFileType(int platform)
                     entry.path);
                 changed = true;
             }
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)) {
+            if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)) {
                 // PSP ROM：文件浏览打开时提取真实游戏标题与 ICON0 封面
                 // （保存到该 ROM 的存档目录）。TITLE 仅在仍是默认文件名
                 // 时覆盖（映射名优先保留）；封面仅当仍是默认资源图时替换。
@@ -1161,14 +1208,14 @@ beiklive::enums::FileType platformToFileType(int platform)
                 }
             }
 
-            if (beiklive::tools::tryUseNdsInternalIconCover(entry))
+            if (!isRomx && beiklive::tools::tryUseNdsInternalIconCover(entry))
                 changed = true;
             if (entry.screenShotPath.empty()) {
                 entry.screenShotPath = beiklive::path::screenshotPath();
                 changed = true;
             }
 
-            if (entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS)) {
+            if (!isRomx && entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS)) {
                 const std::string titleId = beiklive::three_ds::resolveTitleId(
                     entry.threeDsTitleId, entry.path);
                 if (!titleId.empty() && titleId != entry.threeDsTitleId) {
@@ -2054,6 +2101,7 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
             case beiklive::enums::FileType::ARCADE_ROM:
             case beiklive::enums::FileType::DREAMCAST_ROM:
             case beiklive::enums::FileType::PSP_ROM:
+            case beiklive::enums::FileType::ROMX_FILE:
                 brls::Application::notify(L("启动游戏：") + dirItem.fileName);
                 _pushGameActivity(dirItem, this);
                 break;

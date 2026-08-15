@@ -13,6 +13,8 @@
 #include "Savestate.h"
 #include "core/GameSignal.hpp"
 #include "core/Tools.hpp"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "core/cheat/CheatSystem.hpp"
 #include "core/game_database.hpp"
 
@@ -415,7 +417,20 @@ bool MelonDSCore::SetupGame(beiklive::GameEntry GameEntry)
 
     if (!Initialize())
         return false;
-    if (!LoadGame(m_gameEntry.path))
+    std::string launchPath = m_gameEntry.path;
+    if (beiklive::romx::isRomxPath(launchPath))
+    {
+        beiklive::romx::LaunchSession session;
+        std::string error;
+        if (!session.open(launchPath, &error) ||
+            !session.materializeEntrypoint(beiklive::romx::GameEntryAdapter::payloadCacheDirectory(),
+                                           launchPath, &error))
+        {
+            brls::Logger::error("melonDS: ROMX payload unavailable: {}", error);
+            return false;
+        }
+    }
+    if (!LoadGame(launchPath))
         return false;
     ReloadCheats();
 
