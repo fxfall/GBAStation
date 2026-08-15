@@ -95,9 +95,13 @@ static romx_result_t romx_file_read_at(void *user_data, uint64_t offset,
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#if !defined(ROMX_NO_MMAP)
 #include <sys/mman.h>
+#endif
 
 typedef struct romx_file_io { int descriptor; uint64_t size; } romx_file_io_t;
+
+#if !defined(ROMX_NO_MMAP)
 
 static int romx_file_pread_exact(
     int descriptor, uint64_t offset, uint8_t *buffer, size_t size,
@@ -290,6 +294,8 @@ static romx_result_t romx_file_map_payload(
     return ROMX_OK;
 }
 
+#endif /* !ROMX_NO_MMAP */
+
 static void romx_file_close(void *user_data)
 {
     romx_file_io_t *state = (romx_file_io_t *)user_data;
@@ -313,11 +319,26 @@ static romx_result_t romx_file_read_at(void *user_data, uint64_t offset,
     *bytes_read = UINT64_C(0);
     if (offset > (uint64_t)INT64_MAX) return romx_error_set(error,
         ROMX_E_RANGE, 0, offset, "file offset exceeds platform limit");
+#if defined(ROMX_NO_PREAD)
+    if (lseek(state->descriptor, (off_t)offset, SEEK_SET) == (off_t)-1) {
+        return romx_error_set(error, ROMX_E_IO, errno, offset,
+            "failed to seek ROMX file");
+    }
+#endif
     while (*bytes_read < size) {
         uint64_t remaining = size - *bytes_read;
-        size_t count = remaining > (uint64_t)SSIZE_MAX ? (size_t)SSIZE_MAX : (size_t)remaining;
+        uint64_t max_count = (uint64_t)SIZE_MAX;
+#if defined(SSIZE_MAX) && (SSIZE_MAX < SIZE_MAX)
+        max_count = (uint64_t)SSIZE_MAX;
+#endif
+        size_t count = remaining > max_count ? (size_t)max_count : (size_t)remaining;
+#if defined(ROMX_NO_PREAD)
+        ssize_t actual = read(state->descriptor,
+            output + (size_t)*bytes_read, count);
+#else
         ssize_t actual = pread(state->descriptor, output + (size_t)*bytes_read,
             count, (off_t)(offset + *bytes_read));
+#endif
         if (actual < 0) {
             if (errno == EINTR) continue;
             return romx_error_set(error, ROMX_E_IO, errno, offset + *bytes_read,
@@ -379,7 +400,7 @@ romx_result_t romx_reader_open_path(const char *utf8_path,
     io.user_data = state; io.get_size = romx_file_get_size; io.read_at = romx_file_read_at;
     result = romx_reader_create(&io, options, romx_file_close, out_reader, error);
     if (result != ROMX_OK) romx_file_close(state);
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !defined(ROMX_NO_MMAP)
     else (*out_reader)->map_payload = romx_file_map_payload;
 #endif
     return result;

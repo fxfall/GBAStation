@@ -49,10 +49,12 @@ export TMP="$TMPDIR"
 export TEMP="$TMPDIR"
 
 # The source tree can originate from a Windows archive/worktree where Git's
-# executable bit is unavailable. FFmpeg invokes version.sh while generating
-# its version headers, so both scripts must be executable inside the Linux CI
+# executable bit is unavailable. FFmpeg invokes all of these helpers while
+# generating its version headers, so make them executable inside the Linux CI
 # container regardless of their source-file mode.
-chmod +x "$BUILD_DIR/configure" "$BUILD_DIR/ffbuild/version.sh"
+chmod +x "$BUILD_DIR/configure" \
+    "$BUILD_DIR/ffbuild/version.sh" \
+    "$BUILD_DIR/ffbuild/libversion.sh"
 
 OPTIONS=(
     "--cc=$CC" "--ar=$AR" "--ranlib=$RANLIB"

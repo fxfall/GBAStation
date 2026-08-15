@@ -19,6 +19,12 @@ option(BUILD_MELONDS_CORE "Build the embedded melonDS native core" OFF)
 set(ROMX_BUILD_TESTS OFF CACHE BOOL "Build libromx tests inside GBAStation" FORCE)
 set(ROMX_BUILD_EXAMPLES OFF CACHE BOOL "Build libromx examples inside GBAStation" FORCE)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libromx)
+if (PLATFORM_SWITCH)
+    # libnx/newlib does not provide POSIX mmap.  ROMX still supports normal
+    # offset reads on Switch; the frontend falls back to its payload-file
+    # materializer when a zero-copy mapping is unavailable.
+    target_compile_definitions(romx PRIVATE ROMX_NO_MMAP=1 ROMX_NO_PREAD=1)
+endif()
 
 # =========================================================
 # borealis UI 框架
@@ -52,6 +58,10 @@ set(FFMPEG_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/FFmpeg)
 # Keep a self-contained source copy under each CMake build directory so
 # Windows and Switch never share architecture-specific static archives.
 set(FFMPEG_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/ffmpeg-background-audio)
+# CMake validates INTERFACE_INCLUDE_DIRECTORIES while generating the build
+# system.  The minimal FFmpeg command creates this directory later, so make
+# the path exist before exposing it through the imported targets below.
+file(MAKE_DIRECTORY "${FFMPEG_BUILD_DIR}")
 set(FFMPEG_BUILD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/configure_ffmpeg_minimal.sh)
 # The configured copy is regenerated whenever the vendored source changes.
 # Without this dependency CMake can retain archives from a prior platform or

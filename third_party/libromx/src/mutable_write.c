@@ -185,9 +185,20 @@ static romx_result_t disk_read(void *user, uint64_t offset, void *buffer,
     }
 #else
     while (*bytes_read < size) {
+#if defined(ROMX_NO_PREAD)
+        if (offset + *bytes_read > (uint64_t)INT64_MAX ||
+            lseek(disk->descriptor, (off_t)(offset + *bytes_read), SEEK_SET) == (off_t)-1) {
+            return romx_error_set(error, ROMX_E_IO, errno,
+                offset + *bytes_read, "mutable seek failed");
+        }
+        ssize_t count = read(disk->descriptor,
+            (uint8_t *)buffer + (size_t)*bytes_read,
+            (size_t)(size - *bytes_read));
+#else
         ssize_t count = pread(disk->descriptor,
             (uint8_t *)buffer + (size_t)*bytes_read,
             (size_t)(size - *bytes_read), (off_t)(offset + *bytes_read));
+#endif
         if (count < 0) { if (errno == EINTR) continue; return romx_error_set(error,
             ROMX_E_IO, errno, offset + *bytes_read, "mutable read failed"); }
         if (count == 0) break; *bytes_read += (uint64_t)count;
@@ -225,9 +236,20 @@ static romx_result_t disk_write(mutable_disk_t *disk, uint64_t offset,
     }
 #else
     while (written < size) {
+#if defined(ROMX_NO_PREAD)
+        if (offset + written > (uint64_t)INT64_MAX ||
+            lseek(disk->descriptor, (off_t)(offset + written), SEEK_SET) == (off_t)-1) {
+            return romx_error_set(error, ROMX_E_WRITE, errno,
+                offset + written, "mutable seek failed");
+        }
+        ssize_t count = write(disk->descriptor,
+            (const uint8_t *)buffer + (size_t)written,
+            (size_t)(size - written));
+#else
         ssize_t count = pwrite(disk->descriptor,
             (const uint8_t *)buffer + (size_t)written,
             (size_t)(size - written), (off_t)(offset + written));
+#endif
         if (count < 0) { if (errno == EINTR) continue; return romx_error_set(error,
             ROMX_E_WRITE, errno, offset + written, "mutable write failed"); }
         if (count == 0) return ROMX_E_WRITE; written += (uint64_t)count;

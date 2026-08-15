@@ -45,6 +45,37 @@ struct OnlineResourceManifest {
     std::vector<OnlineResourceGroup> groups;
 };
 
+// Keep the optional external cores on the fork's Releases.  The historical
+// resource manifest is still used for BIOS/cheat assets, but its core URLs
+// point at the upstream build and would silently restore those binaries.
+static constexpr const char* FORK_3DS_CORE_URL =
+    "https://github.com/fxfall/GBAStation_3DS/releases/latest/download/GBAStation3DSStub.nro";
+static constexpr const char* FORK_FBNEO_CORE_URL =
+    "https://github.com/fxfall/GBAStation_FBNeo/releases/latest/download/GBAStationFBNeoStub.nro";
+static constexpr const char* FORK_PPSSPP_CORE_URL =
+    "https://github.com/fxfall/GBAStation_ppsspp/releases/latest/download/GBAStationPPSSPPStub.nro";
+static constexpr const char* FORK_CORE_VERSION = "0.2.0-romx";
+
+static void rewriteForkedCoreResource(OnlineResourceItem& item) {
+    const auto rewrite = [&item](const char* url) {
+        item.type = "file";
+        item.url = url;
+        item.version = FORK_CORE_VERSION;
+        item.path = "sdmc:/GBAStation/core";
+    };
+
+    if (item.name.find(L("3DS核心")) != std::string::npos ||
+        item.url.find("GBAStation3DSStub") != std::string::npos) {
+        rewrite(FORK_3DS_CORE_URL);
+    } else if (item.name.find(L("街机核心FBNeo")) != std::string::npos ||
+               item.url.find("GBAStationFBNeoStub") != std::string::npos) {
+        rewrite(FORK_FBNEO_CORE_URL);
+    } else if (item.name.find(L("PSP核心PPSSPP")) != std::string::npos ||
+               item.url.find("GBAStationPPSSPPStub") != std::string::npos) {
+        rewrite(FORK_PPSSPP_CORE_URL);
+    }
+}
+
 static std::string trimText(std::string text) {
     const auto first = text.find_first_not_of(" \t\r\n");
     if (first == std::string::npos)
@@ -211,6 +242,8 @@ static bool parseResourceManifest(const std::string& text,
             item.path = trimText(jsonString(itemValue, "path"));
             item.dialog = jsonString(itemValue, "dialog", L("是否下载此资源？").c_str());
             item.version = trimText(jsonString(itemValue, "version"));
+
+            rewriteForkedCoreResource(item);
 
             std::transform(item.type.begin(), item.type.end(), item.type.begin(),
                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -2880,7 +2913,7 @@ private:
         nvgFontSize(vg, 14.f);
         nvgFillColor(vg, nvgRGBA(210, 216, 226, 185));
         nvgText(vg, github.x + 18.f, github.y + 44.f,
-                "beiklive/GBAStation", nullptr);
+                "fxfall/GBAStation", nullptr);
         nvgText(vg, bilibili.x + 18.f, bilibili.y + 44.f,
                 "BEIKLIVE", nullptr);
 
