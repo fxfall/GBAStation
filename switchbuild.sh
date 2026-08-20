@@ -83,9 +83,7 @@ usage() {
     cat <<'EOF'
 Usage: ./switchbuild.sh [-j JOBS] [--build-dir DIR] [--core-dir DIR]
 
-  --core-dir DIR  Directory containing the four downloaded core Release NROs:
-                  GBAStation3DSStub.nro, GBAStationFBNeoStub.nro,
-                  GBAStationFlycastStub.nro and GBAStationPPSSPPStub.nro.
+  --core-dir DIR  Directory containing external core Release NROs.
   --build-dir DIR CMake build directory (default: build_switch).
   -j, --jobs N   Parallel build jobs.
 EOF
@@ -184,46 +182,48 @@ BUILD_DIR="${BUILD_DIR_OVERRIDE:-${BUILD_DIR:-${ROOT_DIR}/build_switch}}"
 
 if [ -n "${CORE_DIR}" ]; then
     CORE_DIR="$(cd "${CORE_DIR}" && pwd)"
-    THREEDS_STUB_SOURCE="${CORE_DIR}/GBAStation3DSStub.nro"
-    FBNEO_STUB_SOURCE="${CORE_DIR}/GBAStationFBNeoStub.nro"
-    FLYCAST_STUB_SOURCE="${CORE_DIR}/GBAStationFlycastStub.nro"
-    PPSSPP_STUB_SOURCE="${CORE_DIR}/GBAStationPPSSPPStub.nro"
     echo "[核心] 使用预置 Release 目录: ${CORE_DIR}"
 else
+    CORE_DIR=""
     THREEDS_STUB_SOURCE="${ROOT_DIR}/../.example/dekopon/build/switch-codex/src/citra_switch/dekopon.nro"
     FBNEO_STUB_SOURCE="${ROOT_DIR}/../GBAStation_fbneo/GBAStationFBNeoStub.nro"
     FLYCAST_STUB_SOURCE="${ROOT_DIR}/../GBAStation_flycast/GBAStationFlycastStub.nro"
     PPSSPP_STUB_SOURCE="${ROOT_DIR}/../GBAStation_ppsspp/GBAStationPPSSPPStub.nro"
 fi
 
-if [ -n "${CORE_DIR}" ]; then
-    for core in GBAStation3DSStub.nro GBAStationFBNeoStub.nro GBAStationFlycastStub.nro GBAStationPPSSPPStub.nro; do
-        if [ ! -s "${CORE_DIR}/${core}" ]; then
-            echo "[错误] --core-dir 缺少 Release 核心: ${CORE_DIR}/${core}"
-            exit 1
-        fi
-    done
-fi
 EXTERNAL_CORE_NROS=(
-    "FBNeo.nro"
-    "Flycast.nro"
     "GBAStation3DSStub.nro"
     "GBAStationFBNeoStub.nro"
     "GBAStationFlycastStub.nro"
     "GBAStationPPSSPPStub.nro"
 )
 
-mkdir -p "${BUILD_DIR}"
+if [ -n "${CORE_DIR}" ]; then
+    STAGE_CORE_NROS=("${EXTERNAL_CORE_NROS[@]}")
+else
+    STAGE_CORE_NROS=(
+        "GBAStation3DSStub.nro"
+        "GBAStationFBNeoStub.nro"
+        "GBAStationFlycastStub.nro"
+        "GBAStationPPSSPPStub.nro"
+    )
+fi
 
-clean_external_core_nro_outputs() {
-    for nro in "${EXTERNAL_CORE_NROS[@]}"; do
-        rm -f "${BUILD_DIR}/${nro}"
-        rm -f "${BUILD_DIR}/GBAStation/core/${nro}"
-        rm -f "${BUILD_DIR}/resources/core/${nro}"
+if [ -n "${CORE_DIR}" ]; then
+    for core in "${EXTERNAL_CORE_NROS[@]}"; do
+        if [ ! -s "${CORE_DIR}/${core}" ]; then
+            echo "[错误] --core-dir 缺少 Release 核心: ${CORE_DIR}/${core}"
+            exit 1
+        fi
     done
-}
+fi
 
-clean_external_core_nro_outputs
+mkdir -p "${BUILD_DIR}"
+mkdir -p "${BUILD_DIR}/GBAStation/core"
+
+for nro in "${EXTERNAL_CORE_NROS[@]}"; do
+    rm -f "${BUILD_DIR}/GBAStation/core/${nro}"
+done
 
 # ────────────────────────────────────────────────────────────
 # 临时目录
@@ -253,26 +253,32 @@ else
 
 fi
 
-# ────────────────────────────────────────────────────────────
-# 外置核心复制
-# ────────────────────────────────────────────────────────────
-
 copy_external_core_stub() {
-    local label="$1"
-    local source="$2"
-    local output_name="$3"
+    local core_name="$1"
+    local source=""
 
-    echo ""
-    echo "[4/4] 复制 ${label} 外置核心..."
+    if [ -n "${CORE_DIR}" ]; then
+        source="${CORE_DIR}/${core_name}"
+    else
+        case "${core_name}" in
+            GBAStation3DSStub.nro) source="${THREEDS_STUB_SOURCE}" ;;
+            GBAStationFBNeoStub.nro) source="${FBNEO_STUB_SOURCE}" ;;
+            GBAStationFlycastStub.nro) source="${FLYCAST_STUB_SOURCE}" ;;
+            GBAStationPPSSPPStub.nro) source="${PPSSPP_STUB_SOURCE}" ;;
+            *)
+                echo "[错误] ${core_name} 需要通过 --core-dir 提供"
+                exit 1
+                ;;
+        esac
+    fi
 
-    if [ ! -f "${source}" ]; then
-        echo "[错误] 找不到 ${label} 外置核心: ${source}"
-        echo "请先在对应独立仓库构建 ${output_name}"
+    if [ ! -s "${source}" ]; then
+        echo "[错误] 找不到 ${core_name} 外置核心: ${source}"
         exit 1
     fi
 
     mkdir -p "${BUILD_DIR}/GBAStation/core"
-    cp "${source}" "${BUILD_DIR}/GBAStation/core/${output_name}"
+    cp "${source}" "${BUILD_DIR}/GBAStation/core/${core_name}"
 }
 
 print_nro_size() {
@@ -301,7 +307,7 @@ print_nro_size() {
 cd "${BUILD_DIR}"
 
 echo ""
-echo "[1/4] CMake配置..."
+echo "[1/2] CMake配置..."
 
 cmake .. \
     -DPLATFORM_SWITCH=ON \
@@ -310,33 +316,25 @@ cmake .. \
     -DCMAKE_DEPENDS_USE_COMPILER=FALSE
 
 echo ""
-echo "[2/4] 编译..."
+echo "[2/2] 编译并打包本体与 NDS Stub..."
 
-cmake --build . -j "${JOBS}"
-
-echo ""
-echo "[3/4] 打包 NRO..."
-
-cmake --build . --target GBAStation.nro
-cmake --build . --target GBAStationNDSStub.nro
+cmake --build . --target GBAStation.nro -j "${JOBS}"
+cmake --build . --target GBAStationNDSStub.nro -j "${JOBS}"
 
 cd ..
 
 mkdir -p "${BUILD_DIR}/GBAStation/core"
 if [ -f "${BUILD_DIR}/GBAStationNDSStub.nro" ]; then
-    cp "${BUILD_DIR}/GBAStationNDSStub.nro" "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro"
-fi
-if [ -f "${THREEDS_STUB_SOURCE}" ]; then
-    cp "${THREEDS_STUB_SOURCE}" "${BUILD_DIR}/GBAStation/core/GBAStation3DSStub.nro"
-    echo "[3DS] 已复制最新 GBAStation3DSStub.nro"
+    cp "${BUILD_DIR}/GBAStationNDSStub.nro" \
+       "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro"
 else
-    echo "[错误] 未找到 3DS Stub: ${THREEDS_STUB_SOURCE}"
+    echo "[错误] NDS Stub 构建产物不存在"
     exit 1
 fi
 
-copy_external_core_stub "FBNeo" "${FBNEO_STUB_SOURCE}" "GBAStationFBNeoStub.nro"
-copy_external_core_stub "Flycast" "${FLYCAST_STUB_SOURCE}" "GBAStationFlycastStub.nro"
-copy_external_core_stub "PPSSPP" "${PPSSPP_STUB_SOURCE}" "GBAStationPPSSPPStub.nro"
+for core in "${STAGE_CORE_NROS[@]}"; do
+    copy_external_core_stub "${core}"
+done
 
 # ────────────────────────────────────────────────────────────
 # 输出大小
@@ -348,14 +346,17 @@ echo "==================== 编译结果 ===================="
 print_nro_size "GBAStation.nro" "${BUILD_DIR}/GBAStation.nro"
 print_nro_size "GBAStationNDSStub.nro" "${BUILD_DIR}/GBAStationNDSStub.nro"
 print_nro_size "GBAStation/core/GBAStationNDSStub.nro" "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro"
-print_nro_size "GBAStation/core/GBAStation3DSStub.nro" "${BUILD_DIR}/GBAStation/core/GBAStation3DSStub.nro"
-print_nro_size "GBAStation/core/GBAStationFBNeoStub.nro" "${BUILD_DIR}/GBAStation/core/GBAStationFBNeoStub.nro"
-print_nro_size "GBAStation/core/GBAStationFlycastStub.nro" "${BUILD_DIR}/GBAStation/core/GBAStationFlycastStub.nro"
-print_nro_size "GBAStation/core/GBAStationPPSSPPStub.nro" "${BUILD_DIR}/GBAStation/core/GBAStationPPSSPPStub.nro"
+for core in "${STAGE_CORE_NROS[@]}"; do
+    print_nro_size "GBAStation/core/${core}" "${BUILD_DIR}/GBAStation/core/${core}"
+done
 
 echo ""
 echo "==================== SHA-256 ===================="
-for nro in "${BUILD_DIR}/GBAStation.nro" "${BUILD_DIR}/GBAStationNDSStub.nro" "${BUILD_DIR}/GBAStation/core/"*.nro; do
+for nro in \
+    "${BUILD_DIR}/GBAStation.nro" \
+    "${BUILD_DIR}/GBAStationNDSStub.nro" \
+    "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro" \
+    "${BUILD_DIR}/GBAStation/core/"*.nro; do
     [ -f "${nro}" ] && sha256sum "${nro}"
 done
 
@@ -366,7 +367,6 @@ echo "[完成]"
 echo "${BUILD_DIR}/GBAStation.nro"
 echo "${BUILD_DIR}/GBAStationNDSStub.nro"
 echo "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro"
-echo "${BUILD_DIR}/GBAStation/core/GBAStation3DSStub.nro"
-echo "${BUILD_DIR}/GBAStation/core/GBAStationFBNeoStub.nro"
-echo "${BUILD_DIR}/GBAStation/core/GBAStationFlycastStub.nro"
-echo "${BUILD_DIR}/GBAStation/core/GBAStationPPSSPPStub.nro"
+for core in "${STAGE_CORE_NROS[@]}"; do
+    echo "${BUILD_DIR}/GBAStation/core/${core}"
+done
