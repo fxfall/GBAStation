@@ -690,6 +690,54 @@ bool isWithinDirectory(const fs::path& directory, const fs::path& candidate)
     return true;
 }
 
+// std::filesystem::copy_file(..., overwrite_existing) is not implemented
+// consistently by the Switch SDMC filesystem: it can still return EEXIST
+// when the destination already exists.  Publish the completed temporary file
+// with rename first (atomic on normal POSIX filesystems), then use a guarded
+// remove-and-rename fallback for platforms that reject replacing a file.
+bool installMutableFile(const fs::path& temporary, const fs::path& output,
+                        bool overwrite, std::error_code& error)
+{
+    error.clear();
+    fs::rename(temporary, output, error);
+    if (!error || !overwrite)
+        return !error;
+
+    std::error_code existsError;
+    if (!fs::exists(output, existsError))
+    {
+        if (existsError)
+            error = existsError;
+        return false;
+    }
+    if (existsError)
+    {
+        error = existsError;
+        return false;
+    }
+
+    std::error_code typeError;
+    if (fs::is_symlink(output, typeError) || typeError)
+    {
+        if (typeError)
+            error = typeError;
+        return false;
+    }
+    if (!fs::is_regular_file(output, typeError) || typeError)
+    {
+        if (typeError)
+            error = typeError;
+        return false;
+    }
+
+    error.clear();
+    fs::remove(output, error);
+    if (error)
+        return false;
+    fs::rename(temporary, output, error);
+    return !error;
+}
+
 SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t ns,
                          const char* key, const fs::path& destination,
                          bool overwrite, std::string* error,
@@ -840,17 +888,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             return SyncResult::Failed;
         }
 
-        if (overwrite && fs::exists(output, ec) && !ec)
-        {
-            fs::copy_file(temporary, output, fs::copy_options::overwrite_existing, ec);
-            std::error_code cleanupError;
-            fs::remove(temporary, cleanupError);
-        }
-        else
-        {
-            ec.clear();
-            fs::rename(temporary, output, ec);
-        }
+        installMutableFile(temporary, output, overwrite, ec);
         if (ec)
         {
             std::error_code cleanupError;
