@@ -34,6 +34,14 @@ std::string errorText(const char* operation, const romx_error_t& error, romx_res
     stream << operation << " failed (" << result << ")";
     if (error.message[0] != '\0')
         stream << ": " << error.message;
+    if (error.system_code != 0)
+    {
+        stream << " [system_code=" << error.system_code;
+        const char* systemMessage = std::strerror(error.system_code);
+        if (systemMessage != nullptr && *systemMessage != '\0')
+            stream << ": " << systemMessage;
+        stream << "]";
+    }
     return stream.str();
 }
 
@@ -1098,6 +1106,22 @@ bool isSaveStateArtifact(const fs::path& path)
     return endsWith(".playtime") || endsWith(".playtime.tmp");
 }
 
+// The generic cores persist their battery-backed RAM under the ROM stem.  A
+// save directory may also contain savestates and their PNG thumbnails, so a
+// ROMX SAVE bundle must not recursively copy the whole directory.  Genesis
+// Plus GX is the one bundled core using the libretro `.srm` convention; the
+// other built-in cores write `<stem>.sav` (including mGBA and melonDS).
+fs::path gameBatterySavePath(const GameEntry& entry)
+{
+    const fs::path root(namespaceDirectory(entry, ROMX_MUTABLE_NAMESPACE_SAVE));
+    const std::string stem = beiklive::tools::getFileNameWithoutExtension(entry.path);
+    if (root.empty() || stem.empty())
+        return {};
+    const bool genesis =
+        entry.platform == static_cast<int>(enums::EmuPlatform::EmuGenesis);
+    return root / (stem + (genesis ? ".srm" : ".sav"));
+}
+
 bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
                         std::vector<std::string>& relativePaths,
                         std::vector<std::string>& sourcePaths)
@@ -1179,6 +1203,18 @@ bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
             }
             return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
         }
+    }
+    if (ns == ROMX_MUTABLE_NAMESPACE_SAVE)
+    {
+        // SAVE is deliberately a single, stem-matched battery file for the
+        // generic cores.  In particular, do not include `.ss*` savestates,
+        // their `.png` thumbnails, or another game's files in the directory.
+        const fs::path source = gameBatterySavePath(entry);
+        if (!fs::is_regular_file(source, ec) || fs::is_symlink(source, ec))
+            return false;
+        relativePaths.push_back(source.filename().generic_string());
+        sourcePaths.push_back(source.string());
+        return true;
     }
     if (ns == ROMX_MUTABLE_NAMESPACE_CHEAT)
     {

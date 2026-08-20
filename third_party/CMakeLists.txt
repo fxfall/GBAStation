@@ -23,7 +23,14 @@ if (PLATFORM_SWITCH)
     # libnx/newlib does not provide POSIX mmap.  ROMX still supports normal
     # offset reads on Switch; the frontend falls back to its payload-file
     # materializer when a zero-copy mapping is unavailable.
-    target_compile_definitions(romx PRIVATE ROMX_NO_MMAP=1 ROMX_NO_PREAD=1)
+    # The SDMC devoptab also does not implement POSIX record locks.  In-place
+    # mutable writes still open the file read/write and fsync every commit,
+    # while the frontend serializes these explicit operations.
+    target_compile_definitions(romx PRIVATE
+        ROMX_NO_MMAP=1
+        ROMX_NO_PREAD=1
+        ROMX_NO_FCNTL_LOCK=1
+    )
 endif()
 
 # =========================================================

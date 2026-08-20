@@ -141,11 +141,32 @@ static romx_result_t disk_open_locked(const char *path, mutable_disk_t *disk,
     struct stat status;
     struct flock lock;
     disk->descriptor = open(path, O_RDWR);
-    memset(&lock, 0, sizeof(lock)); lock.l_type = F_WRLCK; lock.l_whence = SEEK_SET;
-    if (disk->descriptor < 0 || fcntl(disk->descriptor, F_SETLKW, &lock) != 0 ||
-        fstat(disk->descriptor, &status) != 0 || status.st_size < 0) {
+    if (disk->descriptor < 0) {
         int code = errno;
-        if (disk->descriptor >= 0) close(disk->descriptor);
+        return romx_error_set(error, ROMX_E_IO, code,
+            ROMX_OFFSET_UNKNOWN, "failed to open or lock mutable ROMX file");
+    }
+    memset(&lock, 0, sizeof(lock)); lock.l_type = F_WRLCK; lock.l_whence = SEEK_SET;
+#if !defined(ROMX_NO_FCNTL_LOCK)
+    if (fcntl(disk->descriptor, F_SETLKW, &lock) != 0) {
+        int code = errno;
+        close(disk->descriptor);
+        return romx_error_set(error, ROMX_E_IO, code,
+            ROMX_OFFSET_UNKNOWN, "failed to open or lock mutable ROMX file");
+    }
+#else
+    /*
+     * libnx's sdmc devoptab supports read/write file descriptors but does
+     * not implement POSIX byte-range locks.  The caller only exposes this
+     * path for an explicit, serialized frontend operation, so retain the
+     * O_RDWR/fstat checks and let the durable ROMX transaction proceed
+     * without an unavailable advisory lock.
+    */
+    (void)lock;
+#endif
+    if (fstat(disk->descriptor, &status) != 0 || status.st_size < 0) {
+        int code = errno;
+        close(disk->descriptor);
         return romx_error_set(error, ROMX_E_IO, code,
             ROMX_OFFSET_UNKNOWN, "failed to open or lock mutable ROMX file");
     }

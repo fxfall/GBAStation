@@ -44,7 +44,9 @@ public:
     /// local frontend data with the corresponding ROMX mutable object.  PSP
     /// uses the native `ppsspp` bundle key and maps SAVE/CHEAT to
     /// GBAStation/saves/PSP and GBAStation/PSP/Cheats respectively; other
-    /// platforms continue to use the interoperable `libretro` object.
+    /// platforms continue to use the interoperable `libretro` object.  SAVE
+    /// export for non-PSP entries contains only the core's stem-matched
+    /// battery file (`.sav`, or Genesis `.srm`), never savestates/thumbnails.
     static SyncResult restoreSave(GameEntry& entry, std::string* error = nullptr);
     static SyncResult exportSave(const GameEntry& entry, std::string* error = nullptr);
     static SyncResult restoreCheat(GameEntry& entry, std::string* error = nullptr);
