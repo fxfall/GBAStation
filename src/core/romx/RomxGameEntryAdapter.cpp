@@ -607,6 +607,86 @@ int mutableKeyPriority(const GameEntry& entry, const std::string& key)
     return 2;
 }
 
+bool validUtf8(const std::string& value)
+{
+    const auto continuation = [](unsigned char byte) {
+        return (byte & 0xc0U) == 0x80U;
+    };
+    for (std::size_t index = 0; index < value.size();)
+    {
+        const unsigned char first = static_cast<unsigned char>(value[index]);
+        if (first <= 0x7fU)
+        {
+            ++index;
+            continue;
+        }
+        std::size_t length = 0;
+        uint32_t codepoint = 0;
+        uint32_t minimum = 0;
+        if (first >= 0xc2U && first <= 0xdfU)
+        {
+            length = 2;
+            codepoint = first & 0x1fU;
+            minimum = 0x80U;
+        }
+        else if (first >= 0xe0U && first <= 0xefU)
+        {
+            length = 3;
+            codepoint = first & 0x0fU;
+            minimum = 0x800U;
+        }
+        else if (first >= 0xf0U && first <= 0xf4U)
+        {
+            length = 4;
+            codepoint = first & 0x07U;
+            minimum = 0x10000U;
+        }
+        else
+        {
+            return false;
+        }
+        if (index + length > value.size())
+            return false;
+        for (std::size_t offset = 1; offset < length; ++offset)
+        {
+            const unsigned char byte = static_cast<unsigned char>(value[index + offset]);
+            if (!continuation(byte))
+                return false;
+            codepoint = (codepoint << 6U) | (byte & 0x3fU);
+        }
+        // Reject overlong encodings, UTF-16 surrogate code points, and values
+        // beyond Unicode's scalar range.  ROMX keys are UTF-8, not arbitrary
+        // byte strings.
+        if (codepoint < minimum || codepoint > 0x10ffffU ||
+            (codepoint >= 0xd800U && codepoint <= 0xdfffU))
+            return false;
+        index += length;
+    }
+    return true;
+}
+
+bool validateSaveSlotKeyImpl(const std::string& key, std::string* error)
+{
+    const auto fail = [error](const char* message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (key.empty())
+        return fail("存档名称不能为空");
+    if (key.size() > ROMX_MUTABLE_KEY_CAPACITY)
+        return fail("存档名称超过 ROMX 的 448 字节限制");
+    if (!validUtf8(key))
+        return fail("存档名称不是有效的 UTF-8");
+    if (key.find('\0') != std::string::npos ||
+        key.find('/') != std::string::npos ||
+        key.find('\\') != std::string::npos)
+        return fail("存档名称不能包含路径分隔符");
+    if (key == "." || key == "..")
+        return fail("存档名称不能是 . 或 ..");
+    return true;
+}
+
 const char* mutableBundleKey(const GameEntry& entry)
 {
     return isPsp(entry) ? "ppsspp" : "libretro";
@@ -738,11 +818,22 @@ bool installMutableFile(const fs::path& temporary, const fs::path& output,
     return !error;
 }
 
+// ROMX stores a bundle path for interoperability, but the frontend's
+// battery-save filename is derived from GameEntry.path.  Keep that mapping
+// separate from the generic path traversal code below so PSP's native
+// savedata tree can continue to use its own validator unchanged.
+using BundleOutputMapper = std::function<std::optional<fs::path>(
+    const fs::path& relative, uint32_t index, uint32_t count)>;
+
+fs::path gameBatterySavePath(const GameEntry& entry);
+BundleOutputMapper batterySaveOutputMapper(const GameEntry& entry);
+
 SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t ns,
                          const char* key, const fs::path& destination,
                          bool overwrite, std::string* error,
                          std::vector<fs::path>* restoredPaths = nullptr,
-                         const std::function<bool(const fs::path&)>& validator = {})
+                         const std::function<bool(const fs::path&)>& validator = {},
+                         const BundleOutputMapper& outputMapper = {})
 {
     romx_error_t err{};
     romx_mutable_bundle_t* bundle = nullptr;
@@ -810,7 +901,16 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             romx_mutable_bundle_close(bundle);
             return SyncResult::Skipped;
         }
-        const fs::path output = destination / relative;
+        fs::path outputRelative = relative;
+        if (outputMapper)
+        {
+            const std::optional<fs::path> mapped =
+                outputMapper(relative, index, count);
+            if (!mapped)
+                continue;
+            outputRelative = *mapped;
+        }
+        const fs::path output = destination / outputRelative;
         if (!isWithinDirectory(destination, output))
         {
             romx_mutable_bundle_close(bundle);
@@ -824,7 +924,13 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             romx_mutable_bundle_close(bundle);
             return SyncResult::Skipped;
         }
-        pending.push_back({index, info.data_size, std::move(relative)});
+        pending.push_back({index, info.data_size, std::move(outputRelative)});
+    }
+
+    if (pending.empty())
+    {
+        romx_mutable_bundle_close(bundle);
+        return SyncResult::Skipped;
     }
 
     std::vector<uint8_t> buffer(64 * 1024);
@@ -950,9 +1056,13 @@ void importMutableObjects(const std::string& path, GameEntry& entry)
         const fs::path root(namespaceDirectory(entry, object.object_namespace));
         std::vector<fs::path> restoredPaths;
         const auto validator = bundlePathValidator(entry, object.object_namespace, root);
+        const BundleOutputMapper outputMapper =
+            object.object_namespace == ROMX_MUTABLE_NAMESPACE_SAVE
+                ? batterySaveOutputMapper(entry)
+                : BundleOutputMapper{};
         const SyncResult result = extractBundle(
             reader, object.object_namespace, object.key, root, false, nullptr,
-            &restoredPaths, validator);
+            &restoredPaths, validator, outputMapper);
         if (result == SyncResult::Success &&
             object.object_namespace == ROMX_MUTABLE_NAMESPACE_CHEAT &&
             !restoredPaths.empty())
@@ -963,7 +1073,8 @@ void importMutableObjects(const std::string& path, GameEntry& entry)
 
 SyncResult importBundleNamespace(GameEntry& entry,
                                  romx_mutable_namespace_t objectNamespace,
-                                 bool overwrite, std::string* error)
+                                 bool overwrite, std::string* error,
+                                 const std::string* requestedKey = nullptr)
 {
     if (isPsp(entry) && pspDiscId(entry).empty())
     {
@@ -993,32 +1104,50 @@ SyncResult importBundleNamespace(GameEntry& entry,
     }
 
     std::vector<std::string> keys;
-    keys.reserve(count);
-    for (uint32_t index = 0; index < count; ++index)
+    if (requestedKey && !requestedKey->empty())
     {
-        romx_mutable_object_info_t object = ROMX_MUTABLE_OBJECT_INFO_INIT;
-        const romx_result_t objectResult =
-            romx_reader_get_mutable_object(reader, index, &object, &err);
-        if (objectResult != ROMX_OK)
-            continue;
-        if (object.object_namespace == objectNamespace)
-            keys.emplace_back(object.key, object.key_size);
+        // Keep the selected UTF-8 label verbatim.  libromx performs its
+        // portable key comparison when opening the object, including the
+        // documented ASCII case-folding behavior.
+        keys.push_back(*requestedKey);
     }
-    std::stable_sort(keys.begin(), keys.end(),
-                     [&entry](const std::string& left, const std::string& right) {
-                         return mutableKeyPriority(entry, left) <
-                                mutableKeyPriority(entry, right);
-                     });
+    else
+    {
+        keys.reserve(count);
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            romx_mutable_object_info_t object = ROMX_MUTABLE_OBJECT_INFO_INIT;
+            const romx_result_t objectResult =
+                romx_reader_get_mutable_object(reader, index, &object, &err);
+            if (objectResult != ROMX_OK)
+                continue;
+            if (object.object_namespace == objectNamespace)
+                keys.emplace_back(object.key, object.key_size);
+        }
+        std::stable_sort(keys.begin(), keys.end(),
+                         [&entry](const std::string& left, const std::string& right) {
+                             const int leftPriority = mutableKeyPriority(entry, left);
+                             const int rightPriority = mutableKeyPriority(entry, right);
+                             if (leftPriority != rightPriority)
+                                 return leftPriority < rightPriority;
+                             return left < right;
+                         });
+    }
 
     SyncResult result = SyncResult::Skipped;
     const fs::path root(namespaceDirectory(entry, objectNamespace));
     const auto validator = bundlePathValidator(entry, objectNamespace, root);
+    const BundleOutputMapper outputMapper =
+        objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE
+            ? batterySaveOutputMapper(entry)
+            : BundleOutputMapper{};
     for (const std::string& key : keys)
     {
         std::string bundleError;
         std::vector<fs::path> restoredPaths;
         result = extractBundle(reader, objectNamespace, key.c_str(), root,
-                               overwrite, &bundleError, &restoredPaths, validator);
+                               overwrite, &bundleError, &restoredPaths, validator,
+                               outputMapper);
         if (result == SyncResult::Success)
         {
             if (objectNamespace == ROMX_MUTABLE_NAMESPACE_CHEAT &&
@@ -1158,6 +1287,68 @@ fs::path gameBatterySavePath(const GameEntry& entry)
     const bool genesis =
         entry.platform == static_cast<int>(enums::EmuPlatform::EmuGenesis);
     return root / (stem + (genesis ? ".srm" : ".sav"));
+}
+
+BundleOutputMapper batterySaveOutputMapper(const GameEntry& entry)
+{
+    // These are the cores whose save path is fully controlled by GBAStation:
+    // all of them use savePath/<ROM stem>/{stem}.sav, except Genesis Plus GX
+    // which uses .srm.  PSP, 3DS, Arcade and the other external cores have
+    // core-specific identities (DISC_ID, Title ID or driver name), so their
+    // bundle paths must not be guessed from the ROMX filename here.
+    switch (static_cast<enums::EmuPlatform>(entry.platform))
+    {
+    case enums::EmuPlatform::EmuGBA:
+    case enums::EmuPlatform::EmuGBC:
+    case enums::EmuPlatform::EmuGB:
+    case enums::EmuPlatform::EmuNES:
+    case enums::EmuPlatform::EmuSNES:
+    case enums::EmuPlatform::EmuNDS:
+    case enums::EmuPlatform::EmuGenesis:
+        break;
+    default:
+        return {};
+    }
+
+    const fs::path target = gameBatterySavePath(entry);
+    if (target.empty())
+        return {};
+
+    std::string expectedExtension = target.extension().string();
+    std::transform(expectedExtension.begin(), expectedExtension.end(),
+                   expectedExtension.begin(), [](unsigned char value) {
+                       return static_cast<char>(std::tolower(value));
+                   });
+
+    // The current writer emits one stem-matched battery file.  For older
+    // bundles that contain auxiliary files, select the battery-looking entry
+    // by extension and discard savestates/thumbnails instead of allowing the
+    // mutable path to choose an arbitrary local filename.
+    bool selected = false;
+    return [target, expectedExtension, selected](const fs::path& relative,
+                                                  uint32_t /*index*/,
+                                                  uint32_t count) mutable
+        -> std::optional<fs::path> {
+        if (selected)
+            return std::nullopt;
+
+        std::string extension = relative.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char value) {
+                           return static_cast<char>(std::tolower(value));
+                       });
+        // A legacy SAVE bundle may have been built from the whole frontend
+        // save directory.  Never reinterpret a savestate, playtime marker or
+        // screenshot as battery RAM just because it is the only entry.
+        if (isSaveStateArtifact(relative) || extension == ".png" ||
+            extension == ".jpg" || extension == ".jpeg" || extension == ".state")
+            return std::nullopt;
+        if (count != 1U && extension != expectedExtension)
+            return std::nullopt;
+
+        selected = true;
+        return target.filename();
+    };
 }
 
 bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
@@ -1345,6 +1536,107 @@ SyncResult writeBundle(const GameEntry& entry, romx_mutable_namespace_t ns,
     }
     return SyncResult::Success;
 }
+
+std::vector<GameEntryAdapter::SaveSlot> enumerateSaveSlots(
+    const GameEntry& entry, std::string* error)
+{
+    std::vector<GameEntryAdapter::SaveSlot> slots;
+    if (!isRomxPath(entry.path))
+        return slots;
+
+    romx_reader_t* reader = nullptr;
+    romx_error_t err{};
+    const romx_result_t openResult =
+        romx_reader_open_path(entry.path.c_str(), nullptr, &reader, &err);
+    if (openResult != ROMX_OK)
+    {
+        assignError(error, errorText("romx_reader_open_path", err, openResult));
+        return slots;
+    }
+
+    uint32_t objectCount = 0;
+    const romx_result_t countResult =
+        romx_reader_get_mutable_object_count(reader, &objectCount, &err);
+    if (countResult != ROMX_OK)
+    {
+        romx_reader_close(reader);
+        if (countResult != ROMX_E_MUTABLE_ABSENT)
+            assignError(error, errorText("romx_reader_get_mutable_object_count",
+                                         err, countResult));
+        return slots;
+    }
+
+    for (uint32_t index = 0; index < objectCount; ++index)
+    {
+        romx_mutable_object_info_t object = ROMX_MUTABLE_OBJECT_INFO_INIT;
+        if (romx_reader_get_mutable_object(reader, index, &object, &err) != ROMX_OK ||
+            object.object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE ||
+            object.key_size == 0)
+            continue;
+
+        GameEntryAdapter::SaveSlot slot;
+        slot.key.assign(object.key,
+                        std::min<std::size_t>(object.key_size, sizeof(object.key) - 1U));
+        if (!validateSaveSlotKeyImpl(slot.key, nullptr))
+            continue;
+        slot.displayName = slot.key;
+        slot.dataSize = object.data_size;
+        slot.generation = object.generation;
+
+        romx_mutable_bundle_t* bundle = nullptr;
+        const romx_result_t bundleResult = romx_mutable_bundle_open(
+            reader, ROMX_MUTABLE_NAMESPACE_SAVE, slot.key.c_str(), nullptr,
+            &bundle, &err);
+        if (bundleResult != ROMX_OK)
+            continue; // Opaque SAVE objects are not selectable by this UI.
+        uint32_t entryCount = 0;
+        if (romx_mutable_bundle_get_entry_count(bundle, &entryCount, &err) != ROMX_OK)
+        {
+            romx_mutable_bundle_close(bundle);
+            continue;
+        }
+        slot.entryCount = entryCount;
+        std::string fallbackPath;
+        for (uint32_t entryIndex = 0; entryIndex < entryCount; ++entryIndex)
+        {
+            romx_mutable_bundle_entry_info_t bundleEntry =
+                ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
+            if (romx_mutable_bundle_get_entry(bundle, entryIndex, &bundleEntry, &err) != ROMX_OK)
+                continue;
+            fs::path relative;
+            if (!safeRelativePath(bundleEntry.path, relative))
+                continue;
+            if (fallbackPath.empty())
+                fallbackPath = relative.generic_string();
+            std::string extension = relative.extension().string();
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                           [](unsigned char value) {
+                               return static_cast<char>(std::tolower(value));
+                           });
+            if (extension == ".sav" || extension == ".srm")
+            {
+                slot.entryPath = relative.generic_string();
+                break;
+            }
+        }
+        if (slot.entryPath.empty())
+            slot.entryPath = fallbackPath;
+        romx_mutable_bundle_close(bundle);
+        if (slot.entryCount != 0)
+            slots.push_back(std::move(slot));
+    }
+    romx_reader_close(reader);
+
+    std::stable_sort(slots.begin(), slots.end(), [&entry](const auto& left,
+                                                           const auto& right) {
+        const int leftPriority = mutableKeyPriority(entry, left.key);
+        const int rightPriority = mutableKeyPriority(entry, right.key);
+        if (leftPriority != rightPriority)
+            return leftPriority < rightPriority;
+        return left.key < right.key;
+    });
+    return slots;
+}
 } // namespace
 
 std::string GameEntryAdapter::payloadCacheDirectory()
@@ -1445,12 +1737,33 @@ SyncResult GameEntryAdapter::restoreSave(GameEntry& entry, std::string* error)
     return importBundleNamespace(entry, ROMX_MUTABLE_NAMESPACE_SAVE, true, error);
 }
 
+SyncResult GameEntryAdapter::restoreSave(GameEntry& entry, const std::string& key,
+                                         std::string* error)
+{
+    if (!isRomxPath(entry.path))
+        return SyncResult::Skipped;
+    if (!validateSaveSlotKeyImpl(key, error))
+        return SyncResult::Failed;
+    return importBundleNamespace(entry, ROMX_MUTABLE_NAMESPACE_SAVE, true, error,
+                                 &key);
+}
+
 SyncResult GameEntryAdapter::exportSave(const GameEntry& entry, std::string* error)
 {
     if (!isRomxPath(entry.path))
         return SyncResult::Skipped;
     return writeBundle(entry, ROMX_MUTABLE_NAMESPACE_SAVE,
                        mutableBundleKey(entry), error);
+}
+
+SyncResult GameEntryAdapter::exportSave(const GameEntry& entry, const std::string& key,
+                                        std::string* error)
+{
+    if (!isRomxPath(entry.path))
+        return SyncResult::Skipped;
+    if (!validateSaveSlotKeyImpl(key, error))
+        return SyncResult::Failed;
+    return writeBundle(entry, ROMX_MUTABLE_NAMESPACE_SAVE, key.c_str(), error);
 }
 
 SyncResult GameEntryAdapter::restoreCheat(GameEntry& entry, std::string* error)
@@ -1540,6 +1853,18 @@ bool GameEntryAdapter::writeMutable(const GameEntry& entry, std::string* error)
     if (saveResult != SyncResult::Success && cheatResult != SyncResult::Success && error)
         *error = !cheatError.empty() ? cheatError : saveError;
     return saveResult == SyncResult::Success || cheatResult == SyncResult::Success;
+}
+
+std::vector<GameEntryAdapter::SaveSlot> GameEntryAdapter::listSaveSlots(
+    const GameEntry& entry, std::string* error)
+{
+    return enumerateSaveSlots(entry, error);
+}
+
+bool GameEntryAdapter::validateSaveSlotKey(const std::string& key,
+                                           std::string* error)
+{
+    return validateSaveSlotKeyImpl(key, error);
 }
 
 } // namespace beiklive::romx

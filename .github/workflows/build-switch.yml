@@ -20,6 +20,9 @@ jobs:
       # For public repositories github.token is sufficient.
       GH_TOKEN: ${{ secrets.CORE_RELEASE_TOKEN || github.token }}
       RELEASE_REPO_TOKEN: ${{ secrets.RELEASE_REPO_TOKEN }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
 
     steps:
       - name: Check out frontend source
@@ -27,9 +30,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Restore Switch compiler cache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: switch-ccache-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'switchbuild.sh', 'third_party/libromx/CMakeLists.txt') }}
+          restore-keys: |
+            switch-ccache-${{ runner.os }}-
+
       - name: Install Switch dependencies
         shell: bash
-        run: dkp-pacman -S --noconfirm --needed switch-dev switch-curl
+        run: dkp-pacman -S --noconfirm --needed switch-dev switch-curl ccache
+
+      - name: Configure compiler cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          ccache --set-config=compiler_check=content
+          ccache --set-config=max_size=4G
+          ccache --zero-stats
+          ccache --show-config
 
       - name: Download latest external core Releases
         shell: bash
@@ -91,6 +112,14 @@ jobs:
         run: |
           chmod +x switchbuild.sh
           ./switchbuild.sh --core-dir "$GITHUB_WORKSPACE/external-cores" -j "$(nproc)"
+
+      - name: Show compiler cache statistics
+        if: always()
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --show-stats
+          fi
 
       - name: Create release package
         id: prep

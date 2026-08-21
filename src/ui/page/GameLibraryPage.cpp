@@ -8,6 +8,7 @@
 #include "core/forwarder/ForwarderInstaller.hpp"
 #include "core/romx/RomxFrontend.hpp"
 #include "core/romx/RomxGameEntryAdapter.hpp"
+#include <romx/romx.h>
 #include "ui/utils/MaterialIcons.hpp"
 #include "ui/utils/NdsEnvironment.hpp"
 #include "ui/widget/ButtonBox.hpp"
@@ -205,6 +206,24 @@ std::vector<fs::path> listFilesByExtensions(const std::string& dir,
     }
     std::sort(files.begin(), files.end());
     return files;
+}
+
+bool sameRomxSaveKey(const std::string& left, const std::string& right)
+{
+    if (left.size() != right.size())
+        return false;
+    for (std::size_t index = 0; index < left.size(); ++index)
+    {
+        const unsigned char leftByte = static_cast<unsigned char>(left[index]);
+        const unsigned char rightByte = static_cast<unsigned char>(right[index]);
+        const unsigned char foldedLeft = leftByte < 0x80U
+            ? static_cast<unsigned char>(std::tolower(leftByte)) : leftByte;
+        const unsigned char foldedRight = rightByte < 0x80U
+            ? static_cast<unsigned char>(std::tolower(rightByte)) : rightByte;
+        if (foldedLeft != foldedRight)
+            return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -2036,7 +2055,11 @@ namespace beiklive
                     [this, targets, operation](const beiklive::GameEntry&) {
                         _closeGameOptionsPanelAnimated(
                             [this, targets, operation]() {
-                                _confirmRomxBatchOperation(*targets, operation);
+                                if (operation == RomxBatchOperation::RestoreSave ||
+                                    operation == RomxBatchOperation::ExportSave)
+                                    _showRomxSaveSlotSelector(*targets, operation);
+                                else
+                                    _confirmRomxBatchOperation(*targets, operation);
                             });
                     });
             };
@@ -2066,9 +2089,128 @@ namespace beiklive
         m_gameOptionsSidebar->open(targets->front());
     }
 
-    void GameLibraryPage::_confirmRomxBatchOperation(
+    void GameLibraryPage::_showRomxSaveSlotSelector(
         std::vector<beiklive::GameEntry> entries,
         RomxBatchOperation operation)
+    {
+        if (entries.empty())
+        {
+            m_libraryView->setInteractionDisabled(false);
+            brls::Application::giveFocus(m_libraryView);
+            return;
+        }
+
+        const bool exporting = operation == RomxBatchOperation::ExportSave;
+        std::string listError;
+        auto slots = beiklive::romx::RomxGameEntryAdapter::listSaveSlots(
+            entries.front(), &listError);
+        if (!listError.empty())
+            brls::Logger::warning("[ROMX Save] cannot enumerate slots: {}", listError);
+
+        std::vector<std::string> values;
+        values.reserve(slots.size() + (exporting ? 1U : 0U));
+        for (const auto& slot : slots)
+        {
+            std::string label = slot.displayName.empty() ? slot.key : slot.displayName;
+            if (slot.entryCount > 1U)
+                label += " (" + std::to_string(slot.entryCount) + " files)";
+            values.push_back(std::move(label));
+        }
+        if (exporting)
+            values.push_back(L("新增存档…"));
+
+        if (values.empty())
+        {
+            m_libraryView->setInteractionDisabled(false);
+            brls::Application::giveFocus(m_libraryView);
+            brls::Application::notify(L("ROMX 中没有可用的存档槽"));
+            return;
+        }
+
+        auto selectionMade = std::make_shared<bool>(false);
+        auto* dropdown = new brls::Dropdown(
+            exporting ? L("选择 ROMX 存档（覆盖或新增）") : L("选择 ROMX 存档"),
+            values,
+            [this, entries = std::move(entries), operation,
+             slots = std::move(slots), exporting, selectionMade](int selected) mutable {
+                *selectionMade = true;
+                if (selected < 0)
+                    return;
+                const std::size_t index = static_cast<std::size_t>(selected);
+                if (index < slots.size())
+                {
+                    std::string key = slots[index].key;
+                    // Dropdown invokes its callback before popping its own
+                    // activity.  Defer the next modal so popActivity cannot
+                    // accidentally close the confirmation dialog we create.
+                    brls::sync([this, entries = std::move(entries), operation,
+                                key = std::move(key)]() mutable {
+                        _confirmRomxBatchOperation(std::move(entries), operation,
+                                                    std::move(key));
+                    });
+                    return;
+                }
+                if (!exporting || index != slots.size())
+                    return;
+
+                brls::sync([this, entries = std::move(entries), operation,
+                            slots = std::move(slots)]() mutable {
+                    auto* ime = brls::Application::getImeManager();
+                    if (!ime)
+                    {
+                        m_libraryView->setInteractionDisabled(false);
+                        brls::Application::giveFocus(m_libraryView);
+                        brls::Application::notify(L("当前平台不支持输入存档名称"));
+                        return;
+                    }
+                    ime->openForText(
+                        [this, entries = std::move(entries), operation,
+                         slots = std::move(slots)](std::string key) mutable {
+                            std::string validationError;
+                            if (!beiklive::romx::RomxGameEntryAdapter::validateSaveSlotKey(
+                                    key, &validationError))
+                            {
+                                m_libraryView->setInteractionDisabled(false);
+                                brls::Application::giveFocus(m_libraryView);
+                                brls::Application::notify(validationError.empty()
+                                    ? L("存档名称无效") : validationError);
+                                return;
+                            }
+                            const auto duplicate = std::find_if(
+                                slots.begin(), slots.end(),
+                                [&key](const auto& slot) {
+                                    return sameRomxSaveKey(slot.key, key);
+                                });
+                            if (duplicate != slots.end())
+                            {
+                                m_libraryView->setInteractionDisabled(false);
+                                brls::Application::giveFocus(m_libraryView);
+                                brls::Application::notify(
+                                    L("该名称已存在，请选择已有存档槽进行覆盖"));
+                                return;
+                            }
+                            _confirmRomxBatchOperation(std::move(entries), operation,
+                                                        std::move(key));
+                        },
+                        L("新增 ROMX 存档"),
+                        L("请输入存档名称（支持中文；同名请从列表中选择覆盖）"),
+                        static_cast<int>(ROMX_MUTABLE_KEY_CAPACITY), "");
+                });
+            },
+            0,
+            [this, selectionMade](int) {
+                if (*selectionMade)
+                    return;
+                m_libraryView->setInteractionDisabled(false);
+                brls::Application::giveFocus(m_libraryView);
+            });
+        brls::Application::pushActivity(new brls::Activity(dropdown));
+    }
+
+    void GameLibraryPage::_confirmRomxBatchOperation(
+        std::vector<beiklive::GameEntry> entries,
+        RomxBatchOperation operation,
+        std::string saveKey)
     {
         std::string question;
         switch (operation) {
@@ -2093,6 +2235,9 @@ namespace beiklive
         }
         question += "\n\n" + L("将处理选中的 ") +
                     std::to_string(entries.size()) + L(" 个 ROMX 文件。");
+        if ((operation == RomxBatchOperation::RestoreSave ||
+             operation == RomxBatchOperation::ExportSave) && !saveKey.empty())
+            question += "\n" + L("存档槽：") + saveKey;
 
         auto* dialog = new brls::Dialog(question);
         dialog->addButton(L("取消"), [this]() {
@@ -2100,8 +2245,10 @@ namespace beiklive
             brls::Application::giveFocus(m_libraryView);
         });
         dialog->addButton(L("确定"),
-            [this, entries = std::move(entries), operation]() mutable {
-                _runRomxBatchOperation(std::move(entries), operation);
+            [this, entries = std::move(entries), operation,
+             saveKey = std::move(saveKey)]() mutable {
+                _runRomxBatchOperation(std::move(entries), operation,
+                                       std::move(saveKey));
             });
         dialog->setCancelable(false);
         dialog->open();
@@ -2109,7 +2256,8 @@ namespace beiklive
 
     void GameLibraryPage::_runRomxBatchOperation(
         std::vector<beiklive::GameEntry> entries,
-        RomxBatchOperation operation)
+        RomxBatchOperation operation,
+        std::string saveKey)
     {
         if (entries.empty()) {
             m_libraryView->setInteractionDisabled(false);
@@ -2120,7 +2268,8 @@ namespace beiklive
 
         auto alive = m_aliveToken;
         ThreadPool::instance().enqueue([
-            this, alive, entries = std::move(entries), operation]() mutable {
+            this, alive, entries = std::move(entries), operation,
+            saveKey = std::move(saveKey)]() mutable {
             size_t success = 0;
             size_t skipped = 0;
             size_t failed = 0;
@@ -2134,12 +2283,18 @@ namespace beiklive
                     beiklive::romx::SyncResult::Failed;
                 switch (operation) {
                     case RomxBatchOperation::RestoreSave:
-                        result = beiklive::romx::RomxGameEntryAdapter::restoreSave(
-                            entry, &error);
+                        result = saveKey.empty()
+                            ? beiklive::romx::RomxGameEntryAdapter::restoreSave(
+                                entry, &error)
+                            : beiklive::romx::RomxGameEntryAdapter::restoreSave(
+                                entry, saveKey, &error);
                         break;
                     case RomxBatchOperation::ExportSave:
-                        result = beiklive::romx::RomxGameEntryAdapter::exportSave(
-                            entry, &error);
+                        result = saveKey.empty()
+                            ? beiklive::romx::RomxGameEntryAdapter::exportSave(
+                                entry, &error)
+                            : beiklive::romx::RomxGameEntryAdapter::exportSave(
+                                entry, saveKey, &error);
                         break;
                     case RomxBatchOperation::RestoreCheat:
                         result = beiklive::romx::RomxGameEntryAdapter::restoreCheat(

@@ -309,11 +309,25 @@ cd "${BUILD_DIR}"
 echo ""
 echo "[1/2] CMake配置..."
 
+# ccache is optional so local builds keep working on machines that do not
+# have it installed.  The GitHub Switch workflow provides a persistent
+# CCACHE_DIR; when present, use it for every C/C++ target, including the
+# vendored emulator cores.
+CMAKE_LAUNCHER_ARGS=()
+if command -v ccache >/dev/null 2>&1; then
+    CMAKE_LAUNCHER_ARGS+=(
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    )
+    echo "[缓存] 使用 ccache"
+fi
+
 cmake .. \
     -DPLATFORM_SWITCH=ON \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_DEPENDS_USE_COMPILER=FALSE
+    -DCMAKE_DEPENDS_USE_COMPILER=FALSE \
+    "${CMAKE_LAUNCHER_ARGS[@]}"
 
 echo ""
 echo "[2/2] 编译并打包本体与 NDS Stub..."

@@ -134,10 +134,14 @@ enum class PlatformFilter : int
                                             bool launchTransition = false);
         void _showMultiSelectSidebar();
         void _showRomxBatchSidebar(std::vector<beiklive::GameEntry> entries);
+        void _showRomxSaveSlotSelector(std::vector<beiklive::GameEntry> entries,
+                                       RomxBatchOperation operation);
         void _confirmRomxBatchOperation(std::vector<beiklive::GameEntry> entries,
-                                        RomxBatchOperation operation);
+                                        RomxBatchOperation operation,
+                                        std::string saveKey = {});
         void _runRomxBatchOperation(std::vector<beiklive::GameEntry> entries,
-                                    RomxBatchOperation operation);
+                                    RomxBatchOperation operation,
+                                    std::string saveKey = {});
         void _deleteEntriesAsync(std::vector<int> indices, bool deleteRomFiles);
         void _openGameDataPage(const beiklive::GameEntry& entry);
 
