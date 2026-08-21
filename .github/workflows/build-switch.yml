@@ -40,17 +40,29 @@ jobs:
 
       - name: Install Switch dependencies
         shell: bash
-        run: dkp-pacman -S --noconfirm --needed switch-dev switch-curl ccache
+        run: |
+          set -euo pipefail
+          dkp-pacman -S --noconfirm --needed switch-dev switch-curl
+          # ccache is optional: some devkita64 images do not publish it in
+          # their pacman repository, while switchbuild.sh can build without
+          # a compiler launcher.
+          if ! dkp-pacman -S --noconfirm --needed ccache; then
+            echo '::warning::ccache is unavailable in this devkitPro image; continuing without it'
+          fi
 
       - name: Configure compiler cache
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$CCACHE_DIR"
-          ccache --set-config=compiler_check=content
-          ccache --set-config=max_size=4G
-          ccache --zero-stats
-          ccache --show-config
+          if command -v ccache >/dev/null 2>&1; then
+            mkdir -p "$CCACHE_DIR"
+            ccache --set-config=compiler_check=content
+            ccache --set-config=max_size=4G
+            ccache --zero-stats
+            ccache --show-config
+          else
+            echo 'ccache not installed; compiler cache is disabled'
+          fi
 
       - name: Download latest external core Releases
         shell: bash
