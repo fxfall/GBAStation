@@ -45,16 +45,17 @@ struct OnlineResourceManifest {
     std::vector<OnlineResourceGroup> groups;
 };
 
-// Keep the optional external cores on the fork's Releases.  The historical
-// resource manifest is still used for BIOS/cheat assets, but its core URLs
-// point at the upstream build and would silently restore those binaries.
+// Keep the optional external cores on the fork's v0.2.1-romx Releases.  The
+// historical resource manifest is still used for BIOS/cheat assets, but its
+// core URLs point at the upstream build and would silently restore those
+// binaries.
 static constexpr const char* FORK_3DS_CORE_URL =
-    "https://github.com/fxfall/GBAStation_3DS/releases/latest/download/GBAStation3DSStub.nro";
+    "https://github.com/fxfall/GBAStation_3DS/releases/download/v0.2.1-romx/GBAStation3DSStub.nro";
 static constexpr const char* FORK_FBNEO_CORE_URL =
-    "https://github.com/fxfall/GBAStation_FBNeo/releases/latest/download/GBAStationFBNeoStub.nro";
+    "https://github.com/fxfall/GBAStation_FBNeo/releases/download/v0.2.1-romx/GBAStationFBNeoStub.nro";
 static constexpr const char* FORK_PPSSPP_CORE_URL =
-    "https://github.com/fxfall/GBAStation_ppsspp/releases/latest/download/GBAStationPPSSPPStub.nro";
-static constexpr const char* FORK_CORE_VERSION = "0.2.0-romx";
+    "https://github.com/fxfall/GBAStation_ppsspp/releases/download/v0.2.1-romx/GBAStationPPSSPPStub.nro";
+static constexpr const char* FORK_CORE_VERSION = "0.2.1-romx";
 
 static void rewriteForkedCoreResource(OnlineResourceItem& item) {
     const auto rewrite = [&item](const char* url) {

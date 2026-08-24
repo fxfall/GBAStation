@@ -861,6 +861,29 @@ RetroArch 不只传 `TextureSize/InputSize`，还会对以下对象分别查找�
 
 ---
 
+## 2026-08-24 GBAStation romx-0.2.0 与核心 fix4 发布准备
+
+### 分支与上游
+
+- 将本地 `main` 改名为 `romx-0.2.0` 并推送到 `fxfall/GBAStation`。
+- GitHub 默认分支切换为 `romx-0.2.0`。
+- 删除远端 `main` 与 `romx-support`，远端当前只保留 `romx-0.2.0`。
+- `upstream` 确认为 `https://github.com/beiklive/GBAStation`；上游已是最新，本地保留 9 个 ROMX 提交。
+
+### 核心构建
+
+- FBNeo：Actions `32721950592` 成功，NRO SHA-256 为 `ec7168ceb906b79d39a0cdda657954f3f2caf39a7a695c05fe20110db5edfd42`。
+- PPSSPP：Actions `32721966126` 成功，NRO SHA-256 为 `52ad9d98ce1282950b1496de58de010636d13cafb1052a795abb6046f86ec80c`。
+- 3DS：Actions `32721950713` 成功；release NRO SHA-256 为 `eac3ca90f8b262528784bbc8e08cae7533c9b63c203199ffa2be1fd12e2145b4`，diagnostic NRO SHA-256 为 `456b0bb74ca578f6a187782367adeab13de5771092177b08b5ca06bb0ec507d5`。
+
+### 主程序核心引用
+
+- `AboutPage.cpp` 的三核心在线下载地址固定到 `v0.2.1-romx` Release 资产。
+- 核心资源版本标识从 `0.2.0-romx` 更新为 `0.2.1-romx`，避免已安装旧核心被误判为最新。
+- 本地 `out/core-input/` 已替换为三份 release NRO，供本地 Switch 打包输入使用；diagnostic NRO 保留在构建产物目录，不作为运行时核心。
+
+---
+
 ## 2026-06-28 README 与 About 页面介绍文案更新
 
 ### 任务分析
