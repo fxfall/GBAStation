@@ -330,26 +330,15 @@ cmake .. \
     "${CMAKE_LAUNCHER_ARGS[@]}"
 
 echo ""
-echo "[2/2] 编译并打包本体与 NDS Stub..."
+echo "[2/2] 编译并打包本体..."
 
 cmake --build . --target GBAStation.nro -j "${JOBS}"
-cmake --build . --target GBAStationNDSStub.nro -j "${JOBS}"
 
 cd ..
-
-mkdir -p "${BUILD_DIR}/GBAStation/core"
-if [ -f "${BUILD_DIR}/GBAStationNDSStub.nro" ]; then
-    cp "${BUILD_DIR}/GBAStationNDSStub.nro" \
-       "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro"
-else
-    echo "[错误] NDS Stub 构建产物不存在"
-    exit 1
-fi
 
 for core in "${STAGE_CORE_NROS[@]}"; do
     copy_external_core_stub "${core}"
 done
-
 # ────────────────────────────────────────────────────────────
 # 输出大小
 # ────────────────────────────────────────────────────────────
@@ -358,8 +347,6 @@ echo ""
 echo "==================== 编译结果 ===================="
 
 print_nro_size "GBAStation.nro" "${BUILD_DIR}/GBAStation.nro"
-print_nro_size "GBAStationNDSStub.nro" "${BUILD_DIR}/GBAStationNDSStub.nro"
-print_nro_size "GBAStation/core/GBAStationNDSStub.nro" "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro"
 for core in "${STAGE_CORE_NROS[@]}"; do
     print_nro_size "GBAStation/core/${core}" "${BUILD_DIR}/GBAStation/core/${core}"
 done
@@ -368,8 +355,6 @@ echo ""
 echo "==================== SHA-256 ===================="
 for nro in \
     "${BUILD_DIR}/GBAStation.nro" \
-    "${BUILD_DIR}/GBAStationNDSStub.nro" \
-    "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro" \
     "${BUILD_DIR}/GBAStation/core/"*.nro; do
     [ -f "${nro}" ] && sha256sum "${nro}"
 done
@@ -379,8 +364,6 @@ echo "=================================================="
 echo ""
 echo "[完成]"
 echo "${BUILD_DIR}/GBAStation.nro"
-echo "${BUILD_DIR}/GBAStationNDSStub.nro"
-echo "${BUILD_DIR}/GBAStation/core/GBAStationNDSStub.nro"
 for core in "${STAGE_CORE_NROS[@]}"; do
     echo "${BUILD_DIR}/GBAStation/core/${core}"
 done

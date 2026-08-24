@@ -1,5 +1,6 @@
 #include "game/audio/AudioManager.hpp"
 
+#include "core/common.h"
 #include <cstring>
 #include <cstdio>
 #include <algorithm>
@@ -96,6 +97,51 @@ void AudioManager::applyFadeIn(int16_t* out, size_t count)
         m_fadeInTotalSamples = 0;
 }
 
+void AudioManager::setMasterVolume(float volume)
+{
+    m_masterVolume.store(std::clamp(volume, 0.0f, 1.0f), std::memory_order_release);
+}
+
+float AudioManager::applyMasterVolumeFromSetting()
+{
+    const int percent = GET_SETTING_KEY_INT(
+        beiklive::SettingKey::KEY_AUDIO_MASTER_VOLUME, 100);
+    const float volume = static_cast<float>(std::clamp(percent, 0, 100)) / 100.0f;
+    AudioManager::instance().setMasterVolume(volume);
+    return volume;
+}
+
+void AudioManager::applyMasterVolume(int16_t* out, size_t count)
+{
+    if (!out || count == 0)
+        return;
+    const float target = m_masterVolume.load(std::memory_order_acquire);
+    if (target >= 0.999f && m_currentGain >= 0.999f)
+        return;
+    // 每样本至多向目标靠近 1/256，避免音量突变产生咔哒声；
+    // 约 48000Hz 下 256 样本 ≈ 5.3ms 完成过渡。
+    const float step = 1.0f / 256.0f;
+    for (size_t i = 0; i < count; ++i) {
+        float& gain = m_currentGain;
+        if (gain < target)
+            gain = std::min(target, gain + step);
+        else if (gain > target)
+            gain = std::max(target, gain - step);
+        if (gain >= 0.999f) {
+            // 已接近原始音量：余下样本原样拷贝（快路径）
+            m_currentGain = 1.0f;
+            return;
+        }
+        if (gain <= 0.0005f) {
+            out[i] = 0;
+            continue;
+        }
+        const int scaled = static_cast<int>(std::lround(
+            static_cast<float>(out[i]) * gain));
+        out[i] = static_cast<int16_t>(std::clamp(scaled, -32768, 32767));
+    }
+}
+
 void AudioManager::resetOutputTailLocked()
 {
     m_lastOutputSample = {0, 0};
@@ -162,6 +208,8 @@ void AudioManager::resetBufferLocked()
     m_resampleCarry.clear();
     m_resampleScratch.clear();
     m_outputPaused.store(false, std::memory_order_release);
+    // 同步当前增益，避免每次 init 时从上次音量渐变
+    m_currentGain = m_masterVolume.load(std::memory_order_acquire);
 }
 
 void AudioManager::configureLatencyMsLocked(int targetMs, int maxMs)
@@ -466,6 +514,7 @@ bool AudioManager::init(int sampleRate, int channels)
 
     // 每次初始化时重置环形缓冲区状态，防止上次会话的残留指针/计数导致第二次启动时读到
     // 零数据与真实音频混合的数据块，产生撕裂或刺耳声
+    applyMasterVolumeFromSetting();
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         resetBufferLocked();
@@ -572,8 +621,17 @@ void AudioManager::audioThreadFunc()
 
             const size_t framesToRead = inputFrames - carryFrames;
             const size_t needed = framesToRead * kOutChannels;
-            m_dataCV.wait_for(lk, std::chrono::milliseconds(18), [&] {
-                return m_available >= needed || m_available >= kOutChannels ||
+            // A 60 Hz core normally supplies about 800 frames at 48 kHz, while
+            // one audout block needs 1026 source frames. Waking for any stereo
+            // frame therefore padded every hardware block with a fade to zero,
+            // which sounds like a periodic dull pop or hiss. Wait for a complete
+            // block; only use the underrun tail when the core genuinely stalls.
+            const auto sourceBlockMs = static_cast<int>(std::ceil(
+                1000.0 * static_cast<double>(framesToRead) /
+                static_cast<double>(std::max(1, m_sampleRate)))) + 8;
+            const auto waitMs = std::clamp(sourceBlockMs, 12, 35);
+            m_dataCV.wait_for(lk, std::chrono::milliseconds(waitMs), [&] {
+                return m_available >= needed ||
                        !m_running.load(std::memory_order_relaxed);
             });
             size_t got = ringRead(m_resampleScratch.data() + carryFrames * kOutChannels, needed);
@@ -610,6 +668,7 @@ void AudioManager::audioThreadFunc()
                 m_resampleScratch.begin() + static_cast<std::ptrdiff_t>(consumedFrames * kOutChannels),
                 m_resampleScratch.end());
             applyFadeIn(dst, SWITCH_FRAMES * kOutChannels);
+            applyMasterVolume(dst, SWITCH_FRAMES * kOutChannels);
             rememberOutputTailLocked(dst, SWITCH_FRAMES * kOutChannels);
         }
 
@@ -743,6 +802,7 @@ bool AudioManager::init(int sampleRate, int channels)
     }
 
     // 重置环形缓冲区状态，防止上次会话残留导致第二次启动时音频撕裂
+    applyMasterVolumeFromSetting();
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         resetBufferLocked();
@@ -775,6 +835,7 @@ void AudioManager::audioThreadFunc()
             if (got < ALSA_PERIOD_FRAMES * 2)
                 fillUnderrunTailLocked(buf, got, ALSA_PERIOD_FRAMES * 2);
             applyFadeIn(buf, ALSA_PERIOD_FRAMES * 2);
+            applyMasterVolume(buf, ALSA_PERIOD_FRAMES * 2);
             rememberOutputTailLocked(buf, ALSA_PERIOD_FRAMES * 2);
         }
 
@@ -872,6 +933,7 @@ bool AudioManager::init(int sampleRate, int channels)
     }
 
     // 重置环形缓冲区状态，防止上次会话残留导致第二次启动时音频撕裂
+    applyMasterVolumeFromSetting();
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         resetBufferLocked();
@@ -914,6 +976,7 @@ void AudioManager::audioThreadFunc()
             if (got < WINMM_BUF_FRAMES * 2)
                 fillUnderrunTailLocked(dst, got, WINMM_BUF_FRAMES * 2);
             applyFadeIn(dst, WINMM_BUF_FRAMES * 2);
+            applyMasterVolume(dst, WINMM_BUF_FRAMES * 2);
             rememberOutputTailLocked(dst, WINMM_BUF_FRAMES * 2);
         }
 
@@ -981,6 +1044,7 @@ static OSStatus s_coreAudioCallback(void*                       inRefCon,
     if (got < samples)
         mgr->fillUnderrunTailLocked(dst, got, samples);
     mgr->applyFadeIn(dst, samples);
+    mgr->applyMasterVolume(dst, samples);
     mgr->rememberOutputTailLocked(dst, samples);
 
     return noErr;
@@ -1036,6 +1100,7 @@ bool AudioManager::init(int sampleRate, int channels)
     }
 
     // 重置环形缓冲区状态，防止上次会话残留导致第二次启动时音频撕裂
+    applyMasterVolumeFromSetting();
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         resetBufferLocked();
@@ -1081,6 +1146,7 @@ bool AudioManager::init(int sampleRate, int channels)
     m_sampleRate = sampleRate;
     m_channels   = channels;
     // 重置环形缓冲区状态，防止上次会话残留导致第二次启动时音频撕裂
+    applyMasterVolumeFromSetting();
     {
         std::lock_guard<std::mutex> lk(m_mutex);
         resetBufferLocked();
