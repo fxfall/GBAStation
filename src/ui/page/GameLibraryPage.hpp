@@ -138,7 +138,8 @@ enum class PlatformFilter : int
                                        RomxBatchOperation operation);
         void _confirmRomxBatchOperation(std::vector<beiklive::GameEntry> entries,
                                         RomxBatchOperation operation,
-                                        std::string saveKey = {});
+                                        std::string saveKey = {},
+                                        std::string saveLabel = {});
         void _runRomxBatchOperation(std::vector<beiklive::GameEntry> entries,
                                     RomxBatchOperation operation,
                                     std::string saveKey = {});

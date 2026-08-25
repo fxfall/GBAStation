@@ -127,6 +127,7 @@ static int test_multi_entry_and_mutable(const char *directory)
     unsigned int index;
     char save_path[1024];
     char rtc_path[1024];
+    char psp_output[1024];
 
     (void)snprintf(output, sizeof(output), "%s/native-writer.romx", directory);
     (void)unlink(output);
@@ -212,10 +213,14 @@ static int test_multi_entry_and_mutable(const char *directory)
         static const uint8_t savedata[] = { 1U, 3U, 3U, 7U };
         static const uint8_t rtcdata[] = { 2U, 4U, 6U, 8U, 10U };
         romx_mutable_bundle_path_entry_t bundle_entries[2];
+        romx_mutable_bundle_path_entry_t flat_entries[2];
+        romx_mutable_bundle_path_entry_t psp_entries[4];
         romx_mutable_bundle_path_entry_t collision_entries[3];
         romx_mutable_bundle_t *bundle = NULL;
         romx_mutable_bundle_entry_info_t bundle_entry =
             ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
+        romx_mutable_save_slot_info_t save_slot =
+            ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
         romx_mutable_stats_t stats = ROMX_MUTABLE_STATS_INIT;
         romx_mutable_stats_t restored_stats = ROMX_MUTABLE_STATS_INIT;
         uint8_t restored[8];
@@ -228,21 +233,47 @@ static int test_multi_entry_and_mutable(const char *directory)
         CHECK(write_bytes(rtc_path, rtcdata, sizeof(rtcdata)));
         bundle_entries[0] =
             (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
-        bundle_entries[0].relative_path = "game.srm";
+        bundle_entries[0].relative_path = "clock/game.srm";
         bundle_entries[0].source_path = save_path;
         bundle_entries[1] =
             (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
         bundle_entries[1].relative_path = "clock/game.rtc";
         bundle_entries[1].source_path = rtc_path;
+        flat_entries[0] =
+            (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
+        flat_entries[0].relative_path = "save-1.sav";
+        flat_entries[0].source_path = save_path;
+        flat_entries[1] =
+            (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
+        flat_entries[1].relative_path = "save-2.sav";
+        flat_entries[1].source_path = rtc_path;
         mutable_options.data_capacity = UINT64_C(512);
         CHECK(romx_mutable_bundle_write_path_entries(output,
             ROMX_MUTABLE_NAMESPACE_SAVE, "libretro", bundle_entries, 2U,
             NULL, &mutable_options, &object, &error) == ROMX_OK);
+        object = (romx_mutable_object_info_t)ROMX_MUTABLE_OBJECT_INFO_INIT;
+        CHECK(romx_mutable_bundle_write_path_entries(output,
+            ROMX_MUTABLE_NAMESPACE_SAVE, "slot-2", flat_entries, 2U,
+            NULL, &mutable_options, &object, &error) == ROMX_OK);
         CHECK(romx_reader_open_path(output, NULL, &reader, &error) == ROMX_OK);
+        CHECK(romx_reader_get_mutable_object_count(reader, &count,
+            &error) == ROMX_OK && count == UINT32_C(2));
         CHECK(romx_mutable_bundle_open(reader, ROMX_MUTABLE_NAMESPACE_SAVE,
             "libretro", NULL, &bundle, &error) == ROMX_OK);
         CHECK(romx_mutable_bundle_get_entry_count(bundle, &count,
             &error) == ROMX_OK && count == UINT32_C(2));
+        CHECK(romx_mutable_bundle_get_save_slot_count(bundle, &count,
+            &error) == ROMX_OK && count == UINT32_C(2));
+        save_slot = (romx_mutable_save_slot_info_t)ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+        CHECK(romx_mutable_bundle_get_save_slot(bundle, 0U, &save_slot,
+            &error) == ROMX_OK);
+        CHECK(strcmp(save_slot.key, "clock/game.rtc") == 0 &&
+            save_slot.entry_count == UINT32_C(1));
+        save_slot = (romx_mutable_save_slot_info_t)ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+        CHECK(romx_mutable_bundle_get_save_slot(bundle, 1U, &save_slot,
+            &error) == ROMX_OK);
+        CHECK(strcmp(save_slot.key, "clock/game.srm") == 0 &&
+            save_slot.entry_count == UINT32_C(1));
         CHECK(romx_mutable_bundle_get_entry(bundle, 0U, &bundle_entry,
             &error) == ROMX_OK);
         CHECK(strcmp(bundle_entry.path, "clock/game.rtc") == 0);
@@ -250,6 +281,80 @@ static int test_multi_entry_and_mutable(const char *directory)
             restored, sizeof(restored), &bytes_read, &error) == ROMX_OK);
         CHECK(bytes_read == sizeof(rtcdata) &&
             memcmp(restored, rtcdata, sizeof(rtcdata)) == 0);
+        romx_mutable_bundle_close(bundle);
+        CHECK(romx_mutable_bundle_open(reader, ROMX_MUTABLE_NAMESPACE_SAVE,
+            "slot-2", NULL, &bundle, &error) == ROMX_OK);
+        CHECK(romx_mutable_bundle_get_entry_count(bundle, &count,
+            &error) == ROMX_OK && count == UINT32_C(2));
+        CHECK(romx_mutable_bundle_get_save_slot_count(bundle, &count,
+            &error) == ROMX_OK && count == UINT32_C(2));
+        save_slot = (romx_mutable_save_slot_info_t)ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+        CHECK(romx_mutable_bundle_get_save_slot(bundle, 0U, &save_slot,
+            &error) == ROMX_OK);
+        CHECK(strcmp(save_slot.key, "save-1.sav") == 0 &&
+            save_slot.entry_count == UINT32_C(1));
+        CHECK(romx_mutable_bundle_get_save_slot_entry(bundle, 1U, 0U,
+            &bundle_entry, &error) == ROMX_OK);
+        CHECK(strcmp(bundle_entry.path, "save-2.sav") == 0);
+        romx_mutable_bundle_close(bundle);
+        romx_reader_close(reader);
+        reader = NULL;
+
+        (void)snprintf(psp_output, sizeof(psp_output), "%s/psp-writer.romx",
+            directory);
+        (void)unlink(psp_output);
+        psp_entries[0] =
+            (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
+        psp_entries[0].relative_path = "slot-1/meta.dat";
+        psp_entries[0].source_path = rtc_path;
+        psp_entries[1] =
+            (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
+        psp_entries[1].relative_path = "slot-1/save.sav";
+        psp_entries[1].source_path = save_path;
+        psp_entries[2] =
+            (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
+        psp_entries[2].relative_path = "slot-2/meta.dat";
+        psp_entries[2].source_path = rtc_path;
+        psp_entries[3] =
+            (romx_mutable_bundle_path_entry_t)ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
+        psp_entries[3].relative_path = "slot-2/save.sav";
+        psp_entries[3].source_path = save_path;
+        options.platform_id = ROMX_PLATFORM_PSP;
+        mutable_options.data_capacity = UINT64_C(2048);
+        CHECK(romx_writer_write_io_entries(psp_output, entries, 3U,
+            metadata, sizeof(metadata) - 1U, NULL, &options,
+            &writer_report, &error) == ROMX_OK);
+        CHECK(romx_mutable_bundle_write_path_entries(psp_output,
+            ROMX_MUTABLE_NAMESPACE_SAVE, "libretro", psp_entries, 4U,
+            NULL, &mutable_options, &object, &error) == ROMX_OK);
+        CHECK(romx_reader_open_path(psp_output, NULL, &reader, &error) == ROMX_OK);
+        CHECK(romx_mutable_bundle_open(reader, ROMX_MUTABLE_NAMESPACE_SAVE,
+            "libretro", NULL, &bundle, &error) == ROMX_OK);
+        CHECK(romx_mutable_bundle_get_save_slot_count(bundle, &count,
+            &error) == ROMX_OK && count == UINT32_C(2));
+        save_slot = (romx_mutable_save_slot_info_t)ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+        CHECK(romx_mutable_bundle_get_save_slot(bundle, 0U, &save_slot,
+            &error) == ROMX_OK);
+        CHECK(strcmp(save_slot.key, "slot-1") == 0 &&
+            save_slot.entry_count == UINT32_C(2));
+        save_slot = (romx_mutable_save_slot_info_t)ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+        CHECK(romx_mutable_bundle_get_save_slot(bundle, 1U, &save_slot,
+            &error) == ROMX_OK);
+        CHECK(strcmp(save_slot.key, "slot-2") == 0 &&
+            save_slot.entry_count == UINT32_C(2));
+        romx_mutable_bundle_close(bundle);
+        romx_reader_close(reader);
+        reader = NULL;
+        (void)unlink(psp_output);
+        options.platform_id = ROMX_PLATFORM_PLAYSTATION;
+
+        CHECK(romx_mutable_delete_path(output, ROMX_MUTABLE_NAMESPACE_SAVE,
+            "libretro", &error) == ROMX_OK);
+        CHECK(romx_reader_open_path(output, NULL, &reader, &error) == ROMX_OK);
+        CHECK(romx_reader_get_mutable_object_count(reader, &count,
+            &error) == ROMX_OK && count == UINT32_C(1));
+        CHECK(romx_mutable_bundle_open(reader, ROMX_MUTABLE_NAMESPACE_SAVE,
+            "slot-2", NULL, &bundle, &error) == ROMX_OK);
         romx_mutable_bundle_close(bundle);
         romx_reader_close(reader);
         reader = NULL;

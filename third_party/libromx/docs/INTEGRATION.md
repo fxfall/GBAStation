@@ -53,16 +53,27 @@ available through `romx_mutable_file_open`.
 
 For interoperable SAVE/CHEAT file sets, use `romx_mutable_bundle_open`,
 enumerate with `romx_mutable_bundle_get_entry*`, and stream original file
-bytes with `romx_mutable_bundle_read_entry`. Opening validates the complete
-bundle and all per-file CRC32 values. Extract to staging and commit only the
-listed paths; never replace a shared frontend save root.
+bytes with `romx_mutable_bundle_read_entry`. A `SAVE` object key is one
+logical save slot, so enumerate active mutable objects, filter for
+`ROMX_MUTABLE_NAMESPACE_SAVE`, and present each key as an independent slot.
+Opening validates the complete selected bundle and all per-file CRC32 values.
+Use `romx_mutable_bundle_get_save_slot*` to enumerate the logical slots and
+their member files; libromx applies the platform policy (PSP top-level
+directory grouping, per-file slots on other ROMX 0.2.0 platforms), so the
+frontend does not need to reimplement path grouping.
+Extract to staging and commit only the selected slot's paths; never replace a
+shared frontend save root or another slot's paths.
 
 Use `romx_mutable_stats_read` and `romx_mutable_stats_serialize_json` for the
 strict versioned STATS profile. Cumulative runtime synchronization should
 re-read the current object and add only the current session delta.
 
 Writing back is a separate explicit action. Call
-`romx_mutable_bundle_write_path_entries` for caller-selected regular files,
+`romx_mutable_bundle_write_path_entries` for the complete SAVE object. When a
+projected slot inside an existing bundle is replaced, preserve unrelated
+bundle entries and replace only the selected slot's files; the
+`romx_mutable_bundle_get_save_slot*` mapping identifies those entries. Call
+the same writer for caller-selected CHEAT files,
 `romx_mutable_stats_write_path` for statistics, or the generic
 `romx_mutable_write_io_path`/`romx_mutable_write_path` APIs for opaque data.
 Call `romx_mutable_delete_path` for explicit deletion. libromx performs the

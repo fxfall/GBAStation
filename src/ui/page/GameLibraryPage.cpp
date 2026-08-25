@@ -2176,14 +2176,17 @@ namespace beiklive
                 const std::size_t index = static_cast<std::size_t>(selected);
                 if (index < slots.size())
                 {
-                    std::string key = slots[index].key;
+                    std::string key = slots[index].selectionKey.empty()
+                        ? slots[index].key : slots[index].selectionKey;
+                    std::string label = slots[index].displayName.empty()
+                        ? slots[index].key : slots[index].displayName;
                     // Dropdown invokes its callback before popping its own
                     // activity.  Defer the next modal so popActivity cannot
                     // accidentally close the confirmation dialog we create.
                     brls::sync([this, entries = std::move(entries), operation,
-                                key = std::move(key)]() mutable {
+                                key = std::move(key), label = std::move(label)]() mutable {
                         _confirmRomxBatchOperation(std::move(entries), operation,
-                                                    std::move(key));
+                                                    std::move(key), std::move(label));
                     });
                     return;
                 }
@@ -2247,7 +2250,8 @@ namespace beiklive
     void GameLibraryPage::_confirmRomxBatchOperation(
         std::vector<beiklive::GameEntry> entries,
         RomxBatchOperation operation,
-        std::string saveKey)
+        std::string saveKey,
+        std::string saveLabel)
     {
         std::string question;
         switch (operation) {
@@ -2274,7 +2278,8 @@ namespace beiklive
                     std::to_string(entries.size()) + L(" 个 ROMX 文件。");
         if ((operation == RomxBatchOperation::RestoreSave ||
              operation == RomxBatchOperation::ExportSave) && !saveKey.empty())
-            question += "\n" + L("存档槽：") + saveKey;
+            question += "\n" + L("存档槽：") +
+                        (saveLabel.empty() ? saveKey : saveLabel);
 
         auto* dialog = new brls::Dialog(question);
         dialog->addButton(L("取消"), [this]() {

@@ -26,8 +26,14 @@ public:
     /// kept separate from the bundle's internal relative file path.
     struct SaveSlot
     {
+        /// The mutable object key.  Multiple logical slots can originate from
+        /// one SAVE bundle, so use selectionKey when invoking restoreSave or
+        /// exportSave for an existing slot.
         std::string key;
         std::string displayName;
+        /// Opaque adapter selector.  Empty means `key`; libromx-derived bundle
+        /// slots use this to retain both the object key and selected slot key.
+        std::string selectionKey;
         std::string entryPath;
         uint64_t dataSize = 0;
         uint64_t generation = 0;
@@ -70,18 +76,23 @@ public:
 
     /// Explicit batch-management operations.  The restore variants replace
     /// local frontend data with the corresponding ROMX mutable object.  PSP
-    /// uses the native `ppsspp` bundle key and maps SAVE/CHEAT to
-    /// GBAStation/saves/PSP and GBAStation/PSP/Cheats respectively; other
-    /// platforms continue to use the interoperable `libretro` object.  On
-    /// built-in battery-backed platforms, SAVE restore derives the local
-    /// destination from `GameEntry.path` (`<stem>.sav`, or Genesis `.srm`)
-    /// instead of trusting the mutable bundle's relative filename.  SAVE
-    /// export for non-PSP entries contains only the core's stem-matched
-    /// battery file, never savestates/thumbnails.
+    /// maps SAVE/CHEAT to GBAStation/saves/PSP and GBAStation/PSP/Cheats;
+    /// each PSP SAVE directory is presented as a separate frontend slot, but
+    /// restore always replaces one local active DISC_ID directory.  The
+    /// selectionKey returned by listSaveSlots is an adapter-only selector for
+    /// a logical slot inside an RMBL SAVE bundle.  Other platforms continue
+    /// to use the interoperable `libretro` object.  On built-in
+    /// battery-backed platforms, SAVE restore derives the local destination
+    /// from `GameEntry.path` (`<stem>.sav`, or Genesis `.srm`) instead of
+    /// trusting the mutable bundle's relative filename.  SAVE export for
+    /// non-PSP entries contains only the core's stem-matched battery file,
+    /// never savestates/thumbnails.
     static SyncResult restoreSave(GameEntry& entry, std::string* error = nullptr);
     /// Restores one named SAVE object.  The key is the ROMX slot label and is
     /// interpreted as UTF-8; selecting an existing key is an overwrite of the
-    /// local battery file, not a new local filename.
+    /// local battery file, not a new local filename.  Callers should pass
+    /// SaveSlot::selectionKey when selecting a projected bundle slot (PSP
+    /// directory slot or a non-PSP multi-file slot).
     static SyncResult restoreSave(GameEntry& entry, const std::string& key,
                                   std::string* error = nullptr);
     static SyncResult exportSave(const GameEntry& entry, std::string* error = nullptr);

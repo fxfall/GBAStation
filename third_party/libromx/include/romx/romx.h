@@ -534,9 +534,11 @@ typedef struct romx_mutable_write_options {
     UINT64_C(0), UINT64_C(0), UINT32_C(0), UINT32_C(0) \
 }
 
-/* Interoperable, uncompressed SAVE/CHEAT bundle profile. The outer mutable
- * object key selects a consumer-defined destination root; bundle entry paths
- * are normalized UTF-8 paths relative to that root. */
+/* Interoperable, uncompressed SAVE/CHEAT bundle profile. For SAVE, each outer
+ * object key identifies one logical save slot and its consumer-defined restore
+ * root; bundle entry paths are normalized UTF-8 paths relative to that slot.
+ * Multiple SAVE objects may coexist. For CHEAT, the key selects the consumer-
+ * defined destination root. Neither key is a host path. */
 #define ROMX_MUTABLE_BUNDLE_VERSION UINT16_C(1)
 #define ROMX_MUTABLE_BUNDLE_PATH_CAPACITY UINT32_C(1024)
 #define ROMX_MUTABLE_BUNDLE_DEFAULT_MAX_ENTRIES UINT32_C(4096)
@@ -581,6 +583,24 @@ typedef struct romx_mutable_bundle_entry_info {
 #define ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT { \
     (uint32_t)sizeof(romx_mutable_bundle_entry_info_t), UINT32_C(0), \
     UINT64_C(0), UINT32_C(0), UINT32_C(0), { 0 } \
+}
+
+/* Platform-aware logical SAVE-slot projection of an RMBL file set. PSP bundles
+ * group files by top-level directory; other ROMX 0.2.0 platforms expose one
+ * slot per bundle file. Root-level PSP files remain individual slots. The key
+ * is a bundle-relative slot label, not a host path. */
+typedef struct romx_mutable_save_slot_info {
+    uint32_t struct_size;
+    uint32_t index;
+    uint32_t entry_count;
+    uint32_t key_size;
+    uint64_t data_size;
+    char key[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+} romx_mutable_save_slot_info_t;
+
+#define ROMX_MUTABLE_SAVE_SLOT_INFO_INIT { \
+    (uint32_t)sizeof(romx_mutable_save_slot_info_t), UINT32_C(0), \
+    UINT32_C(0), UINT32_C(0), UINT64_C(0), { 0 } \
 }
 
 /* Strict, versioned STATS JSON profile. Every field other than schema/version
@@ -1035,6 +1055,24 @@ ROMX_API romx_result_t romx_mutable_bundle_get_entry_count(
 ROMX_API romx_result_t romx_mutable_bundle_get_entry(
     const romx_mutable_bundle_t *bundle,
     uint32_t index,
+    romx_mutable_bundle_entry_info_t *entry,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_mutable_bundle_get_save_slot_count(
+    const romx_mutable_bundle_t *bundle,
+    uint32_t *count,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_mutable_bundle_get_save_slot(
+    const romx_mutable_bundle_t *bundle,
+    uint32_t index,
+    romx_mutable_save_slot_info_t *slot,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_mutable_bundle_get_save_slot_entry(
+    const romx_mutable_bundle_t *bundle,
+    uint32_t slot_index,
+    uint32_t entry_index,
     romx_mutable_bundle_entry_info_t *entry,
     romx_error_t *error);
 

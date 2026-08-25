@@ -79,11 +79,22 @@ typedef struct bundle_entry {
     uint32_t data_crc32;
 } bundle_entry_t;
 
+typedef struct bundle_save_slot {
+    char *key;
+    uint32_t *entry_indices;
+    uint32_t entry_count;
+    uint64_t data_size;
+} bundle_save_slot_t;
+
 struct romx_mutable_bundle {
     romx_mutable_file_t *file;
     bundle_entry_t *entries;
     uint32_t entry_count;
     uint32_t io_chunk_size;
+    romx_mutable_namespace_t object_namespace;
+    uint16_t platform_id;
+    bundle_save_slot_t *save_slots;
+    uint32_t save_slot_count;
 };
 
 static uint16_t read_le16(const uint8_t *bytes)
@@ -232,6 +243,110 @@ static int folded_path_pointer_compare(const void *left, const void *right)
     const char *const *a = (const char *const *)left;
     const char *const *b = (const char *const *)right;
     return ascii_fold_compare(*a, *b);
+}
+
+static size_t top_level_path_size(const char *path)
+{
+    const char *separator = strchr(path, '/');
+    return separator == NULL ? strlen(path) : (size_t)(separator - path);
+}
+
+static char *duplicate_top_level_path(const char *path)
+{
+    const size_t size = top_level_path_size(path);
+    char *copy = (char *)malloc(size + 1U);
+    if (copy == NULL) return NULL;
+    memcpy(copy, path, size);
+    copy[size] = '\0';
+    return copy;
+}
+
+static char *duplicate_path(const char *path)
+{
+    const size_t size = strlen(path);
+    char *copy = (char *)malloc(size + 1U);
+    if (copy == NULL) return NULL;
+    memcpy(copy, path, size + 1U);
+    return copy;
+}
+
+static int save_slot_uses_top_level_directory(uint16_t platform_id)
+{
+    /* PSP savedata is natively a directory with multiple member files. */
+    return platform_id == ROMX_PLATFORM_PSP;
+}
+
+static void destroy_save_slot_array(bundle_save_slot_t *slots,
+    uint32_t count)
+{
+    uint32_t index;
+    if (slots == NULL) return;
+    for (index = 0U; index < count; ++index) {
+        free(slots[index].key);
+        free(slots[index].entry_indices);
+    }
+    free(slots);
+}
+
+static romx_result_t build_save_slots(romx_mutable_bundle_t *bundle,
+    romx_error_t *error)
+{
+    bundle_save_slot_t *slots = NULL;
+    uint32_t slot_count = 0U;
+    uint32_t index;
+
+    for (index = 0U; index < bundle->entry_count; ++index) {
+        const char *path = bundle->entries[index].path;
+        char *candidate;
+        uint32_t slot_index;
+        candidate = save_slot_uses_top_level_directory(bundle->platform_id) &&
+                strchr(path, '/') != NULL
+            ? duplicate_top_level_path(path) : duplicate_path(path);
+        if (candidate == NULL) {
+            destroy_save_slot_array(slots, slot_count);
+            return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+                ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE slot key");
+        }
+        for (slot_index = 0U; slot_index < slot_count; ++slot_index) {
+            if (ascii_fold_equal(slots[slot_index].key, candidate)) break;
+        }
+        if (slot_index == slot_count) {
+            bundle_save_slot_t *grown = (bundle_save_slot_t *)realloc(slots,
+                (size_t)(slot_count + 1U) * sizeof(*grown));
+            if (grown == NULL) {
+                free(candidate);
+                destroy_save_slot_array(slots, slot_count);
+                return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+                    ROMX_OFFSET_UNKNOWN, "failed to grow SAVE slots");
+            }
+            slots = grown;
+            memset(&slots[slot_count], 0, sizeof(slots[slot_count]));
+            slots[slot_count].key = candidate;
+            slots[slot_count].entry_indices = (uint32_t *)calloc(
+                bundle->entry_count == UINT32_C(0) ? UINT32_C(1) :
+                    bundle->entry_count, sizeof(uint32_t));
+            if (slots[slot_count].entry_indices == NULL) {
+                destroy_save_slot_array(slots, slot_count + 1U);
+                return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+                    ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE slot entries");
+            }
+            ++slot_count;
+        } else {
+            free(candidate);
+        }
+        if (slots[slot_index].entry_count == UINT32_MAX ||
+            slots[slot_index].data_size > UINT64_MAX -
+                bundle->entries[index].data_size) {
+            destroy_save_slot_array(slots, slot_count);
+            return romx_error_set(error, ROMX_E_RANGE, 0,
+                ROMX_OFFSET_UNKNOWN, "SAVE slot entry data size overflows");
+        }
+        slots[slot_index].entry_indices[slots[slot_index].entry_count++] = index;
+        slots[slot_index].data_size += bundle->entries[index].data_size;
+    }
+    bundle->save_slots = slots;
+    bundle->save_slot_count = slot_count;
+    return ROMX_OK;
 }
 
 /* Returns 1 when unique, 0 for a collision, and -1 on allocation failure. */
@@ -693,6 +808,7 @@ void romx_mutable_bundle_close(romx_mutable_bundle_t *bundle)
     for (index = 0U; index < bundle->entry_count; ++index)
         free(bundle->entries[index].path);
     free(bundle->entries);
+    destroy_save_slot_array(bundle->save_slots, bundle->save_slot_count);
     romx_mutable_file_close(bundle->file);
     free(bundle);
 }
@@ -736,6 +852,16 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
     bundle = (romx_mutable_bundle_t *)calloc(1U, sizeof(*bundle));
     if (bundle == NULL) return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
         ROMX_OFFSET_UNKNOWN, "failed to allocate mutable bundle");
+    bundle->object_namespace = object_namespace;
+    {
+        romx_info_t info = ROMX_INFO_INIT;
+        result = romx_reader_get_info(reader, &info, error);
+        if (result != ROMX_OK) {
+            free(bundle);
+            return result;
+        }
+        bundle->platform_id = info.platform_id;
+    }
     result = romx_mutable_file_open(reader, object_namespace, key,
         &bundle->file, error);
     if (result != ROMX_OK) goto fail;
@@ -874,7 +1000,7 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
             entry_paths[index] = bundle->entries[index].path;
         unique = paths_portable_unique(entry_paths, entry_count);
         free(entry_paths);
-        if (unique <= 0) {
+    if (unique <= 0) {
             result = romx_error_set(error,
                 unique < 0 ? ROMX_E_OUT_OF_MEMORY : ROMX_E_MUTABLE_BUNDLE,
                 0, ROMX_OFFSET_UNKNOWN,
@@ -883,6 +1009,10 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
                     : "mutable bundle paths are not portable-unique");
             goto fail;
         }
+    }
+    if (object_namespace == ROMX_MUTABLE_NAMESPACE_SAVE) {
+        result = build_save_slots(bundle, error);
+        if (result != ROMX_OK) goto fail;
     }
     if (align64(path_cursor) != data_offset ||
         data_cursor != bundle_size) {
@@ -950,6 +1080,62 @@ romx_result_t romx_mutable_bundle_get_entry(
     memcpy(entry->path, stored->path, path_size + 1U);
     romx_error_clear(error);
     return ROMX_OK;
+}
+
+romx_result_t romx_mutable_bundle_get_save_slot_count(
+    const romx_mutable_bundle_t *bundle, uint32_t *count, romx_error_t *error)
+{
+    if (bundle == NULL || count == NULL ||
+        bundle->object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE)
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid SAVE slot count arguments");
+    *count = bundle->save_slot_count;
+    romx_error_clear(error);
+    return ROMX_OK;
+}
+
+romx_result_t romx_mutable_bundle_get_save_slot(
+    const romx_mutable_bundle_t *bundle, uint32_t index,
+    romx_mutable_save_slot_info_t *slot, romx_error_t *error)
+{
+    const bundle_save_slot_t *stored;
+    size_t key_size;
+    if (bundle == NULL || slot == NULL ||
+        slot->struct_size < (uint32_t)sizeof(*slot) ||
+        bundle->object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE ||
+        index >= bundle->save_slot_count)
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid SAVE slot arguments");
+    stored = &bundle->save_slots[index];
+    key_size = strlen(stored->key);
+    memset(slot, 0, sizeof(*slot));
+    slot->struct_size = (uint32_t)sizeof(*slot);
+    slot->index = index;
+    slot->entry_count = stored->entry_count;
+    slot->key_size = (uint32_t)key_size;
+    slot->data_size = stored->data_size;
+    memcpy(slot->key, stored->key, key_size + 1U);
+    romx_error_clear(error);
+    return ROMX_OK;
+}
+
+romx_result_t romx_mutable_bundle_get_save_slot_entry(
+    const romx_mutable_bundle_t *bundle, uint32_t slot_index,
+    uint32_t entry_index, romx_mutable_bundle_entry_info_t *entry,
+    romx_error_t *error)
+{
+    const bundle_save_slot_t *slot;
+    if (bundle == NULL || entry == NULL ||
+        bundle->object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE ||
+        slot_index >= bundle->save_slot_count)
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid SAVE slot entry arguments");
+    slot = &bundle->save_slots[slot_index];
+    if (entry_index >= slot->entry_count)
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "SAVE slot entry index is out of range");
+    return romx_mutable_bundle_get_entry(bundle,
+        slot->entry_indices[entry_index], entry, error);
 }
 
 romx_result_t romx_mutable_bundle_read_entry(romx_mutable_bundle_t *bundle,

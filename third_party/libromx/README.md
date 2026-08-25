@@ -19,7 +19,9 @@ ROMX 0.2.0 is the only wire format implemented by this branch.
 - optional payload probing when metadata or cover is absent;
 - fixed-capacity mutable SAVE, CHEAT, STATS, and PRIVATE objects;
 - deterministic uncompressed SAVE/CHEAT bundles with normalized paths and
-  per-file CRC32;
+  per-file CRC32; each SAVE object key is an independent multi-file save slot,
+  with platform-aware libromx APIs for PSP directory slots and per-file slots
+  on other ROMX 0.2.0 platforms;
 - strict versioned STATS JSON parsing, serialization, and explicit commit;
 - durable in-place mutable write, overwrite, and delete commits without moving
   the footer or rewriting immutable game data.
@@ -57,7 +59,11 @@ multi-file game, it is normally a descriptor such as CUE, GDI, or M3U.
 - Use `romx_reader_map_payload` when a core accepts one memory buffer.
 - Use `romx_vfs_file_open` to expose every RIDX path requested by a multi-file
   core.
-- Use `romx_mutable_bundle_open` for interoperable SAVE/CHEAT file sets.
+- Use `romx_mutable_bundle_open` for interoperable SAVE/CHEAT file sets. A
+  SAVE object key is one independent logical slot; enumerate mutable objects,
+  filter the SAVE namespace, and open each selected key separately. Then use
+  `romx_mutable_bundle_get_save_slot*` to enumerate multiple logical saves
+  inside one bundle.
 - Use `romx_mutable_stats_read` for the strict STATS profile.
 - Use `romx_mutable_write_*` and `romx_mutable_delete_path` only after an
   explicit frontend save/delete action.

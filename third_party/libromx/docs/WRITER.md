@@ -66,14 +66,29 @@ affected slot, but immutable game content remains readable.
 ## SAVE/CHEAT bundles and STATS
 
 `romx_mutable_bundle_write_path_entries` accepts an explicit list of regular
-source files and normalized relative paths. It sorts paths canonically,
-rejects traversal, case-folding collisions, symlinks and non-regular files,
-and streams an uncompressed `RMBL` object through the existing durable mutable
-transaction. It does not create a tar file or scan a directory.
+source files and normalized relative paths. For `SAVE`, the mutable object key
+is one stable logical save-slot label; multiple keys such as `slot-1` and
+`slot-2` can coexist in the same container, and each key gets an independent
+transaction and fixed extent. The explicit paths under one call form the
+multi-file contents of that one slot. The key is not a host path. The function
+sorts paths canonically, rejects traversal, case-folding collisions, symlinks
+and non-regular files, and streams an uncompressed `RMBL` object through the
+existing durable mutable transaction. It does not create a tar file or scan a
+directory.
 
-`romx_mutable_bundle_open` validates the outer object CRC32, bundle header,
-directory, path table, zero padding, and every file CRC32 before exposing
-entries. The bundle borrows its reader.
+`romx_mutable_bundle_open` validates the selected outer object CRC32, bundle
+header, directory, path table, zero padding, and every file CRC32 before
+exposing entries. The bundle borrows its reader. The bundle `entry_count` is
+the number of files in the whole bundle, not the number of SAVE slots;
+`romx_mutable_save_slot_info_t.entry_count` is the number of files in one
+selected slot. Enumerate
+`SAVE` objects with `romx_reader_get_mutable_object_count` and
+`romx_reader_get_mutable_object`, filtering `object_namespace` for
+`ROMX_MUTABLE_NAMESPACE_SAVE`. For each bundle, call
+`romx_mutable_bundle_get_save_slot_count`, `romx_mutable_bundle_get_save_slot`,
+and `romx_mutable_bundle_get_save_slot_entry` to expose the platform-aware slot
+projection defined by the ROMX specification: PSP groups files by top-level
+directory, while other ROMX 0.2.0 platforms expose one slot per bundle file.
 
 `romx_mutable_stats_serialize_json` and `romx_mutable_stats_parse_json`
 implement the strict `romx.stats` version 1 schema.

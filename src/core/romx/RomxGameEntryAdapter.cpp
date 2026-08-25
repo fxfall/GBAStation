@@ -470,11 +470,9 @@ std::string pspDiscId(const GameEntry& entry)
     return readPspDiscIdFromRomx(entry.path);
 }
 
-std::optional<std::string> readSfoValueFromFile(const fs::path& directory,
-                                                const char* key)
+std::optional<fs::path> findPspSfoPath(const fs::path& directory)
 {
     std::error_code ec;
-    fs::path sfoPath;
     for (const fs::directory_entry& child : fs::directory_iterator(
              directory, fs::directory_options::skip_permission_denied, ec))
     {
@@ -490,19 +488,34 @@ std::optional<std::string> readSfoValueFromFile(const fs::path& directory,
             return static_cast<char>(std::toupper(c));
         });
         if (filename == "PARAM.SFO")
-        {
-            sfoPath = child.path();
-            break;
-        }
+            return child.path();
         ec.clear();
     }
-    if (sfoPath.empty())
+    return std::nullopt;
+}
+
+bool isPspSfoFilename(const fs::path& path)
+{
+    std::string filename = path.filename().string();
+    std::transform(filename.begin(), filename.end(), filename.begin(),
+                   [](unsigned char c) {
+                       return static_cast<char>(std::toupper(c));
+                   });
+    return filename == "PARAM.SFO";
+}
+
+std::optional<std::string> readSfoValueFromFile(const fs::path& directory,
+                                                const char* key)
+{
+    const std::optional<fs::path> sfoPath = findPspSfoPath(directory);
+    if (!sfoPath)
         return std::nullopt;
-    const uintmax_t fileSize = fs::file_size(sfoPath, ec);
+    std::error_code ec;
+    const uintmax_t fileSize = fs::file_size(*sfoPath, ec);
     if (ec || fileSize == 0 || fileSize > kPspSfoMaximumSize)
         return std::nullopt;
     std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
-    std::ifstream file(sfoPath, std::ios::binary);
+    std::ifstream file(*sfoPath, std::ios::binary);
     if (!file.read(reinterpret_cast<char*>(bytes.data()),
                    static_cast<std::streamsize>(bytes.size())))
         return std::nullopt;
@@ -536,6 +549,58 @@ bool isPspSaveDirectoryForDisc(const fs::path& directory,
     return true;
 }
 
+struct PspSaveDirectory
+{
+    fs::path path;
+    std::string name;
+};
+
+std::vector<PspSaveDirectory> listPspSaveDirectories(const fs::path& root,
+                                                      const std::string& discId)
+{
+    std::vector<PspSaveDirectory> directories;
+    std::error_code ec;
+    if (!fs::is_directory(root, ec) || ec)
+        return directories;
+
+    for (const fs::directory_entry& directory : fs::directory_iterator(
+             root, fs::directory_options::skip_permission_denied, ec))
+    {
+        if (ec)
+            break;
+        if (!directory.is_directory(ec) || directory.is_symlink(ec))
+        {
+            ec.clear();
+            continue;
+        }
+        if (isPspSaveDirectoryForDisc(directory.path(), discId))
+        {
+            directories.push_back({directory.path(), directory.path().filename().string()});
+        }
+        ec.clear();
+    }
+
+    std::stable_sort(directories.begin(), directories.end(), [&discId](
+        const PspSaveDirectory& left, const PspSaveDirectory& right) {
+        const bool leftExact = normalizePspDiscId(left.name) == discId;
+        const bool rightExact = normalizePspDiscId(right.name) == discId;
+        if (leftExact != rightExact)
+            return leftExact;
+        return left.name < right.name;
+    });
+    return directories;
+}
+
+std::optional<PspSaveDirectory> findPspSaveDirectory(const fs::path& root,
+                                                     const std::string& discId)
+{
+    const std::vector<PspSaveDirectory> directories =
+        listPspSaveDirectories(root, discId);
+    if (directories.empty())
+        return std::nullopt;
+    return directories.front();
+}
+
 bool pspSaveBundlePathMatches(const fs::path& relative,
                               const fs::path& root,
                               const std::string& discId)
@@ -553,6 +618,16 @@ bool pspSaveBundlePathMatches(const fs::path& relative,
     // will be installed atomically with the rest of the savedata.
     return !fs::exists(targetDirectory, ec) ||
            isPspSaveDirectoryForDisc(targetDirectory, discId);
+}
+
+bool pspSaveBundlePathHasDiscPrefix(const fs::path& relative,
+                                    const std::string& discId)
+{
+    auto component = relative.begin();
+    if (component == relative.end())
+        return false;
+    const std::string directoryName = normalizePspDiscId(component->string());
+    return !directoryName.empty() && directoryName.rfind(discId, 0) == 0;
 }
 
 bool pspCheatBundlePathMatches(const fs::path& relative,
@@ -687,9 +762,77 @@ bool validateSaveSlotKeyImpl(const std::string& key, std::string* error)
     return true;
 }
 
+bool validateBundleSlotKey(const std::string& key)
+{
+    if (key.empty() || key.size() > ROMX_MUTABLE_BUNDLE_PATH_CAPACITY ||
+        !validUtf8(key) || key.find('\0') != std::string::npos ||
+        key.front() == '/' || key.back() == '/' ||
+        key.find('\\') != std::string::npos)
+        return false;
+    std::size_t component = 0;
+    for (std::size_t index = 0; index <= key.size(); ++index)
+    {
+        if (index < key.size() && key[index] != '/')
+            continue;
+        const std::size_t componentSize = index - component;
+        if (componentSize == 0 ||
+            (componentSize == 1 && key[component] == '.') ||
+            (componentSize == 2 && key[component] == '.' &&
+             key[component + 1U] == '.'))
+            return false;
+        component = index + 1U;
+    }
+    return true;
+}
+
 const char* mutableBundleKey(const GameEntry& entry)
 {
     return isPsp(entry) ? "ppsspp" : "libretro";
+}
+
+constexpr const char* kBundleSlotSelectorPrefix = "@romx-save-slot:";
+
+std::string makeBundleSlotSelector(const std::string& objectKey,
+                                   const std::string& slotKey)
+{
+    // This is an adapter-only token, not a ROMX key.  Length-prefixing the
+    // object key keeps arbitrary valid UTF-8 labels unambiguous.
+    return std::string(kBundleSlotSelectorPrefix) +
+           std::to_string(objectKey.size()) + ":" + objectKey + slotKey;
+}
+
+bool parseBundleSlotSelector(const std::string& selector,
+                             std::string& objectKey,
+                             std::string& slotKey)
+{
+    objectKey.clear();
+    slotKey.clear();
+    const std::string prefix(kBundleSlotSelectorPrefix);
+    if (selector.rfind(prefix, 0) != 0)
+        return false;
+
+    const std::size_t lengthStart = prefix.size();
+    const std::size_t separator = selector.find(':', lengthStart);
+    if (separator == std::string::npos || separator == lengthStart)
+        return false;
+    std::size_t objectLength = 0;
+    try
+    {
+        objectLength = std::stoull(selector.substr(lengthStart,
+                                                   separator - lengthStart));
+    }
+    catch (...)
+    {
+        return false;
+    }
+    const std::size_t objectStart = separator + 1U;
+    if (objectLength == 0 || objectStart > selector.size() ||
+        objectLength > selector.size() - objectStart)
+        return false;
+    objectKey = selector.substr(objectStart, objectLength);
+    slotKey = selector.substr(objectStart + objectLength);
+    return validateSaveSlotKeyImpl(objectKey, nullptr) &&
+           validateBundleSlotKey(slotKey);
 }
 
 fs::path resolvedCheatPath(const GameEntry& entry)
@@ -833,7 +976,8 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
                          bool overwrite, std::string* error,
                          std::vector<fs::path>* restoredPaths = nullptr,
                          const std::function<bool(const fs::path&)>& validator = {},
-                         const BundleOutputMapper& outputMapper = {})
+                         const BundleOutputMapper& outputMapper = {},
+                         const std::string* requestedSaveSlot = nullptr)
 {
     romx_error_t err{};
     romx_mutable_bundle_t* bundle = nullptr;
@@ -861,6 +1005,52 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
                                      countResult));
         return SyncResult::Failed;
     }
+    std::vector<uint32_t> selectedEntries;
+    if (requestedSaveSlot != nullptr) {
+        if (ns != ROMX_MUTABLE_NAMESPACE_SAVE) {
+            romx_mutable_bundle_close(bundle);
+            assignError(error, "SAVE slot selection used for a non-SAVE bundle");
+            return SyncResult::Failed;
+        }
+        uint32_t slotCount = 0;
+        const romx_result_t slotCountResult =
+            romx_mutable_bundle_get_save_slot_count(bundle, &slotCount, &err);
+        if (slotCountResult != ROMX_OK) {
+            romx_mutable_bundle_close(bundle);
+            assignError(error, errorText("romx_mutable_bundle_get_save_slot_count",
+                                         err, slotCountResult));
+            return SyncResult::Failed;
+        }
+        for (uint32_t slotIndex = 0; slotIndex < slotCount; ++slotIndex) {
+            romx_mutable_save_slot_info_t slot = ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+            if (romx_mutable_bundle_get_save_slot(bundle, slotIndex, &slot,
+                                                   &err) != ROMX_OK)
+                continue;
+            if (std::string(slot.key, slot.key_size) != *requestedSaveSlot)
+                continue;
+            selectedEntries.reserve(slot.entry_count);
+            for (uint32_t entryIndex = 0; entryIndex < slot.entry_count;
+                 ++entryIndex) {
+                romx_mutable_bundle_entry_info_t selected =
+                    ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
+                if (romx_mutable_bundle_get_save_slot_entry(
+                        bundle, slotIndex, entryIndex, &selected, &err) != ROMX_OK) {
+                    romx_mutable_bundle_close(bundle);
+                    assignError(error, errorText(
+                        "romx_mutable_bundle_get_save_slot_entry", err,
+                        ROMX_E_MUTABLE_BUNDLE));
+                    return SyncResult::Failed;
+                }
+                selectedEntries.push_back(selected.index);
+            }
+            break;
+        }
+        if (selectedEntries.empty()) {
+            romx_mutable_bundle_close(bundle);
+            return SyncResult::Skipped;
+        }
+        count = static_cast<uint32_t>(selectedEntries.size());
+    }
     std::error_code ec;
     fs::create_directories(destination, ec);
     if (ec)
@@ -880,8 +1070,10 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
     for (uint32_t index = 0; index < count; ++index)
     {
         romx_mutable_bundle_entry_info_t info = ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
+        const uint32_t bundleIndex = requestedSaveSlot == nullptr
+            ? index : selectedEntries[index];
         const romx_result_t entryResult =
-            romx_mutable_bundle_get_entry(bundle, index, &info, &err);
+            romx_mutable_bundle_get_entry(bundle, bundleIndex, &info, &err);
         if (entryResult != ROMX_OK)
         {
             romx_mutable_bundle_close(bundle);
@@ -924,7 +1116,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             romx_mutable_bundle_close(bundle);
             return SyncResult::Skipped;
         }
-        pending.push_back({index, info.data_size, std::move(outputRelative)});
+        pending.push_back({bundleIndex, info.data_size, std::move(outputRelative)});
     }
 
     if (pending.empty())
@@ -1010,6 +1202,201 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
     return SyncResult::Success;
 }
 
+BundleOutputMapper pspSaveOutputMapper(const fs::path& localRoot,
+                                       const std::string& discId,
+                                       const std::string& requestedDirectory,
+                                       std::string& targetDirectory)
+{
+    const std::optional<PspSaveDirectory> localDirectory =
+        findPspSaveDirectory(localRoot, discId);
+    if (localDirectory)
+        targetDirectory = localDirectory->name;
+    else if (!requestedDirectory.empty())
+        targetDirectory = requestedDirectory;
+
+    std::string selectedSourceDirectory = requestedDirectory;
+    return [&targetDirectory, &selectedSourceDirectory](const fs::path& relative,
+                                                         uint32_t /*index*/,
+                                                         uint32_t /*count*/)
+        -> std::optional<fs::path> {
+        auto component = relative.begin();
+        if (component == relative.end())
+            return std::nullopt;
+        const std::string sourceDirectory = component->string();
+        if (selectedSourceDirectory.empty())
+            selectedSourceDirectory = sourceDirectory;
+        if (sourceDirectory != selectedSourceDirectory)
+            return std::nullopt;
+        if (targetDirectory.empty())
+            targetDirectory = sourceDirectory;
+
+        fs::path mapped = targetDirectory;
+        ++component;
+        for (; component != relative.end(); ++component)
+            mapped /= *component;
+        return mapped;
+    };
+}
+
+std::string pspTemporarySuffix()
+{
+    const uint64_t ticks = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    return std::to_string(ticks);
+}
+
+SyncResult extractPspSaveBundle(const romx_reader_t* reader,
+                                const GameEntry& entry,
+                                const char* key,
+                                const std::string& requestedDirectory,
+                                bool overwrite,
+                                std::string* error)
+{
+    const std::string discId = pspDiscId(entry);
+    if (discId.empty())
+    {
+        assignError(error, "PSP ROMX payload does not contain a valid DISC_ID");
+        return SyncResult::Failed;
+    }
+
+    const fs::path root = pspSaveRoot();
+    const std::optional<PspSaveDirectory> localDirectory =
+        findPspSaveDirectory(root, discId);
+    // First-use import must not replace an already existing native savedata
+    // directory.  Explicit slot restore passes overwrite=true.
+    if (!overwrite && localDirectory)
+        return SyncResult::Skipped;
+
+    std::error_code ec;
+    fs::create_directories(root, ec);
+    if (ec)
+    {
+        assignError(error, "cannot create PSP savedata root: " + ec.message());
+        return SyncResult::Failed;
+    }
+
+    const std::string suffix = pspTemporarySuffix();
+    const fs::path staging = root / (".romx-psp-restore-" + suffix);
+    fs::remove_all(staging, ec);
+    ec.clear();
+    if (!fs::create_directory(staging, ec) || ec)
+    {
+        assignError(error, "cannot create PSP restore staging directory: " +
+                            ec.message());
+        return SyncResult::Failed;
+    }
+
+    std::string targetDirectory;
+    const BundleOutputMapper mapper = pspSaveOutputMapper(
+        root, discId, requestedDirectory, targetDirectory);
+    const auto validator = [discId](const fs::path& relative) {
+        // The bundle is extracted into an empty staging tree.  Do not ask
+        // for PARAM.SFO from a directory while that same bundle is still
+        // being populated; entry order is not a validity condition.
+        return pspSaveBundlePathHasDiscPrefix(relative, discId);
+    };
+    std::vector<fs::path> restoredPaths;
+    const SyncResult result = extractBundle(
+        reader, ROMX_MUTABLE_NAMESPACE_SAVE, key, staging, true, error,
+        &restoredPaths, validator, mapper);
+    if (result != SyncResult::Success || targetDirectory.empty())
+    {
+        fs::remove_all(staging, ec);
+        return result == SyncResult::Success ? SyncResult::Skipped : result;
+    }
+
+    const fs::path stagedDirectory = staging / targetDirectory;
+    const fs::path finalDirectory = root / targetDirectory;
+    if (!fs::is_directory(stagedDirectory, ec) || ec ||
+        !isWithinDirectory(root, finalDirectory))
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, "PSP ROMX savedata directory is invalid");
+        return SyncResult::Failed;
+    }
+
+    // When a ROMX slot came from a different PSP savedata suffix, keep the
+    // local PARAM.SFO identity while replacing the slot's actual save files;
+    // PPSSPP uses SAVEDATA_DIRECTORY to validate the on-device folder name.
+    if (localDirectory)
+    {
+        const std::optional<fs::path> localSfo = findPspSfoPath(localDirectory->path);
+        if (localSfo)
+        {
+            const std::optional<fs::path> stagedSfo = findPspSfoPath(stagedDirectory);
+            if (stagedSfo)
+            {
+                fs::remove(*stagedSfo, ec);
+                if (ec)
+                {
+                    fs::remove_all(staging, ec);
+                    assignError(error, "cannot prepare PSP savedata metadata: " +
+                                        ec.message());
+                    return SyncResult::Failed;
+                }
+            }
+            fs::copy_file(*localSfo, stagedDirectory / localSfo->filename(),
+                          fs::copy_options::overwrite_existing, ec);
+            if (ec)
+            {
+                fs::remove_all(staging, ec);
+                assignError(error, "cannot preserve PSP savedata metadata: " +
+                                    ec.message());
+                return SyncResult::Failed;
+            }
+        }
+    }
+    if (!isPspSaveDirectoryForDisc(stagedDirectory, discId))
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, "PSP ROMX slot does not contain valid savedata metadata");
+        return SyncResult::Failed;
+    }
+
+    const fs::path backupDirectory =
+        root / (".romx-psp-backup-" + suffix);
+    fs::remove_all(backupDirectory, ec);
+    ec.clear();
+    bool movedExisting = false;
+    if (fs::exists(finalDirectory, ec) && !ec)
+    {
+        if (!overwrite)
+        {
+            fs::remove_all(staging, ec);
+            return SyncResult::Skipped;
+        }
+        fs::rename(finalDirectory, backupDirectory, ec);
+        if (ec)
+        {
+            fs::remove_all(staging, ec);
+            assignError(error, "cannot stage existing PSP savedata directory: " +
+                                ec.message());
+            return SyncResult::Failed;
+        }
+        movedExisting = true;
+    }
+
+    fs::rename(stagedDirectory, finalDirectory, ec);
+    if (ec)
+    {
+        if (movedExisting)
+        {
+            std::error_code restoreError;
+            fs::rename(backupDirectory, finalDirectory, restoreError);
+        }
+        fs::remove_all(staging, ec);
+        assignError(error, "cannot install PSP savedata directory: " + ec.message());
+        return SyncResult::Failed;
+    }
+    fs::remove_all(staging, ec);
+    if (movedExisting)
+    {
+        ec.clear();
+        fs::remove_all(backupDirectory, ec);
+    }
+    return SyncResult::Success;
+}
+
 void updateCheatPathFromRestored(GameEntry& entry,
                                  const std::vector<fs::path>& restoredPaths)
 {
@@ -1033,8 +1420,23 @@ void updateCheatPathFromRestored(GameEntry& entry,
         ? restoredPaths.front() : *preferred).string();
 }
 
+SyncResult importBundleNamespace(GameEntry& entry,
+                                 romx_mutable_namespace_t objectNamespace,
+                                 bool overwrite, std::string* error,
+                                 const std::string* requestedKey);
+
 void importMutableObjects(const std::string& path, GameEntry& entry)
 {
+    if (isPsp(entry))
+    {
+        // PSP has one active native savedata directory locally.  Import only
+        // the highest-priority ROMX SAVE object/directory on first use; the
+        // frontend exposes the remaining logical slots for explicit restore.
+        std::string ignored;
+        (void)importBundleNamespace(entry, ROMX_MUTABLE_NAMESPACE_SAVE, false,
+                                    &ignored, nullptr);
+    }
+
     romx_reader_t* reader = nullptr;
     romx_error_t err{};
     if (romx_reader_open_path(path.c_str(), nullptr, &reader, &err) != ROMX_OK)
@@ -1052,6 +1454,8 @@ void importMutableObjects(const std::string& path, GameEntry& entry)
             continue;
         if (object.object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE &&
             object.object_namespace != ROMX_MUTABLE_NAMESPACE_CHEAT)
+            continue;
+        if (isPsp(entry) && object.object_namespace == ROMX_MUTABLE_NAMESPACE_SAVE)
             continue;
         const fs::path root(namespaceDirectory(entry, object.object_namespace));
         std::vector<fs::path> restoredPaths;
@@ -1143,11 +1547,26 @@ SyncResult importBundleNamespace(GameEntry& entry,
             : BundleOutputMapper{};
     for (const std::string& key : keys)
     {
+        std::string objectKey = key;
+        std::string requestedSlot;
+        const bool hasBundleSelector =
+            parseBundleSlotSelector(key, objectKey, requestedSlot);
         std::string bundleError;
         std::vector<fs::path> restoredPaths;
-        result = extractBundle(reader, objectNamespace, key.c_str(), root,
-                               overwrite, &bundleError, &restoredPaths, validator,
-                               outputMapper);
+        if (isPsp(entry) && objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE)
+        {
+            result = extractPspSaveBundle(reader, entry, objectKey.c_str(),
+                                          hasBundleSelector ? requestedSlot
+                                                         : std::string{},
+                                          overwrite, &bundleError);
+        }
+        else
+        {
+            result = extractBundle(reader, objectNamespace, objectKey.c_str(), root,
+                                   overwrite, &bundleError, &restoredPaths,
+                                   validator, outputMapper,
+                                   hasBundleSelector ? &requestedSlot : nullptr);
+        }
         if (result == SyncResult::Success)
         {
             if (objectNamespace == ROMX_MUTABLE_NAMESPACE_CHEAT &&
@@ -1351,6 +1770,48 @@ BundleOutputMapper batterySaveOutputMapper(const GameEntry& entry)
     };
 }
 
+bool collectPspDirectoryFiles(const fs::path& root,
+                              const PspSaveDirectory& directory,
+                              std::vector<std::string>& relativePaths,
+                              std::vector<std::string>& sourcePaths)
+{
+    std::error_code ec;
+    fs::recursive_directory_iterator iterator(
+        directory.path, fs::directory_options::skip_permission_denied, ec);
+    const fs::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(ec))
+    {
+        if (ec)
+        {
+            ec.clear();
+            continue;
+        }
+        const fs::directory_entry& item = *iterator;
+        if (item.is_symlink(ec))
+        {
+            iterator.disable_recursion_pending();
+            ec.clear();
+            continue;
+        }
+        if (!item.is_regular_file(ec))
+        {
+            ec.clear();
+            continue;
+        }
+        if (isSaveStateArtifact(item.path()))
+            continue;
+        const fs::path relative = fs::relative(item.path(), root, ec);
+        if (ec || relative.empty())
+        {
+            ec.clear();
+            continue;
+        }
+        relativePaths.push_back(relative.generic_string());
+        sourcePaths.push_back(item.path().string());
+    }
+    return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
+}
+
 bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
                         std::vector<std::string>& relativePaths,
                         std::vector<std::string>& sourcePaths)
@@ -1375,62 +1836,15 @@ bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
         if (ns == ROMX_MUTABLE_NAMESPACE_SAVE)
         {
             const fs::path root = pspSaveRoot();
-            if (!fs::is_directory(root, ec))
+            const std::optional<PspSaveDirectory> directory =
+                findPspSaveDirectory(root, discId);
+            if (!directory)
                 return false;
-            // Enumerate every matching savedata directory, not just one
-            // stem.  Games commonly create ULJM054750001, ULJM054750002, …
-            // for independent in-game save slots.
-            for (const fs::directory_entry& directory : fs::directory_iterator(
-                     root, fs::directory_options::skip_permission_denied, ec))
-            {
-                if (ec)
-                    break;
-                if (!directory.is_directory(ec) || directory.is_symlink(ec))
-                {
-                    ec.clear();
-                    continue;
-                }
-                if (!isPspSaveDirectoryForDisc(directory.path(), discId))
-                {
-                    ec.clear();
-                    continue;
-                }
-                fs::recursive_directory_iterator iterator(
-                    directory.path(), fs::directory_options::skip_permission_denied, ec);
-                const fs::recursive_directory_iterator end;
-                for (; iterator != end; iterator.increment(ec))
-                {
-                    if (ec)
-                    {
-                        ec.clear();
-                        continue;
-                    }
-                    const fs::directory_entry& item = *iterator;
-                    if (item.is_symlink(ec))
-                    {
-                        iterator.disable_recursion_pending();
-                        ec.clear();
-                        continue;
-                    }
-                    if (!item.is_regular_file(ec))
-                    {
-                        ec.clear();
-                        continue;
-                    }
-                    if (isSaveStateArtifact(item.path()))
-                        continue;
-                    const fs::path relative = fs::relative(item.path(), root, ec);
-                    if (ec || relative.empty())
-                    {
-                        ec.clear();
-                        continue;
-                    }
-                    relativePaths.push_back(relative.generic_string());
-                    sourcePaths.push_back(item.path().string());
-                }
-                ec.clear();
-            }
-            return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
+            // A local PPSSPP installation has one active savedata directory.
+            // ROMX slots are separated at the mutable-object/slot layer; do
+            // not merge every local DISC_ID-prefixed directory into one slot.
+            return collectPspDirectoryFiles(root, *directory,
+                                            relativePaths, sourcePaths);
         }
     }
     if (ns == ROMX_MUTABLE_NAMESPACE_SAVE)
@@ -1497,19 +1911,13 @@ bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
     return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
 }
 
-SyncResult writeBundle(const GameEntry& entry, romx_mutable_namespace_t ns,
-                       const char* key, std::string* error)
+SyncResult writeBundlePathEntries(const GameEntry& entry,
+                                  romx_mutable_namespace_t ns,
+                                  const char* key,
+                                  const std::vector<std::string>& relativePaths,
+                                  const std::vector<std::string>& sourcePaths,
+                                  std::string* error)
 {
-    if (isPsp(entry) && pspDiscId(entry).empty())
-    {
-        assignError(error, "PSP ROMX payload does not contain a valid DISC_ID");
-        return SyncResult::Failed;
-    }
-    std::vector<std::string> relativePaths;
-    std::vector<std::string> sourcePaths;
-    if (!collectBundleFiles(entry, ns, relativePaths, sourcePaths))
-        return SyncResult::Skipped;
-
     std::vector<romx_mutable_bundle_path_entry_t> files;
     files.reserve(relativePaths.size());
     for (std::size_t index = 0; index < relativePaths.size(); ++index)
@@ -1535,6 +1943,376 @@ SyncResult writeBundle(const GameEntry& entry, romx_mutable_namespace_t ns,
         return SyncResult::Failed;
     }
     return SyncResult::Success;
+}
+
+SyncResult writeBundle(const GameEntry& entry, romx_mutable_namespace_t ns,
+                       const char* key, std::string* error)
+{
+    if (isPsp(entry) && pspDiscId(entry).empty())
+    {
+        assignError(error, "PSP ROMX payload does not contain a valid DISC_ID");
+        return SyncResult::Failed;
+    }
+    std::vector<std::string> relativePaths;
+    std::vector<std::string> sourcePaths;
+    if (!collectBundleFiles(entry, ns, relativePaths, sourcePaths))
+        return SyncResult::Skipped;
+    return writeBundlePathEntries(entry, ns, key, relativePaths, sourcePaths, error);
+}
+
+bool collectRegularBundleFiles(const fs::path& root,
+                               std::vector<std::string>& relativePaths,
+                               std::vector<std::string>& sourcePaths)
+{
+    std::error_code ec;
+    fs::recursive_directory_iterator iterator(
+        root, fs::directory_options::skip_permission_denied, ec);
+    const fs::recursive_directory_iterator end;
+    for (; iterator != end; iterator.increment(ec))
+    {
+        if (ec)
+        {
+            ec.clear();
+            continue;
+        }
+        const fs::directory_entry& item = *iterator;
+        if (item.is_symlink(ec))
+        {
+            iterator.disable_recursion_pending();
+            ec.clear();
+            continue;
+        }
+        if (!item.is_regular_file(ec))
+        {
+            ec.clear();
+            continue;
+        }
+        if (isSaveStateArtifact(item.path()))
+            continue;
+        const fs::path relative = fs::relative(item.path(), root, ec);
+        if (ec || relative.empty())
+        {
+            ec.clear();
+            continue;
+        }
+        relativePaths.push_back(relative.generic_string());
+        sourcePaths.push_back(item.path().string());
+    }
+    return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
+}
+
+SyncResult mergeSaveBundleSlot(const GameEntry& entry,
+                               const std::string& objectKey,
+                               const std::string& selectedSlot,
+                               std::string* error)
+{
+    const fs::path source = gameBatterySavePath(entry);
+    std::error_code ec;
+    if (!fs::is_regular_file(source, ec) || fs::is_symlink(source, ec))
+        return SyncResult::Skipped;
+
+    const fs::path root = namespaceDirectory(entry, ROMX_MUTABLE_NAMESPACE_SAVE);
+    const fs::path staging = root / (".romx-save-merge-" + pspTemporarySuffix());
+    fs::remove_all(staging, ec);
+    ec.clear();
+    if (!fs::create_directories(staging, ec) || ec)
+    {
+        assignError(error, "cannot create SAVE merge staging directory: " +
+                            ec.message());
+        return SyncResult::Failed;
+    }
+
+    romx_reader_t* reader = nullptr;
+    romx_error_t err{};
+    if (romx_reader_open_path(entry.path.c_str(), nullptr, &reader, &err) != ROMX_OK)
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, errorText("romx_reader_open_path", err, ROMX_E_IO));
+        return SyncResult::Failed;
+    }
+
+    romx_mutable_bundle_t* bundle = nullptr;
+    const romx_result_t bundleResult = romx_mutable_bundle_open(
+        reader, ROMX_MUTABLE_NAMESPACE_SAVE, objectKey.c_str(), nullptr,
+        &bundle, &err);
+    if (bundleResult != ROMX_OK)
+    {
+        romx_reader_close(reader);
+        fs::remove_all(staging, ec);
+        return bundleResult == ROMX_E_MUTABLE_ENTRY ||
+                   bundleResult == ROMX_E_MUTABLE_BUNDLE
+            ? SyncResult::Skipped : SyncResult::Failed;
+    }
+
+    std::vector<std::string> selectedPaths;
+    uint32_t slotCount = 0;
+    if (romx_mutable_bundle_get_save_slot_count(bundle, &slotCount, &err) != ROMX_OK)
+    {
+        romx_mutable_bundle_close(bundle);
+        romx_reader_close(reader);
+        fs::remove_all(staging, ec);
+        assignError(error, errorText("romx_mutable_bundle_get_save_slot_count",
+                                     err, ROMX_E_MUTABLE_BUNDLE));
+        return SyncResult::Failed;
+    }
+    for (uint32_t slotIndex = 0; slotIndex < slotCount; ++slotIndex)
+    {
+        romx_mutable_save_slot_info_t info = ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+        if (romx_mutable_bundle_get_save_slot(bundle, slotIndex, &info, &err) != ROMX_OK)
+            continue;
+        if (std::string(info.key, info.key_size) != selectedSlot)
+            continue;
+        for (uint32_t entryIndex = 0; entryIndex < info.entry_count; ++entryIndex)
+        {
+            romx_mutable_bundle_entry_info_t entryInfo =
+                ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
+            if (romx_mutable_bundle_get_save_slot_entry(bundle, slotIndex,
+                                                        entryIndex, &entryInfo,
+                                                        &err) != ROMX_OK)
+            {
+                romx_mutable_bundle_close(bundle);
+                romx_reader_close(reader);
+                fs::remove_all(staging, ec);
+                assignError(error, errorText(
+                    "romx_mutable_bundle_get_save_slot_entry", err,
+                    ROMX_E_MUTABLE_BUNDLE));
+                return SyncResult::Failed;
+            }
+            selectedPaths.emplace_back(entryInfo.path,
+                                       entryInfo.path_size);
+        }
+        break;
+    }
+    if (selectedPaths.empty())
+    {
+        romx_mutable_bundle_close(bundle);
+        romx_reader_close(reader);
+        fs::remove_all(staging, ec);
+        return SyncResult::Skipped;
+    }
+
+    const SyncResult extracted = extractBundle(
+        reader, ROMX_MUTABLE_NAMESPACE_SAVE, objectKey.c_str(), staging, true,
+        error);
+    romx_mutable_bundle_close(bundle);
+    romx_reader_close(reader);
+    if (extracted != SyncResult::Success)
+    {
+        fs::remove_all(staging, ec);
+        return extracted;
+    }
+
+    const std::string expectedExtension = [&source]() {
+        std::string value = source.extension().string();
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char character) {
+                           return static_cast<char>(std::tolower(character));
+                       });
+        return value;
+    }();
+    std::string replacement = selectedPaths.front();
+    for (const std::string& selectedPath : selectedPaths)
+    {
+        std::string extension = fs::path(selectedPath).extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char character) {
+                           return static_cast<char>(std::tolower(character));
+                       });
+        if (extension == expectedExtension)
+        {
+            replacement = selectedPath;
+            break;
+        }
+    }
+    const fs::path stagedReplacement = staging / fs::path(replacement);
+    fs::create_directories(stagedReplacement.parent_path(), ec);
+    if (ec || !fs::copy_file(source, stagedReplacement,
+                             fs::copy_options::overwrite_existing, ec) || ec)
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, "cannot update selected SAVE slot: " + ec.message());
+        return SyncResult::Failed;
+    }
+
+    std::vector<std::string> relativePaths;
+    std::vector<std::string> sourcePaths;
+    if (!collectRegularBundleFiles(staging, relativePaths, sourcePaths))
+    {
+        fs::remove_all(staging, ec);
+        return SyncResult::Skipped;
+    }
+    const SyncResult written = writeBundlePathEntries(
+        entry, ROMX_MUTABLE_NAMESPACE_SAVE, objectKey.c_str(), relativePaths,
+        sourcePaths, error);
+    fs::remove_all(staging, ec);
+    return written;
+}
+
+bool pspMutableBundleExists(const std::string& path, const std::string& key)
+{
+    romx_reader_t* reader = nullptr;
+    romx_error_t err{};
+    if (romx_reader_open_path(path.c_str(), nullptr, &reader, &err) != ROMX_OK)
+        return false;
+    romx_mutable_bundle_t* bundle = nullptr;
+    const romx_result_t result = romx_mutable_bundle_open(
+        reader, ROMX_MUTABLE_NAMESPACE_SAVE, key.c_str(), nullptr, &bundle, &err);
+    if (result == ROMX_OK)
+        romx_mutable_bundle_close(bundle);
+    romx_reader_close(reader);
+    return result == ROMX_OK;
+}
+
+SyncResult mergePspSaveBundle(const GameEntry& entry,
+                              const std::string& objectKey,
+                              const std::string& selectedDirectory,
+                              std::string* error)
+{
+    const std::string discId = pspDiscId(entry);
+    const fs::path root = pspSaveRoot();
+    const std::optional<PspSaveDirectory> localDirectory =
+        findPspSaveDirectory(root, discId);
+    if (!localDirectory)
+        return SyncResult::Skipped;
+
+    std::error_code ec;
+    const fs::path staging = root /
+        (".romx-psp-merge-" + pspTemporarySuffix());
+    fs::remove_all(staging, ec);
+    ec.clear();
+    if (!fs::create_directory(staging, ec) || ec)
+    {
+        assignError(error, "cannot create PSP merge staging directory: " +
+                            ec.message());
+        return SyncResult::Failed;
+    }
+
+    romx_reader_t* reader = nullptr;
+    romx_error_t err{};
+    if (romx_reader_open_path(entry.path.c_str(), nullptr, &reader, &err) != ROMX_OK)
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, errorText("romx_reader_open_path", err, ROMX_E_IO));
+        return SyncResult::Failed;
+    }
+    const auto validator = [discId](const fs::path& relative) {
+        return pspSaveBundlePathHasDiscPrefix(relative, discId);
+    };
+    const SyncResult extracted = extractBundle(
+        reader, ROMX_MUTABLE_NAMESPACE_SAVE, objectKey.c_str(), staging, true,
+        error, nullptr, validator);
+    romx_reader_close(reader);
+    if (extracted != SyncResult::Success)
+    {
+        fs::remove_all(staging, ec);
+        return extracted;
+    }
+
+    const fs::path selectedPath = staging / selectedDirectory;
+    if (!isWithinDirectory(staging, selectedPath))
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, "PSP ROMX slot directory escapes staging root");
+        return SyncResult::Failed;
+    }
+    const std::optional<fs::path> selectedSfo = findPspSfoPath(selectedPath);
+    const fs::path preservedSfo = staging / ".romx-selected-param.sfo";
+    if (selectedSfo)
+    {
+        fs::copy_file(*selectedSfo, preservedSfo,
+                      fs::copy_options::overwrite_existing, ec);
+        if (ec)
+        {
+            fs::remove_all(staging, ec);
+            assignError(error, "cannot preserve ROMX savedata metadata: " +
+                                ec.message());
+            return SyncResult::Failed;
+        }
+    }
+    fs::remove_all(selectedPath, ec);
+    if (ec)
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, "cannot replace PSP ROMX slot directory: " + ec.message());
+        return SyncResult::Failed;
+    }
+    if (selectedSfo)
+    {
+        fs::create_directories(selectedPath, ec);
+        if (!ec)
+            fs::copy_file(preservedSfo,
+                          selectedPath / selectedSfo->filename(),
+                          fs::copy_options::overwrite_existing, ec);
+        if (ec)
+        {
+            fs::remove_all(staging, ec);
+            assignError(error, "cannot restore ROMX savedata metadata: " +
+                                ec.message());
+            return SyncResult::Failed;
+        }
+        fs::remove(preservedSfo, ec);
+        ec.clear();
+    }
+
+    std::vector<std::string> relativePaths;
+    std::vector<std::string> sourcePaths;
+    (void)collectRegularBundleFiles(staging, relativePaths, sourcePaths);
+
+    std::vector<std::string> localRelativePaths;
+    std::vector<std::string> localSourcePaths;
+    if (!collectPspDirectoryFiles(root, *localDirectory,
+                                  localRelativePaths, localSourcePaths))
+    {
+        fs::remove_all(staging, ec);
+        return SyncResult::Skipped;
+    }
+    for (std::size_t index = 0; index < localRelativePaths.size(); ++index)
+    {
+        fs::path relative(localRelativePaths[index]);
+        auto component = relative.begin();
+        if (component == relative.end())
+            continue;
+        if (selectedSfo && localDirectory->name != selectedDirectory &&
+            isPspSfoFilename(relative))
+            continue;
+        fs::path mapped = selectedDirectory;
+        ++component;
+        for (; component != relative.end(); ++component)
+            mapped /= *component;
+        relativePaths.push_back(mapped.generic_string());
+        sourcePaths.push_back(localSourcePaths[index]);
+    }
+
+    const SyncResult written = relativePaths.empty()
+        ? SyncResult::Skipped
+        : writeBundlePathEntries(entry, ROMX_MUTABLE_NAMESPACE_SAVE,
+                                 objectKey.c_str(), relativePaths,
+                                 sourcePaths, error);
+    fs::remove_all(staging, ec);
+    return written;
+}
+
+SyncResult writePspSaveBundle(const GameEntry& entry,
+                              const std::string& objectKey,
+                              const std::string& selectedDirectory,
+                              std::string* error)
+{
+    if (pspMutableBundleExists(entry.path, objectKey))
+    {
+        const std::optional<PspSaveDirectory> localDirectory =
+            findPspSaveDirectory(pspSaveRoot(), pspDiscId(entry));
+        if (!localDirectory)
+            return SyncResult::Skipped;
+        // A named selector identifies one directory in an existing object.
+        // For the implicit/default export, replace the local directory of an
+        // existing aggregate as well so old multi-directory ROMX files keep
+        // their other logical slots.
+        const std::string directory = selectedDirectory.empty()
+            ? localDirectory->name : selectedDirectory;
+        return mergePspSaveBundle(entry, objectKey, directory, error);
+    }
+    return writeBundle(entry, ROMX_MUTABLE_NAMESPACE_SAVE,
+                       objectKey.c_str(), error);
 }
 
 std::vector<GameEntryAdapter::SaveSlot> enumerateSaveSlots(
@@ -1589,41 +2367,53 @@ std::vector<GameEntryAdapter::SaveSlot> enumerateSaveSlots(
             &bundle, &err);
         if (bundleResult != ROMX_OK)
             continue; // Opaque SAVE objects are not selectable by this UI.
-        uint32_t entryCount = 0;
-        if (romx_mutable_bundle_get_entry_count(bundle, &entryCount, &err) != ROMX_OK)
+        uint32_t saveSlotCount = 0;
+        if (romx_mutable_bundle_get_save_slot_count(bundle, &saveSlotCount,
+                                                     &err) != ROMX_OK)
         {
             romx_mutable_bundle_close(bundle);
             continue;
         }
-        slot.entryCount = entryCount;
-        std::string fallbackPath;
-        for (uint32_t entryIndex = 0; entryIndex < entryCount; ++entryIndex)
+        const std::string discId = isPsp(entry) ? pspDiscId(entry) : std::string{};
+        for (uint32_t slotIndex = 0; slotIndex < saveSlotCount; ++slotIndex)
         {
-            romx_mutable_bundle_entry_info_t bundleEntry =
-                ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
-            if (romx_mutable_bundle_get_entry(bundle, entryIndex, &bundleEntry, &err) != ROMX_OK)
+            romx_mutable_save_slot_info_t saveInfo =
+                ROMX_MUTABLE_SAVE_SLOT_INFO_INIT;
+            if (romx_mutable_bundle_get_save_slot(bundle, slotIndex, &saveInfo,
+                                                  &err) != ROMX_OK)
                 continue;
-            fs::path relative;
-            if (!safeRelativePath(bundleEntry.path, relative))
+            if (isPsp(entry) &&
+                normalizePspDiscId(std::string(saveInfo.key, saveInfo.key_size))
+                    .rfind(discId, 0) != 0)
                 continue;
-            if (fallbackPath.empty())
-                fallbackPath = relative.generic_string();
-            std::string extension = relative.extension().string();
-            std::transform(extension.begin(), extension.end(), extension.begin(),
-                           [](unsigned char value) {
-                               return static_cast<char>(std::tolower(value));
-                           });
-            if (extension == ".sav" || extension == ".srm")
+            GameEntryAdapter::SaveSlot save;
+            save.key = slot.key;
+            save.selectionKey = saveSlotCount > 1U || isPsp(entry)
+                ? makeBundleSlotSelector(slot.key,
+                    std::string(saveInfo.key, saveInfo.key_size)) : std::string{};
+            save.displayName = isPsp(entry)
+                ? std::string(saveInfo.key, saveInfo.key_size)
+                : (saveSlotCount > 1U
+                    ? slot.key + " / " + std::string(saveInfo.key,
+                                                       saveInfo.key_size)
+                    : slot.key);
+            save.dataSize = saveInfo.data_size;
+            save.generation = slot.generation;
+            save.entryCount = saveInfo.entry_count;
+            if (saveInfo.entry_count != 0U)
             {
-                slot.entryPath = relative.generic_string();
-                break;
+                romx_mutable_bundle_entry_info_t bundleEntry =
+                    ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
+                if (romx_mutable_bundle_get_save_slot_entry(bundle, slotIndex, 0U,
+                                                            &bundleEntry, &err) == ROMX_OK)
+                {
+                    save.entryPath = bundleEntry.path;
+                }
             }
+            if (save.entryCount != 0U)
+                slots.push_back(std::move(save));
         }
-        if (slot.entryPath.empty())
-            slot.entryPath = fallbackPath;
         romx_mutable_bundle_close(bundle);
-        if (slot.entryCount != 0)
-            slots.push_back(std::move(slot));
     }
     romx_reader_close(reader);
 
@@ -1742,7 +2532,11 @@ SyncResult GameEntryAdapter::restoreSave(GameEntry& entry, const std::string& ke
 {
     if (!isRomxPath(entry.path))
         return SyncResult::Skipped;
-    if (!validateSaveSlotKeyImpl(key, error))
+    std::string ignoredObjectKey;
+    std::string ignoredSlotKey;
+    const bool internalBundleSelector =
+        parseBundleSlotSelector(key, ignoredObjectKey, ignoredSlotKey);
+    if (!internalBundleSelector && !validateSaveSlotKeyImpl(key, error))
         return SyncResult::Failed;
     return importBundleNamespace(entry, ROMX_MUTABLE_NAMESPACE_SAVE, true, error,
                                  &key);
@@ -1752,6 +2546,8 @@ SyncResult GameEntryAdapter::exportSave(const GameEntry& entry, std::string* err
 {
     if (!isRomxPath(entry.path))
         return SyncResult::Skipped;
+    if (isPsp(entry))
+        return writePspSaveBundle(entry, mutableBundleKey(entry), {}, error);
     return writeBundle(entry, ROMX_MUTABLE_NAMESPACE_SAVE,
                        mutableBundleKey(entry), error);
 }
@@ -1761,8 +2557,22 @@ SyncResult GameEntryAdapter::exportSave(const GameEntry& entry, const std::strin
 {
     if (!isRomxPath(entry.path))
         return SyncResult::Skipped;
+    std::string objectKey;
+    std::string slotKey;
+    if (parseBundleSlotSelector(key, objectKey, slotKey))
+    {
+        if (isPsp(entry))
+            return writePspSaveBundle(entry, objectKey, slotKey, error);
+        return mergeSaveBundleSlot(entry, objectKey, slotKey, error);
+    }
     if (!validateSaveSlotKeyImpl(key, error))
         return SyncResult::Failed;
+    if (isPsp(entry))
+    {
+        // A plain key is a user-facing mutable object label and creates or
+        // replaces one logical PSP slot.
+        return writePspSaveBundle(entry, key, {}, error);
+    }
     return writeBundle(entry, ROMX_MUTABLE_NAMESPACE_SAVE, key.c_str(), error);
 }
 
