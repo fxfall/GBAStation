@@ -419,15 +419,8 @@ namespace beiklive
             ft == beiklive::enums::FileType::GENESIS_ROM ||
             ft == beiklive::enums::FileType::ARCADE_ROM ||
             ft == beiklive::enums::FileType::DREAMCAST_ROM ||
-            ft == beiklive::enums::FileType::PSP_ROM)
-        {
-            auto entryOpt = beiklive::GameDB ? beiklive::GameDB->findByPath(data.fullPath) : std::nullopt;
-            if (entryOpt)
-                _showGameDBDetail(data, *entryOpt);
-            else
-                _showGameNoDBDetail(data);
-        }
-        else if (ft == beiklive::enums::FileType::ROMX_FILE)
+            ft == beiklive::enums::FileType::PSP_ROM ||
+            ft == beiklive::enums::FileType::ROMX_FILE)
         {
             auto entryOpt = beiklive::GameDB ? beiklive::GameDB->findByPath(data.fullPath) : std::nullopt;
             if (entryOpt)

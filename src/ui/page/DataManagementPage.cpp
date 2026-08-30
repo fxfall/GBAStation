@@ -2501,7 +2501,7 @@ int DataManagementPage::scanOnePlatform(const std::vector<fs::path>& roms,
             continue;
         }
 
-        const std::string displayName = resolveScanTitle(romPath, platform, m_useNameMapping);
+        std::string displayName = resolveScanTitle(romPath, platform, m_useNameMapping);
         updateProgressName(displayName);
 
         beiklive::GameEntry entry;

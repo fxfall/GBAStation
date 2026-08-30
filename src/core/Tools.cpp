@@ -157,14 +157,39 @@ int platformFromFileType(beiklive::enums::FileType type)
     }
 }
 
+beiklive::enums::FileType fileTypeFromPlatform(int platform)
+{
+    using beiklive::enums::EmuPlatform;
+    using beiklive::enums::FileType;
+    switch (static_cast<EmuPlatform>(platform))
+    {
+        case EmuPlatform::EmuGBA:       return FileType::GBA_ROM;
+        case EmuPlatform::EmuGBC:       return FileType::GBC_ROM;
+        case EmuPlatform::EmuGB:        return FileType::GB_ROM;
+        case EmuPlatform::EmuNES:       return FileType::NES_ROM;
+        case EmuPlatform::EmuSNES:      return FileType::SNES_ROM;
+        case EmuPlatform::EmuNDS:       return FileType::NDS_ROM;
+        case EmuPlatform::Emu3DS:       return FileType::THREEDS_ROM;
+        case EmuPlatform::EmuGenesis:   return FileType::GENESIS_ROM;
+        case EmuPlatform::EmuArcade:    return FileType::ARCADE_ROM;
+        case EmuPlatform::EmuDreamcast: return FileType::DREAMCAST_ROM;
+        case EmuPlatform::EmuPSP:       return FileType::PSP_ROM;
+        case EmuPlatform::EmuPS1:       return FileType::PS1_ROM;
+        case EmuPlatform::EmuSaturn:    return FileType::SATURN_ROM;
+        case EmuPlatform::EmuDolphin:   return FileType::DOLPHIN_ROM;
+        default:                        return FileType::NORMAL_FILE;
+    }
+}
+
 int detectGamePlatform(const fs::path& path)
 {
-    if (getFileType(path) == beiklive::enums::FileType::ROMX_FILE)
+    const auto type = getFileType(path);
+    if (type == beiklive::enums::FileType::ROMX_FILE)
     {
         beiklive::romx::Info info;
         return beiklive::romx::readInfo(path.string(), info) ? info.platform : -1;
     }
-    return platformFromFileType(getFileType(path));
+    return platformFromFileType(type);
 }
 
 // 返回某扩展名可能支持的平台列表（顺序 = 推荐优先级）。

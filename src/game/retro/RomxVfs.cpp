@@ -34,7 +34,6 @@ struct retro_vfs_file_handle
 
 struct retro_vfs_dir_handle
 {
-    bool romx = false;
     const void* owner = nullptr;
     std::vector<std::pair<std::string, bool>> entries;
     std::size_t index = 0;
@@ -466,7 +465,6 @@ retro_vfs_dir_handle* openDirectory(const char* path, bool includeHidden)
                                                           includeHidden,
                                                           *directory))
                 return nullptr;
-            directory->romx = true;
             directory->owner = g_binding.owner;
             ++g_binding.handles;
             return directory.release();

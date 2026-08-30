@@ -10,6 +10,8 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -84,27 +86,6 @@ std::string jsonString(const nlohmann::json& object, const char* key)
 {
     const auto it = object.find(key);
     return it != object.end() && it->is_string() ? it->get<std::string>() : std::string();
-}
-
-std::string jsonStringArray(const nlohmann::json& object, const char* key)
-{
-    const auto it = object.find(key);
-    if (it == object.end())
-        return {};
-    if (it->is_string())
-        return it->get<std::string>();
-    if (!it->is_array())
-        return {};
-    std::string result;
-    for (const auto& item : *it)
-    {
-        if (!item.is_string())
-            continue;
-        if (!result.empty())
-            result += ", ";
-        result += item.get<std::string>();
-    }
-    return result;
 }
 
 std::string cacheKey(const Info& info)
@@ -208,8 +189,7 @@ bool extractEntryToPath(const romx_reader_t* reader, uint32_t index,
     return true;
 }
 
-uint32_t crcFromEntryOrMetadata(const romx_reader_t* reader,
-                                const romx_entry_info_t& entry,
+uint32_t crcFromEntryOrMetadata(const romx_entry_info_t& entry,
                                 const romx_metadata_t* metadata)
 {
     // Metadata crc32 is the effective database identity.  A RIDX CRC32 is
@@ -221,7 +201,6 @@ uint32_t crcFromEntryOrMetadata(const romx_reader_t* reader,
         return crc;
     if ((entry.flags & ROMX_RIDX_HAS_CRC32) != 0)
         return entry.crc32;
-    (void)reader;
     return 0;
 }
 } // namespace
@@ -294,27 +273,16 @@ bool readInfo(const std::string& path, Info& out, std::string* error)
     romx_metadata_t* metadata = nullptr;
     if (info.metadata.size != 0 && romx_metadata_open(reader, &metadata, &err) == ROMX_OK)
     {
-        out.hasMetadata = copyBytes(
+        if (copyBytes(
             [metadata](void* buffer, uint64_t capacity, uint64_t* required, romx_error_t* e) {
                 return romx_metadata_copy_json(metadata, buffer, capacity, required, e);
-            }, out.metadataJson, error);
-        if (out.hasMetadata)
+            }, out.metadataJson, error))
         {
             const auto json = nlohmann::json::parse(out.metadataJson, nullptr, false);
             if (json.is_object())
             {
                 out.title = jsonString(json, "name");
-                out.developer = jsonString(json, "developer");
-                out.publisher = jsonString(json, "publisher");
-                out.description = jsonString(json, "description");
                 out.serial = jsonString(json, "serial");
-                out.origin = jsonString(json, "origin");
-                out.franchise = jsonString(json, "franchise");
-                out.language = jsonString(json, "language");
-                out.category = jsonString(json, "category");
-                out.media = jsonString(json, "media");
-                out.genre = jsonStringArray(json, "genre");
-                out.region = jsonStringArray(json, "region");
                 const auto parseCrc = [&json](const char* key) -> uint32_t {
                     const auto value = json.find(key);
                     if (value == json.end() || !value->is_string())
@@ -337,7 +305,7 @@ bool readInfo(const std::string& path, Info& out, std::string* error)
     }
     if (metadata)
     {
-        const uint32_t crc = crcFromEntryOrMetadata(reader, entry, metadata);
+        const uint32_t crc = crcFromEntryOrMetadata(entry, metadata);
         if (out.crc32 == 0 && crc != 0)
             out.crc32 = crc;
         romx_metadata_close(metadata);
@@ -394,38 +362,6 @@ LaunchSession::LaunchSession() = default;
 LaunchSession::~LaunchSession()
 {
     close();
-}
-
-LaunchSession::LaunchSession(LaunchSession&& other) noexcept
-{
-    moveFrom(std::move(other));
-}
-
-LaunchSession& LaunchSession::operator=(LaunchSession&& other) noexcept
-{
-    if (this != &other)
-    {
-        close();
-        moveFrom(std::move(other));
-    }
-    return *this;
-}
-
-void LaunchSession::moveFrom(LaunchSession&& other) noexcept
-{
-    sourcePath_ = std::move(other.sourcePath_);
-    info_ = std::move(other.info_);
-    reader_ = other.reader_;
-    mapping_ = other.mapping_;
-    other.reader_ = nullptr;
-    other.mapping_ = nullptr;
-    other.sourcePath_.clear();
-    other.info_ = {};
-}
-
-std::string LaunchSession::lastError(const char* operation, int code) const
-{
-    return std::string(operation) + " failed (" + std::to_string(code) + ")";
 }
 
 bool LaunchSession::open(const std::string& path, std::string* error)
@@ -593,12 +529,6 @@ bool LaunchSession::openVfs(const std::string& virtualPath, romx_vfs_file** outF
         return false;
     }
     return true;
-}
-
-void LaunchSession::closeVfs(romx_vfs_file* file) const
-{
-    if (file)
-        romx_vfs_file_close(file);
 }
 
 } // namespace beiklive::romx

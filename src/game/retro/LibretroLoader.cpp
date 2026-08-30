@@ -314,10 +314,8 @@ LibretroLoader::coreOptions(CoreType coreType)
 // ---- 静态实例指针 ----------------------------------------
 LibretroLoader* LibretroLoader::s_current = nullptr;
 
-LibretroLoader::~LibretroLoader()
+void LibretroLoader::clearRomxLaunchState(bool resetVfsRequest)
 {
-    if (m_gameLoaded && fn_unload_game)
-        fn_unload_game();
     if (m_romxVfsActive)
     {
         beiklive::romx_vfs::deactivate(this);
@@ -330,6 +328,16 @@ LibretroLoader::~LibretroLoader()
         romx_payload_mapping_close(m_romxMapping);
         m_romxMapping = nullptr;
     }
+    m_romxMaterializedPath.clear();
+    if (resetVfsRequest)
+        m_romxVfsRequested = false;
+}
+
+LibretroLoader::~LibretroLoader()
+{
+    if (m_gameLoaded && fn_unload_game)
+        fn_unload_game();
+    clearRomxLaunchState(true);
 }
 
 // ============================================================
@@ -641,18 +649,7 @@ void LibretroLoader::unload()
         fn_unload_game();
         m_gameLoaded = false;
     }
-    if (m_romxVfsActive) {
-        beiklive::romx_vfs::deactivate(this);
-        m_romxVfsActive = false;
-    }
-    m_romxVirtualPath.clear();
-    m_romxSession.reset();
-    if (m_romxMapping) {
-        romx_payload_mapping_close(m_romxMapping);
-        m_romxMapping = nullptr;
-    }
-    m_romxMaterializedPath.clear();
-    m_romxVfsRequested = false;
+    clearRomxLaunchState(true);
 
     // Each loader owns its core session. Do not leave a statically linked core
     // initialized after its callbacks and function bindings have been removed.
@@ -775,17 +772,7 @@ bool LibretroLoader::loadGame(const std::string& romPath)
     retro_system_info systemInfo{};
     fn_get_system_info(&systemInfo);
 
-    if (m_romxMapping) {
-        romx_payload_mapping_close(m_romxMapping);
-        m_romxMapping = nullptr;
-    }
-    if (m_romxVfsActive) {
-        beiklive::romx_vfs::deactivate(this);
-        m_romxVfsActive = false;
-    }
-    m_romxVirtualPath.clear();
-    m_romxSession.reset();
-    m_romxMaterializedPath.clear();
+    clearRomxLaunchState();
 
     std::vector<uint8_t> romData;
     std::string launchPath = romPath;
@@ -918,16 +905,7 @@ bool LibretroLoader::loadGame(const std::string& romPath)
 
     if (!loaded) {
         brls::Logger::error("[LibretroLoader] loadGame: retro_load_game failed");
-        if (m_romxVfsActive) {
-            beiklive::romx_vfs::deactivate(this);
-            m_romxVfsActive = false;
-        }
-        m_romxVirtualPath.clear();
-        m_romxSession.reset();
-        if (m_romxMapping) {
-            romx_payload_mapping_close(m_romxMapping);
-            m_romxMapping = nullptr;
-        }
+        clearRomxLaunchState();
         return false;
     }
 
@@ -945,17 +923,7 @@ void LibretroLoader::unloadGame()
         fn_unload_game();
         m_gameLoaded = false;
     }
-    if (m_romxVfsActive) {
-        beiklive::romx_vfs::deactivate(this);
-        m_romxVfsActive = false;
-    }
-    m_romxVirtualPath.clear();
-    m_romxSession.reset();
-    if (m_romxMapping) {
-        romx_payload_mapping_close(m_romxMapping);
-        m_romxMapping = nullptr;
-    }
-    m_romxMaterializedPath.clear();
+    clearRomxLaunchState();
     m_diskControl = {};
     m_diskControlExt = {};
     m_hasDiskControl = false;

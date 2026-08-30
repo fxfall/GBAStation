@@ -3,12 +3,8 @@
 #include "core/enums.h"
 
 #include <cstdint>
-#include <memory>
 #include <string>
-#include <vector>
 
-struct romx_entry_info;
-struct romx_info;
 struct romx_reader;
 struct romx_payload_mapping;
 struct romx_vfs_file;
@@ -28,17 +24,7 @@ struct Info
     std::string sourcePath;
     std::string metadataJson;
     std::string title;
-    std::string developer;
-    std::string publisher;
-    std::string description;
     std::string serial;
-    std::string origin;
-    std::string franchise;
-    std::string language;
-    std::string category;
-    std::string media;
-    std::string genre;
-    std::string region;
     std::string entrypointPath;
     std::string entrypointFormat;
 
@@ -50,7 +36,6 @@ struct Info
     uint32_t crc32 = 0;
     uint64_t entrypointSize = 0;
     uint64_t coverSize = 0;
-    bool hasMetadata = false;
     bool hasCover = false;
     bool multiFile = false;
 };
@@ -83,14 +68,10 @@ public:
     ~LaunchSession();
     LaunchSession(const LaunchSession&) = delete;
     LaunchSession& operator=(const LaunchSession&) = delete;
-    LaunchSession(LaunchSession&& other) noexcept;
-    LaunchSession& operator=(LaunchSession&& other) noexcept;
 
     bool open(const std::string& path, std::string* error = nullptr);
     void close();
     bool isOpen() const { return reader_ != nullptr; }
-    bool isRomx() const { return isOpen(); }
-    const std::string& sourcePath() const { return sourcePath_; }
     const Info& info() const { return info_; }
 
     /// Maps only a single-file entrypoint.  The pointer remains valid until
@@ -106,25 +87,17 @@ public:
 
     /// Opens a virtual entry (including the entrypoint) for descriptor-aware
     /// cores.  The returned handle borrows this session and must be closed by
-    /// closeVfs().
+    /// romx_vfs_file_close().
     bool openVfs(const std::string& virtualPath, romx_vfs_file** outFile,
                  std::string* error = nullptr);
-    void closeVfs(romx_vfs_file* file) const;
 
     const romx_reader* reader() const { return reader_; }
 
 private:
-    void moveFrom(LaunchSession&& other) noexcept;
-    std::string lastError(const char* operation, int code) const;
-
     std::string sourcePath_;
     Info info_;
     romx_reader* reader_ = nullptr;
     romx_payload_mapping* mapping_ = nullptr;
 };
-
-// Descriptive alias used by integration code that wants to make the ROMX
-// boundary explicit without exposing libromx types in its public API.
-using RomxLaunchSession = LaunchSession;
 
 } // namespace beiklive::romx

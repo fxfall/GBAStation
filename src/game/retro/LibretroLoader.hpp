@@ -8,6 +8,7 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include <memory>
 
 // libretro public API types
 #include "third_party/mgba/src/platform/libretro/libretro.h"
@@ -165,6 +166,8 @@ public:
     static const std::vector<CoreOptionDefinition>& coreOptions(CoreType coreType);
 
 private:
+    void clearRomxLaunchState(bool resetVfsRequest = false);
+
     // ---- 核心类型 ---------------------------------------------------
     CoreType m_coreType = CoreType::Mgba;
 

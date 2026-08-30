@@ -70,30 +70,6 @@ bool isLibraryRomType(beiklive::enums::FileType type)
 		   type == beiklive::enums::FileType::DOLPHIN_ROM;
 }
 
-beiklive::enums::FileType fileTypeForPlatform(int platform)
-{
-
-	using beiklive::enums::EmuPlatform;
-	switch (static_cast<EmuPlatform>(platform))
-	{
-	case EmuPlatform::EmuGBA: return beiklive::enums::FileType::GBA_ROM;
-	case EmuPlatform::EmuGBC: return beiklive::enums::FileType::GBC_ROM;
-	case EmuPlatform::EmuGB: return beiklive::enums::FileType::GB_ROM;
-	case EmuPlatform::EmuNES: return beiklive::enums::FileType::NES_ROM;
-	case EmuPlatform::EmuSNES: return beiklive::enums::FileType::SNES_ROM;
-	case EmuPlatform::EmuNDS: return beiklive::enums::FileType::NDS_ROM;
-	case EmuPlatform::Emu3DS: return beiklive::enums::FileType::THREEDS_ROM;
-	case EmuPlatform::EmuGenesis: return beiklive::enums::FileType::GENESIS_ROM;
-	case EmuPlatform::EmuArcade: return beiklive::enums::FileType::ARCADE_ROM;
-	case EmuPlatform::EmuDreamcast: return beiklive::enums::FileType::DREAMCAST_ROM;
-	case EmuPlatform::EmuPSP: return beiklive::enums::FileType::PSP_ROM;
-	case EmuPlatform::EmuPS1: return beiklive::enums::FileType::PS1_ROM;
-	case EmuPlatform::EmuSaturn: return beiklive::enums::FileType::SATURN_ROM;
-	case EmuPlatform::EmuDolphin: return beiklive::enums::FileType::DOLPHIN_ROM;
-	default: return beiklive::enums::FileType::NORMAL_FILE;
-	}
-}
-
 std::optional<std::string> parseDirectLaunchRom(int argc, char* argv[])
 {
 	for (int i = 1; i < argc; ++i)
@@ -242,7 +218,7 @@ bool launchDirectGameActivity(const std::string& romPath)
 	if (fileType == beiklive::enums::FileType::ROMX_FILE)
 	{
 		const int platform = beiklive::tools::detectGamePlatform(romPath);
-		fileType = fileTypeForPlatform(platform);
+		fileType = beiklive::tools::fileTypeFromPlatform(platform);
 	}
 	if (!isLibraryRomType(fileType))
 	{

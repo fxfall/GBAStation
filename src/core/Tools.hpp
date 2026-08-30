@@ -29,6 +29,9 @@ beiklive::enums::FileType detectArchiveFileType(const fs::path& path);
 // 根据文件类型映射游戏平台；无法映射返回 -1。
 int platformFromFileType(beiklive::enums::FileType type);
 
+// 根据游戏平台构造对应的文件类型；无法映射返回 NORMAL_FILE。
+beiklive::enums::FileType fileTypeFromPlatform(int platform);
+
 // 根据真实文件路径判断游戏平台；会对 ZIP/7Z 做内容检测。
 int detectGamePlatform(const fs::path& path);
 std::vector<int> candidatePlatformsForExtension(const std::string& ext);

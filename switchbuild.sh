@@ -199,17 +199,6 @@ EXTERNAL_CORE_NROS=(
 )
 
 if [ -n "${CORE_DIR}" ]; then
-    STAGE_CORE_NROS=("${EXTERNAL_CORE_NROS[@]}")
-else
-    STAGE_CORE_NROS=(
-        "GBAStation3DSStub.nro"
-        "GBAStationFBNeoStub.nro"
-        "GBAStationFlycastStub.nro"
-        "GBAStationPPSSPPStub.nro"
-    )
-fi
-
-if [ -n "${CORE_DIR}" ]; then
     for core in "${EXTERNAL_CORE_NROS[@]}"; do
         if [ ! -s "${CORE_DIR}/${core}" ]; then
             echo "[错误] --core-dir 缺少 Release 核心: ${CORE_DIR}/${core}"
@@ -336,7 +325,7 @@ cmake --build . --target GBAStation.nro -j "${JOBS}"
 
 cd ..
 
-for core in "${STAGE_CORE_NROS[@]}"; do
+for core in "${EXTERNAL_CORE_NROS[@]}"; do
     copy_external_core_stub "${core}"
 done
 # ────────────────────────────────────────────────────────────
@@ -347,7 +336,7 @@ echo ""
 echo "==================== 编译结果 ===================="
 
 print_nro_size "GBAStation.nro" "${BUILD_DIR}/GBAStation.nro"
-for core in "${STAGE_CORE_NROS[@]}"; do
+for core in "${EXTERNAL_CORE_NROS[@]}"; do
     print_nro_size "GBAStation/core/${core}" "${BUILD_DIR}/GBAStation/core/${core}"
 done
 
@@ -364,6 +353,6 @@ echo "=================================================="
 echo ""
 echo "[完成]"
 echo "${BUILD_DIR}/GBAStation.nro"
-for core in "${STAGE_CORE_NROS[@]}"; do
+for core in "${EXTERNAL_CORE_NROS[@]}"; do
     echo "${BUILD_DIR}/GBAStation/core/${core}"
 done
