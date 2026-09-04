@@ -177,6 +177,49 @@ bool readRomxEntryBytes(const romx_reader_t* reader, uint32_t index,
     return true;
 }
 
+// A 3DS ROMX entry is normally a CCI/NCSD image.  The NCSD header is inside
+// the entrypoint payload, not at the beginning of the ROMX container, so the
+// generic ThreeDsTitlePaths reader cannot identify a ROMX by itself.
+std::string readThreeDsTitleIdFromRomx(const std::string& path)
+{
+    if (!isRomxPath(path))
+        return {};
+
+    romx_reader_t* reader = nullptr;
+    romx_error_t error{};
+    if (romx_reader_open_path(path.c_str(), nullptr, &reader, &error) != ROMX_OK)
+        return {};
+
+    romx_entry_info_t entry = ROMX_ENTRY_INFO_INIT;
+    if (romx_reader_get_entrypoint(reader, &entry, &error) != ROMX_OK ||
+        entry.data_size < 0x110U)
+    {
+        romx_reader_close(reader);
+        return {};
+    }
+
+    std::vector<uint8_t> header;
+    const bool read = readRomxEntryBytes(reader, entry.index, 0, 0x110U, header);
+    romx_reader_close(reader);
+    if (!read || header.size() < 0x110U || header[0x100] != 'N' ||
+        header[0x101] != 'C' || header[0x102] != 'S' || header[0x103] != 'D')
+        return {};
+
+    uint64_t titleId = 0;
+    for (int index = 0; index < 8; ++index)
+        titleId |= static_cast<uint64_t>(header[0x108U + index]) << (index * 8);
+    if (titleId == 0)
+        return {};
+
+    char titleIdText[17] = {};
+    const int written = std::snprintf(
+        titleIdText, sizeof(titleIdText), "%016llX",
+        static_cast<unsigned long long>(titleId));
+    if (written != 16)
+        return {};
+    return beiklive::three_ds::normalizeTitleId(titleIdText);
+}
+
 bool readPspSfoValue(const std::vector<uint8_t>& sfo, const char* wantedKey,
                      std::string& value)
 {
@@ -868,15 +911,17 @@ fs::path threeDsNativeSaveDirectory(const GameEntry& entry)
     if (root.empty())
         return {};
 
-#ifdef __SWITCH__
-    // The built-in core already owns the canonical SDMC mapping.  Keep the
-    // existing Switch save root untouched.
-    return root;
-#else
-    const std::string titleId =
-        beiklive::three_ds::resolveTitleId(entry.threeDsTitleId, entry.path);
+    const std::string titleId = GameEntryAdapter::resolveThreeDsTitleId(entry);
     if (titleId.size() != 16U)
         return root;
+
+#ifdef __SWITCH__
+    // The built-in core stores 3DS save data in the same canonical SDMC tree
+    // exposed by ThreeDsTitlePaths.  Use the payload-derived Title ID for a
+    // ROMX entry instead of falling back to the generic per-ROM directory.
+    const std::string native = beiklive::three_ds::saveDataPath(titleId);
+    return native.empty() ? root : fs::path(native);
+#else
     std::string lowerTitleId = titleId;
     std::transform(lowerTitleId.begin(), lowerTitleId.end(), lowerTitleId.begin(),
                    [](unsigned char value) {
@@ -1383,6 +1428,12 @@ std::vector<GameEntryAdapter::LocalSaveCandidate> listThreeDsSaveCandidates(
     uint32_t count = 0;
     if (!openThreeDsSaveCatalog(source, &catalog, &count, error))
         return candidates;
+    if (count == 0U)
+    {
+        romx_save_catalog_close(catalog);
+        assignError(error, "未找到可识别的3DS本地存档: " + source.string());
+        return candidates;
+    }
 
     candidates.reserve(count);
     for (uint32_t index = 0; index < count; ++index) {
@@ -1478,6 +1529,7 @@ SyncResult writeThreeDsSaveCatalog(const fs::path& source,
         return SyncResult::Failed;
     if (count == 0) {
         romx_save_catalog_close(catalog);
+        assignError(error, "未找到可识别的3DS本地存档: " + source.string());
         return SyncResult::Skipped;
     }
 
@@ -2759,6 +2811,18 @@ std::string GameEntryAdapter::nativeSaveDirectory(const GameEntry& entry)
     return threeDsNativeSaveDirectory(entry).string();
 }
 
+std::string GameEntryAdapter::resolveThreeDsTitleId(const GameEntry& entry)
+{
+    if (!isThreeDs(entry))
+        return {};
+
+    std::string titleId = beiklive::three_ds::resolveTitleId(
+        entry.threeDsTitleId, entry.path);
+    if (titleId.empty())
+        titleId = readThreeDsTitleIdFromRomx(entry.path);
+    return titleId;
+}
+
 bool GameEntryAdapter::apply(const std::string& path, GameEntry& entry,
                              const Options& options, std::string* error)
 {
@@ -2832,7 +2896,9 @@ bool GameEntryAdapter::apply(const std::string& path, GameEntry& entry,
     }
     else if (isThreeDs(entry))
     {
-        const std::string titleId = beiklive::three_ds::normalizeTitleId(info.serial);
+        std::string titleId = beiklive::three_ds::normalizeTitleId(info.serial);
+        if (titleId.empty())
+            titleId = readThreeDsTitleIdFromRomx(path);
         if (!titleId.empty())
             entry.threeDsTitleId = titleId;
     }

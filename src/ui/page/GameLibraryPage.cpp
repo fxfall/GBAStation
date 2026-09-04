@@ -2379,7 +2379,8 @@ namespace beiklive
                 } else if (result == beiklive::romx::SyncResult::Skipped) {
                     ++skipped;
                     brls::Logger::info(
-                        "[ROMX Batch] no matching data: path={}", entry.path);
+                        "[ROMX Batch] skipped: path={} reason={}", entry.path,
+                        error.empty() ? "no matching data" : error);
                 } else {
                     ++failed;
                     brls::Logger::warning(

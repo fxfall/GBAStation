@@ -705,7 +705,7 @@ namespace beiklive
 
     std::string GameDataPage::_threeDsTitleId() const
     {
-        return beiklive::three_ds::resolveTitleId(m_entry.threeDsTitleId, m_entry.path);
+        return beiklive::romx::GameEntryAdapter::resolveThreeDsTitleId(m_entry);
     }
 
     std::string GameDataPage::_batterySaveDir() const

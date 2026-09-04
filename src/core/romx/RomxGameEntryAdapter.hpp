@@ -100,9 +100,15 @@ public:
         std::string* error = nullptr);
 
     /// Returns the native 3DS save directory used by the macOS Azahar
-    /// libretro core.  The GUI and ROMX adapter share this mapping so a
-    /// restored SAVE object is visible to the core without modifying it.
+    /// libretro core (or the canonical SDMC directory on Switch).  The GUI
+    /// and ROMX adapter share this mapping so a restored SAVE object is
+    /// visible to the core without modifying it.
     static std::string nativeSaveDirectory(const GameEntry& entry);
+
+    /// Resolves the real 16-digit 3DS Title ID.  For ROMX containers this
+    /// reads the NCSD header from the embedded entrypoint payload when the
+    /// database record has not been migrated yet.
+    static std::string resolveThreeDsTitleId(const GameEntry& entry);
 
     /// Validates a user supplied UTF-8 SAVE object key before a write.  Keys
     /// are labels, not local paths: slash, dot components, NUL, and an empty
