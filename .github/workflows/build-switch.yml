@@ -242,6 +242,7 @@ jobs:
             -Dtools= \
             -Dbuild-tests=false \
             -Dllvm=enabled \
+            -Dshared-llvm=disabled \
             -Dstatic-libclc=all \
             --prefer-static
           "$mesa_venv/bin/meson" compile -C "$RUNNER_TEMP/kosmickrisp-build" -j 3
