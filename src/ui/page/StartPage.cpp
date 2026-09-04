@@ -1152,6 +1152,17 @@ namespace beiklive
                 entry.savePath = beiklive::tools::defaultGameSavePath(entry.platform, entry.path);
                 changed = true;
             }
+            if ((beiklive::tools::getFileExtension(entry.path) == "zip" ||
+                 beiklive::tools::getFileExtension(entry.path) == "7z") &&
+                entry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA) &&
+                entry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC) &&
+                entry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuGB) &&
+                entry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuNES) &&
+                entry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES) &&
+                entry.platform != static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis)) {
+                brls::Application::notify(L("该压缩包平台暂不支持内置运行"));
+                return;
+            }
             if (entry.logoPath.empty()) {
                 entry.logoPath = beiklive::tools::getDefaultLogoPath(
                     static_cast<beiklive::enums::EmuPlatform>(entry.platform),
@@ -2045,7 +2056,7 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
 
                 return true;
             });
-        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "nes", "fds", "sfc", "smc", "nds", "cia", "cci", "3ds", "md", "gen", "bin", "smd", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "cso", "pbp", "zip", "7z", "png"});
+        m_fileListPage->setFliter(beiklive::enums::FilterMode::Whitelist, {"gba", "gbc", "gb", "nes", "fds", "sfc", "smc", "nds", "cia", "cci", "3ds", "md", "gen", "bin", "smd", "sms", "gg", "sg", "cue", "cdi", "gdi", "chd", "iso", "cso", "pbp", "img", "ecm", "mds", "m3u", "ccd", "gcm", "rvz", "wbfs", "wad", "ciso", "tgc", "gcz", "wia", "nfs", "dol", "elf", "zip", "7z", "png"});
 
         m_fileListPage->onFileSelected = [this](beiklive::DirListData dirItem)
         {
@@ -2076,6 +2087,9 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
             case beiklive::enums::FileType::DREAMCAST_ROM:
             case beiklive::enums::FileType::PSP_ROM:
             case beiklive::enums::FileType::ROMX_FILE:
+            case beiklive::enums::FileType::PS1_ROM:
+            case beiklive::enums::FileType::SATURN_ROM:
+            case beiklive::enums::FileType::DOLPHIN_ROM:
                 brls::Application::notify(L("启动游戏：") + dirItem.fileName);
                 _pushGameActivity(dirItem, this);
                 break;

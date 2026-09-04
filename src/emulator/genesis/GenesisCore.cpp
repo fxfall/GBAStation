@@ -67,7 +67,8 @@ bool GenesisCore::SetupGame(beiklive::GameEntry gameEntry)
         return false;
     }
 
-    std::string launchPath = m_gameEntry.path;
+    std::string launchPath = m_gameEntry.runtimePath.empty()
+        ? m_gameEntry.path : m_gameEntry.runtimePath;
     if (beiklive::romx::isRomxPath(launchPath))
     {
         beiklive::romx::LaunchSession session;

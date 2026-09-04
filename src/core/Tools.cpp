@@ -44,12 +44,13 @@ beiklive::enums::FileType fileTypeFromExtension(const std::string& ext, bool arc
         return beiklive::enums::FileType::DREAMCAST_ROM;
     if (ext == "iso" || ext == "cso" || ext == "pbp")
         return beiklive::enums::FileType::PSP_ROM;
-    if (ext == "gcm" || ext == "rvz" || ext == "wbfs" || ext == "wad" || ext == "ciso")
+    if (ext == "gcm" || ext == "rvz" || ext == "wbfs" || ext == "wad" ||
+        ext == "ciso" || ext == "tgc" || ext == "gcz" || ext == "wia" ||
+        ext == "nfs" || ext == "dol" || ext == "elf")
         return beiklive::enums::FileType::DOLPHIN_ROM;
     if (ext == "ccd")
         return beiklive::enums::FileType::SATURN_ROM;
-    // .m3u is an unambiguous multi-disc playlist format for DuckStation.
-    if (ext == "m3u")
+    if (ext == "ecm" || ext == "img" || ext == "m3u")
         return beiklive::enums::FileType::PS1_ROM;
     if (ext == "nds")
         return beiklive::enums::FileType::NDS_ROM;
@@ -209,7 +210,8 @@ std::vector<int> candidatePlatformsForExtension(const std::string& ext)
         return {static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuSaturn)};
+                static_cast<int>(beiklive::enums::EmuPlatform::EmuSaturn),
+                static_cast<int>(beiklive::enums::EmuPlatform::EmuDolphin)};
     if (lower == "cue")
         return {static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast),
@@ -218,6 +220,9 @@ std::vector<int> candidatePlatformsForExtension(const std::string& ext)
     if (lower == "chd")
         return {static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast),
+                static_cast<int>(beiklive::enums::EmuPlatform::EmuSaturn)};
+    if (lower == "mds")
+        return {static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuSaturn)};
     if (lower == "pbp")
         return {static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
@@ -229,15 +234,7 @@ std::vector<int> candidatePlatformsForExtension(const std::string& ext)
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuGB),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuNES),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuNDS),
-                static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuDreamcast),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuSaturn),
-                static_cast<int>(beiklive::enums::EmuPlatform::EmuDolphin)};
+                static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis)};
     }
     return {};
 }
