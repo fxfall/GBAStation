@@ -24,6 +24,13 @@
 #include <GLFW/glfw3.h>
 #include <strings.h>
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+namespace beiklive {
+brls::GLFWInputManager* createGBAStationGLFWInputManager(GLFWwindow* window)
+    __attribute__((weak_import));
+}
+#endif
+
 // glfw video and input code inspired from the glfw hybrid app by fincs
 // https://github.com/fincs/hybrid_app
 
@@ -120,7 +127,13 @@ void GLFWPlatform::createWindow(std::string windowTitle, uint32_t windowWidth, u
 {
     this->videoContext = new GLFWVideoContext(windowTitle, windowWidth, windowHeight, windowXPos, windowYPos);
     GLFWwindow* win    = this->videoContext->getGLFWWindow();
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    this->inputManager = beiklive::createGBAStationGLFWInputManager
+        ? beiklive::createGBAStationGLFWInputManager(win)
+        : new GLFWInputManager(win);
+#else
     this->inputManager = new GLFWInputManager(win);
+#endif
     this->imeManager   = new GLFWImeManager(win);
 }
 
