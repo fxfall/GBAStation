@@ -17,8 +17,11 @@ cmake_dependent_option(USE_SYSTEM_TWEENY "" OFF "NOT USE_SHARED_LIB" ON)
 if (APPLE AND PLATFORM_DESKTOP)
     option(BUNDLE_MACOS_APP "Bundle a app for macOS" OFF)
     set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "" FORCE)
-    set(CMAKE_XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET[arch=arm64] "11.0" CACHE STRING "" FORCE)
+    # KosmicKrisp uses Metal 4 and is available on macOS 26+ Apple Silicon.
+    # The macOS build intentionally targets that runtime rather than carrying
+    # compatibility code for older systems.
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING "" FORCE)
+    set(CMAKE_XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET[arch=arm64] "26.0" CACHE STRING "" FORCE)
     message(STATUS "CMAKE_OSX_ARCHITECTURES: ${CMAKE_OSX_ARCHITECTURES}")
 endif ()
 
@@ -35,6 +38,8 @@ set(PACKAGE_NAME "com.beiklive.GBAStation")
 set(PROJECT_AUTHOR "beiklive")
 set(PROJECT_ICON ${CMAKE_CURRENT_SOURCE_DIR}/resources/icon/default.png)
 set(PROJECT_RESOURCES ${CMAKE_CURRENT_SOURCE_DIR}/resources)
+
+include(cmake/GBAStationMacExternalCores.cmake)
 
 # NDS is built and released by the standalone GBAStation_melonds project.
 set(BUILD_MELONDS_CORE OFF CACHE BOOL "Build the embedded melonDS native core" FORCE)
@@ -64,6 +69,7 @@ endif ()
 
 add_subdirectory(third_party)
 add_subdirectory(src/emulator/genesis)
+gbastation_configure_external_core_dependencies()
 
 # FAKE-08 is embedded as a runtime-only static library. Platform hosts,
 # SDL frontends, libretro glue and the upstream main() are intentionally
@@ -216,6 +222,7 @@ list(FILTER MAIN_SRC EXCLUDE REGEX ".*/src/tests/.*")
 list(APPEND MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniz/miniz.c)
 list(APPEND MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mongoose/mongoose.c)
 list(APPEND MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen/qrcodegen.cpp)
+gbastation_configure_external_core_sources(MAIN_SRC)
 # list(APPEND MAIN_SRC ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp)
 
 
@@ -250,6 +257,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE APP_VERSION="${VERSION_MAJOR}
 target_compile_definitions(${PROJECT_NAME} PRIVATE COLOR_16_BIT COLOR_5_6_5)
 target_link_libraries(${PROJECT_NAME} PRIVATE fake08_runtime)
 target_link_libraries(${PROJECT_NAME} PRIVATE genesis_core)
+gbastation_configure_external_core_target(${PROJECT_NAME})
 if (PLATFORM_SWITCH)
     add_subdirectory(src/core/forwarder/hbl forwarder_hbl)
     add_dependencies(${PROJECT_NAME} gbastation_forwarder_hbl_exefs)

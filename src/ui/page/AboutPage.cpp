@@ -56,6 +56,8 @@ static constexpr const char* FORK_FBNEO_CORE_URL =
 static constexpr const char* FORK_PPSSPP_CORE_URL =
     "https://github.com/fxfall/GBAStation_ppsspp/releases/download/v0.2.1-romx/GBAStationPPSSPPStub.nro";
 static constexpr const char* FORK_CORE_VERSION = "0.2.1-romx";
+static constexpr const char* ORIGINAL_AUTHOR_GITHUB =
+    "github.com/beiklive/GBAStation";
 
 static void rewriteForkedCoreResource(OnlineResourceItem& item) {
     const auto rewrite = [&item](const char* url) {
@@ -2923,6 +2925,8 @@ private:
                           author.w - 48.f, 62.f};
         const Rect bilibili{author.x + 24.f, author.y + 328.f,
                             author.w - 48.f, 62.f};
+        const Rect original{author.x + 24.f, author.y + 406.f,
+                            author.w - 48.f, 62.f};
         nvgBeginPath(vg);
         nvgRoundedRect(vg, github.x, github.y, github.w, github.h, 7.f);
         nvgFillColor(vg, nvgRGBA(79, 193, 255, 22));
@@ -2932,17 +2936,26 @@ private:
                        bilibili.w, bilibili.h, 7.f);
         nvgFillColor(vg, nvgRGBA(0, 188, 212, 20));
         nvgFill(vg);
+        nvgBeginPath(vg);
+        nvgRoundedRect(vg, original.x, original.y,
+                       original.w, original.h, 7.f);
+        nvgFillColor(vg, nvgRGBA(150, 130, 255, 20));
+        nvgFill(vg);
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_MIDDLE);
         nvgFontSize(vg, 16.f);
         nvgFillColor(vg, GET_THEME_COLOR("brls/text"));
         nvgText(vg, github.x + 18.f, github.y + 21.f, "GitHub", nullptr);
         nvgText(vg, bilibili.x + 18.f, bilibili.y + 21.f, "BiliBili", nullptr);
+        nvgText(vg, original.x + 18.f, original.y + 21.f,
+                L("原作者地址").c_str(), nullptr);
         nvgFontSize(vg, 14.f);
         nvgFillColor(vg, nvgRGBA(210, 216, 226, 185));
         nvgText(vg, github.x + 18.f, github.y + 44.f,
                 "fxfall/GBAStation", nullptr);
         nvgText(vg, bilibili.x + 18.f, bilibili.y + 44.f,
                 "BEIKLIVE", nullptr);
+        nvgText(vg, original.x + 18.f, original.y + 44.f,
+                ORIGINAL_AUTHOR_GITHUB, nullptr);
 
         const float px = project.x + 30.f;
         nvgTextAlign(vg, NVG_ALIGN_LEFT | NVG_ALIGN_TOP);
@@ -3273,9 +3286,24 @@ brls::View* AboutPage::_buildInfoTab() {
     biliBadge->setHideHighlightBackground(true);
     biliBadge->addView(biliLabel);
 
+    auto* originalLabel = new brls::Label();
+    originalLabel->setText(L("原作者地址") + ":  https://github.com/beiklive/GBAStation");
+    originalLabel->setFontSize(18.f);
+    originalLabel->setTextColor(GET_THEME_COLOR("brls/text"));
+    originalLabel->setFocusable(false);
+
+    auto* originalBadge = new brls::Box(brls::Axis::ROW);
+    originalBadge->setCornerRadius(8.f);
+    originalBadge->setBackgroundColor(nvgRGBA(150, 130, 255, 30));
+    originalBadge->setPadding(6.f, 12.f, 6.f, 12.f);
+    originalBadge->setFocusable(false);
+    originalBadge->setHideHighlightBackground(true);
+    originalBadge->addView(originalLabel);
+
     infoBox->addView(nameLabel);
     infoBox->addView(githubBadge);
     infoBox->addView(biliBadge);
+    infoBox->addView(originalBadge);
 
     authorCard->addView(authorImage);
     authorCard->addView(infoBox);

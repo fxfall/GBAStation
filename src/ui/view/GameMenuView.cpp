@@ -4,6 +4,7 @@
 #include "core/cheat/CheatSystem.hpp"
 #include "emulator/mgba_native/MgbaCheatSystem.hpp"
 #include "game/control/GameInputManager.hpp"
+#include "game/control/InputMappingDefaults.hpp"
 #include "ui/widget/HintsBar.hpp"
 #include "ui/utils/FilePickerHelper.hpp"
 #include "ui/utils/UiHelper.hpp"
@@ -64,26 +65,6 @@ namespace beiklive
                 SET_SETTING_KEY_STR(key.c_str(), value);
         }
 
-        void initNesPlayerDefaults()
-        {
-            const std::string prefixes[] = {"nes.p1.", "nes.p2."};
-            for (const auto& prefix : prefixes)
-            {
-                setDefaultIfMissing(prefix + "handle.up", "PAD_UP|PAD_LEFTSTICKUP");
-                setDefaultIfMissing(prefix + "handle.down", "PAD_DOWN|PAD_LEFTSTICKDOWN");
-                setDefaultIfMissing(prefix + "handle.left", "PAD_LEFT|PAD_LEFTSTICKLEFT");
-                setDefaultIfMissing(prefix + "handle.right", "PAD_RIGHT|PAD_LEFTSTICKRIGHT");
-                setDefaultIfMissing(prefix + "handle.a", "PAD_A");
-                setDefaultIfMissing(prefix + "handle.b", "PAD_B");
-                setDefaultIfMissing(prefix + "handle.start", "PAD_START");
-                setDefaultIfMissing(prefix + "handle.select", "PAD_BACK");
-                setDefaultIfMissing(prefix + "handle.fastforward", "none");
-                setDefaultIfMissing(prefix + "handle.rewind", "none");
-            }
-            setDefaultIfMissing("nes.p1.handle.menu", "PAD_LB");
-            setDefaultIfMissing("nes.p2.handle.menu", "PAD_RB");
-        }
-
         static const NesButtonBindInfo kNesButtonBinds[] = {
             {L("上"), "up", "PAD_UP|PAD_LEFTSTICKUP"},
             {L("下"), "down", "PAD_DOWN|PAD_LEFTSTICKDOWN"},
@@ -97,6 +78,24 @@ namespace beiklive
             {L("快进"), "fastforward", "none"},
             {L("倒带"), "rewind", "none"},
         };
+
+        void initNesPlayerDefaults()
+        {
+            const std::string prefixes[] = {"nes.p1.", "nes.p2."};
+            for (const auto& prefix : prefixes)
+            {
+                for (const auto& bind : kNesButtonBinds)
+                {
+                    const std::string fallback = std::string(bind.suffix) == "menu"
+                        ? (prefix == "nes.p1." ? "PAD_LB" : "PAD_RB")
+                        : bind.fallback;
+                    setDefaultIfMissing(
+                        prefix + "handle." + bind.suffix,
+                        input_mapping::defaultInputValueForPrefix(
+                            prefix, bind.suffix, fallback.c_str()));
+                }
+            }
+        }
 
         struct MenuCapturePadKey
         {
@@ -1102,6 +1101,8 @@ namespace beiklive
             std::string fallback = bind.fallback;
             if (std::string(bind.suffix) == "menu")
                 fallback = player == 0 ? "PAD_LB" : "PAD_RB";
+            fallback = input_mapping::defaultInputValueForPrefix(
+                prefix, bind.suffix, fallback.c_str());
             auto* cell = new beiklive::DetailCell();
             cell->setLeftText(bind.label);
             cell->setRightText(GET_SETTING_KEY_STR(cfgKey.c_str(), fallback));

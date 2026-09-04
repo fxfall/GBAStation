@@ -4,6 +4,9 @@
 #include <cstdlib>
 #include <filesystem>
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+#include "platform/macos/GBAStationMacPaths.hpp"
+#endif
 
 namespace beiklive::path
 {
@@ -151,6 +154,14 @@ inline std::string GetRootPath()
         }
         inline std::string corePath()
         {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+            // macOS releases keep external cores inside the app bundle so
+            // the application and its cores can be shared as one package.
+            // Keep the Application Support path as the non-bundle fallback.
+            const auto bundledPath = beiklive::macos::bundledCorePath();
+            if (!bundledPath.empty())
+                return bundledPath.string();
+#endif
             return ROOT + SPLIT_CHAR + PROGRAM_NAME + SPLIT_CHAR + CORE_DIR;
         }
         inline std::string biosPath()

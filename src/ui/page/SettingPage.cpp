@@ -22,6 +22,7 @@
 #include "core/ThreadPool.hpp"
 #include "core/constexpr.h"
 #include "game/audio/AudioManager.hpp"
+#include "game/control/DesktopInputMapping.hpp"
 #include "game/control/InputMappingDefaults.hpp"
 #include "game/retro/LibretroLoader.hpp"
 
@@ -432,9 +433,8 @@ public:
         }
 
         // 注册键盘按键捕获
-        for (int i = 0; i < k_capKbdKeyCount; ++i)
+        auto registerKeyboardKey = [this](brls::BrlsKeyboardScancode key)
         {
-            auto key = k_capKbdKeys[i].scancode;
             registerAction(brls::BrlsKeyCombination(key),
                            [this, key](brls::View *) -> bool
                            {
@@ -443,7 +443,13 @@ public:
                                return true;
                            },
                            /*allowRepeating=*/false);
-        }
+        };
+        for (int i = 0; i < k_capKbdKeyCount; ++i)
+            registerKeyboardKey(k_capKbdKeys[i].scancode);
+        for (const auto& entry :
+             beiklive::desktop_input::extendedCapturableKeyboardInputs())
+            registerKeyboardKey(
+                static_cast<brls::BrlsKeyboardScancode>(entry.id));
     }
 
     void draw(NVGcontext *vg, float x, float y, float w, float h,
@@ -570,9 +576,7 @@ private:
 
     void captureKeyboardKey(brls::BrlsKeyboardScancode key)
     {
-        const char* name = nullptr;
-        for (int i = 0; i < k_capKbdKeyCount; ++i)
-            if (k_capKbdKeys[i].scancode == key) { name = k_capKbdKeys[i].name; break; }
+        const char* name = beiklive::desktop_input::keyboardInputNameForId(key);
         if (!name) return;
 
         if (std::find(m_capturedKeys.begin(), m_capturedKeys.end(), name) != m_capturedKeys.end())
@@ -644,6 +648,13 @@ private:
             for (int i = 0; i < k_capKbdKeyCount; ++i)
             {
                 if (im->getKeyboardKeyState(k_capKbdKeys[i].scancode))
+                    return;
+            }
+            for (const auto& entry :
+                 beiklive::desktop_input::extendedCapturableKeyboardInputs())
+            {
+                if (im->getKeyboardKeyState(
+                        static_cast<brls::BrlsKeyboardScancode>(entry.id)))
                     return;
             }
         }
@@ -3642,10 +3653,17 @@ private:
                 {L("街机按钮 2"), "b", "PAD_B"},
                 {L("街机按钮 3"), "x", "PAD_X"},
                 {L("街机按钮 4"), "y", "PAD_Y"},
+#if defined(__APPLE__) && !defined(__SWITCH__)
+                {L("L键（街机按钮 5）"), "l", "PAD_LB"},
+                {L("R键（街机按钮 6）"), "r", "PAD_RB"},
+                {L("ZL键（街机按钮 7）"), "l2", "PAD_LT"},
+                {L("ZR键（街机按钮 8）"), "r2", "PAD_RT"},
+#else
                 {L("街机按钮 5"), "l", "PAD_LB"},
                 {L("街机按钮 6"), "r", "PAD_RB"},
                 {L("街机按钮 7"), "l2", "PAD_LT"},
                 {L("街机按钮 8"), "r2", "PAD_RT"},
+#endif
                 {L("投币"), "select", "PAD_BACK"},
                 {L("开始"), "start", "PAD_START"},
             };
@@ -3655,7 +3673,8 @@ private:
             {
                 _addBinding(binding.label, L("直接映射到外部街机核心输入"),
                             beiklive::input_mapping::makeHandleKey(prefix, binding.suffix),
-                            binding.defaultValue);
+                            beiklive::input_mapping::defaultInputValueForPrefix(
+                                prefix, binding.suffix, binding.defaultValue.c_str()));
             }
             m_mappingItems.push_back(_section(L("Arcade 功能键")));
             _addBinding(L("打开菜单"), L("可绑定单键或双键组合"),
@@ -3680,13 +3699,18 @@ private:
 
         const unsigned mask = beiklive::input_mapping::platformMaskForPrefix(prefix);
         m_mappingItems.push_back(_section(L("游戏按键")));
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        const std::string mappingHint = L("可绑定键盘、手柄或组合键");
+#else
+        const std::string mappingHint = L("游戏内对应按键");
+#endif
         for (const auto& entry : beiklive::input_mapping::kGameButtonDefaults)
         {
             if ((entry.platformMask & mask) == 0) continue;
             _addBinding(beiklive::input_mapping::gameButtonLabelForPrefix(prefix, entry),
-                        L("游戏内对应按键"),
+                        mappingHint,
                         beiklive::input_mapping::makeHandleKey(prefix, entry.suffix),
-                        beiklive::input_mapping::defaultHandleValueForPrefix(
+                        beiklive::input_mapping::defaultInputValueForPrefix(
                             prefix, entry.suffix, entry.defaultValue));
         }
         m_mappingItems.push_back(_section(L("功能热键")));
@@ -5625,7 +5649,7 @@ namespace
             cell->setLeftText(beiklive::input_mapping::gameButtonLabelForPrefix(prefix, entry));
             cell->setRightText(cfgGetStr(
                 cfgKey,
-                beiklive::input_mapping::defaultHandleValueForPrefix(
+                beiklive::input_mapping::defaultInputValueForPrefix(
                     prefix, entry.suffix, entry.defaultValue)));
             registerKeyBindActions(cell, cfgKey);
             mapcontainer->addView(cell);

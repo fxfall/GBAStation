@@ -134,6 +134,7 @@ extern "C" {
 #define ROMX_FORMAT_MSU     UINT16_C(0x0080)
 #define ROMX_FORMAT_PCM     UINT16_C(0x0081)
 #define ROMX_FORMAT_ROMX_LAUNCH_DESCRIPTOR UINT16_C(0x0090)
+#define ROMX_FORMAT_ZIP     UINT16_C(0x0091)
 
 #define ROMX_ERROR_MESSAGE_CAPACITY 256
 #define ROMX_OFFSET_UNKNOWN UINT64_MAX
@@ -176,6 +177,18 @@ typedef int32_t romx_result_t;
 #define ROMX_E_MUTABLE_BUNDLE          INT32_C(-33)
 #define ROMX_E_MUTABLE_STATS           INT32_C(-34)
 
+/* Registry support is deliberately separate from structural validity.  A
+ * reader may keep exposing a structurally valid container whose declaration
+ * uses an ID that this build does not know.  Consumers must not silently
+ * treat that value as auto-detection. */
+typedef enum romx_registry_status {
+    ROMX_REGISTRY_UNSPECIFIED = 0,
+    ROMX_REGISTRY_KNOWN       = 1,
+    ROMX_REGISTRY_UNKNOWN     = 2,
+    ROMX_REGISTRY_PRIVATE     = 3,
+    ROMX_REGISTRY_PROHIBITED  = 4
+} romx_registry_status_t;
+
 typedef struct romx_error {
     romx_result_t code;
     int32_t system_code;
@@ -200,6 +213,12 @@ typedef struct romx_io {
 } romx_io_t;
 
 #define ROMX_IO_INIT { (uint32_t)sizeof(romx_io_t), NULL, NULL, NULL }
+
+/* Threading contract: a reader's immutable metadata and positional read
+ * operations may be used concurrently when the supplied IO callbacks are
+ * thread-safe.  Cursor objects (VFS, payload-file, and mutable-file handles)
+ * own a mutable offset and are not safe for concurrent seek/read calls on the
+ * same handle; use one handle per concurrent consumer. */
 
 typedef struct romx_reader_options {
     uint32_t struct_size;
@@ -265,6 +284,7 @@ typedef struct romx_payload_file romx_payload_file_t;
 typedef struct romx_vfs_file romx_vfs_file_t;
 typedef struct romx_mutable_file romx_mutable_file_t;
 typedef struct romx_mutable_bundle romx_mutable_bundle_t;
+typedef struct romx_save_catalog romx_save_catalog_t;
 typedef struct romx_probe romx_probe_t;
 
 typedef struct romx_entry_info {
@@ -534,15 +554,130 @@ typedef struct romx_mutable_write_options {
     UINT64_C(0), UINT64_C(0), UINT32_C(0), UINT32_C(0) \
 }
 
-/* Interoperable, uncompressed SAVE/CHEAT bundle profile. For SAVE, each outer
- * object key identifies one logical save slot and its consumer-defined restore
- * root; bundle entry paths are normalized UTF-8 paths relative to that slot.
+/* Interoperable, uncompressed SAVE/CHEAT bundle profile. Paths are well-formed
+ * UTF-8 and use the ROMX 0.2.0 ASCII-only collision fold. A SAVE object may
+ * project one or more platform-defined logical save slots; the frontend
+ * adapter selects their host roots.
  * Multiple SAVE objects may coexist. For CHEAT, the key selects the consumer-
  * defined destination root. Neither key is a host path. */
 #define ROMX_MUTABLE_BUNDLE_VERSION UINT16_C(1)
 #define ROMX_MUTABLE_BUNDLE_PATH_CAPACITY UINT32_C(1024)
 #define ROMX_MUTABLE_BUNDLE_DEFAULT_MAX_ENTRIES UINT32_C(4096)
 #define ROMX_MUTABLE_BUNDLE_DEFAULT_MAX_SIZE UINT64_C(134217728)
+
+/* Host-side SAVE discovery is intentionally a separate layer from the RMBL
+ * wire format.  It converts a platform-specific source tree into one or more
+ * normalized RMBL objects before the mutable writer commits them. */
+#define ROMX_SAVE_DEFAULT_MAX_CANDIDATES UINT32_C(4096)
+#define ROMX_SAVE_DEFAULT_MAX_FILES UINT32_C(4096)
+#define ROMX_SAVE_DEFAULT_MAX_SIZE UINT64_C(134217728)
+#define ROMX_SAVE_DEFAULT_MAX_DEPTH UINT32_C(64)
+#define ROMX_SAVE_TITLE_ID_CAPACITY UINT32_C(16)
+
+typedef uint32_t romx_save_scan_flags_t;
+#define ROMX_SAVE_SCAN_INCLUDE_HIDDEN UINT32_C(0x00000001)
+#define ROMX_SAVE_SCAN_TREAT_ROOT_AS_SAVE UINT32_C(0x00000002)
+#define ROMX_SAVE_SCAN_FLAGS_MASK (ROMX_SAVE_SCAN_INCLUDE_HIDDEN | \
+    ROMX_SAVE_SCAN_TREAT_ROOT_AS_SAVE)
+
+typedef uint16_t romx_save_grouping_t;
+#define ROMX_SAVE_GROUP_UNSPECIFIED       UINT16_C(0)
+#define ROMX_SAVE_GROUP_SINGLE_FILE       UINT16_C(1)
+#define ROMX_SAVE_GROUP_DIRECTORY_PER_SAVE UINT16_C(2)
+#define ROMX_SAVE_GROUP_MARKER_DIRECTORY  UINT16_C(3)
+
+/* The source labels describe the normalization performed by the host-side
+ * scanner.  They are descriptive and are not new ROMX wire-format IDs. */
+typedef uint16_t romx_save_source_format_t;
+#define ROMX_SAVE_SOURCE_AUTO                 UINT16_C(0)
+#define ROMX_SAVE_SOURCE_FILE                 UINT16_C(1)
+#define ROMX_SAVE_SOURCE_DIRECTORY            UINT16_C(2)
+#define ROMX_SAVE_SOURCE_PSP_SAVEDATA         UINT16_C(3)
+#define ROMX_SAVE_SOURCE_3DS_GATEWAY          UINT16_C(4)
+#define ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER    UINT16_C(5)
+#define ROMX_SAVE_SOURCE_3DS_CITRA            UINT16_C(6)
+#define ROMX_SAVE_SOURCE_3DS_BACKUP           UINT16_C(7)
+#define ROMX_SAVE_SOURCE_ROMX_BUNDLE          UINT16_C(8)
+
+typedef uint32_t romx_save_candidate_flags_t;
+#define ROMX_SAVE_CANDIDATE_IS_DIRECTORY      UINT32_C(0x00000001)
+#define ROMX_SAVE_CANDIDATE_IS_MULTI_FILE     UINT32_C(0x00000002)
+#define ROMX_SAVE_CANDIDATE_HAS_TITLE_ID      UINT32_C(0x00000004)
+#define ROMX_SAVE_CANDIDATE_HAS_MARKER        UINT32_C(0x00000008)
+#define ROMX_SAVE_CANDIDATE_NEEDS_TITLE_MAP   UINT32_C(0x00000010)
+
+typedef struct romx_save_profile_info {
+    uint32_t struct_size;
+    uint16_t platform_id;
+    uint16_t format_id;
+    uint16_t launch_format_id;
+    romx_save_grouping_t grouping;
+    uint32_t flags;
+    uint32_t marker_size;
+    char marker[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+} romx_save_profile_info_t;
+
+#define ROMX_SAVE_PROFILE_INFO_INIT { \
+    (uint32_t)sizeof(romx_save_profile_info_t), UINT16_C(0), UINT16_C(0), \
+    UINT16_C(0), ROMX_SAVE_GROUP_UNSPECIFIED, UINT32_C(0), UINT32_C(0), { 0 } \
+}
+
+typedef struct romx_save_scan_options {
+    uint32_t struct_size;
+    romx_save_scan_flags_t flags;
+    uint16_t platform_id;
+    uint16_t format_id;
+    uint16_t launch_format_id;
+    romx_save_source_format_t source_format_hint;
+    uint32_t max_candidate_count;
+    uint32_t max_file_count;
+    uint64_t max_total_size;
+    uint32_t max_depth;
+    uint32_t reserved;
+} romx_save_scan_options_t;
+
+#define ROMX_SAVE_SCAN_OPTIONS_INIT { \
+    (uint32_t)sizeof(romx_save_scan_options_t), UINT32_C(0), \
+    UINT16_C(0), UINT16_C(0), UINT16_C(0), ROMX_SAVE_SOURCE_AUTO, \
+    UINT32_C(0), UINT32_C(0), UINT64_C(0), UINT32_C(0), UINT32_C(0) \
+}
+
+typedef struct romx_save_candidate_info {
+    uint32_t struct_size;
+    uint32_t index;
+    romx_save_candidate_flags_t flags;
+    romx_save_source_format_t source_format;
+    romx_save_grouping_t grouping;
+    uint16_t reserved;
+    uint32_t file_count;
+    uint64_t data_size;
+    uint32_t key_size;
+    uint32_t display_name_size;
+    uint32_t title_id_size;
+    char key[ROMX_MUTABLE_KEY_CAPACITY + 1U];
+    char display_name[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+    char title_id[ROMX_SAVE_TITLE_ID_CAPACITY + 1U];
+} romx_save_candidate_info_t;
+
+#define ROMX_SAVE_CANDIDATE_INFO_INIT { \
+    (uint32_t)sizeof(romx_save_candidate_info_t), UINT32_C(0), UINT32_C(0), \
+    UINT16_C(0), ROMX_SAVE_GROUP_UNSPECIFIED, UINT16_C(0), UINT32_C(0), \
+    UINT64_C(0), UINT32_C(0), UINT32_C(0), UINT32_C(0), { 0 }, { 0 }, { 0 } \
+}
+
+typedef struct romx_save_file_info {
+    uint32_t struct_size;
+    uint32_t index;
+    uint64_t data_size;
+    uint32_t flags;
+    uint32_t path_size;
+    char path[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+} romx_save_file_info_t;
+
+#define ROMX_SAVE_FILE_INFO_INIT { \
+    (uint32_t)sizeof(romx_save_file_info_t), UINT32_C(0), UINT64_C(0), \
+    UINT32_C(0), UINT32_C(0), { 0 } \
+}
 
 typedef struct romx_mutable_bundle_path_entry {
     uint32_t struct_size;
@@ -585,9 +720,10 @@ typedef struct romx_mutable_bundle_entry_info {
     UINT64_C(0), UINT32_C(0), UINT32_C(0), { 0 } \
 }
 
-/* Platform-aware logical SAVE-slot projection of an RMBL file set. PSP bundles
- * group files by top-level directory; other ROMX 0.2.0 platforms expose one
- * slot per bundle file. Root-level PSP files remain individual slots. The key
+/* Platform-aware logical SAVE-slot projection of an RMBL file set. PSP slots
+ * are directories containing a valid PARAM.SFO identity; 3DS slots group
+ * entries below each first-level directory; other ROMX 0.2.0 platforms expose
+ * one slot per bundle file unless a platform profile says otherwise. The key
  * is a bundle-relative slot label, not a host path. */
 typedef struct romx_mutable_save_slot_info {
     uint32_t struct_size;
@@ -595,12 +731,34 @@ typedef struct romx_mutable_save_slot_info {
     uint32_t entry_count;
     uint32_t key_size;
     uint64_t data_size;
+    uint32_t display_name_size;
+    uint32_t is_directory;
     char key[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+    char display_name[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
 } romx_mutable_save_slot_info_t;
 
 #define ROMX_MUTABLE_SAVE_SLOT_INFO_INIT { \
     (uint32_t)sizeof(romx_mutable_save_slot_info_t), UINT32_C(0), \
-    UINT32_C(0), UINT32_C(0), UINT64_C(0), { 0 } \
+    UINT32_C(0), UINT32_C(0), UINT64_C(0), UINT32_C(0), UINT32_C(0), \
+    { 0 }, { 0 } \
+}
+
+typedef uint32_t romx_mutable_psp_savedata_flags_t;
+#define ROMX_MUTABLE_PSP_SAVEDATA_HAS_DISC_ID UINT32_C(0x00000001)
+#define ROMX_MUTABLE_PSP_SAVEDATA_HAS_DIRECTORY UINT32_C(0x00000002)
+#define ROMX_MUTABLE_PSP_SAVEDATA_HAS_TITLE UINT32_C(0x00000004)
+
+typedef struct romx_mutable_psp_savedata_info {
+    uint32_t struct_size;
+    romx_mutable_psp_savedata_flags_t flags;
+    char disc_id[65];
+    char savedata_directory[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+    char title[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+} romx_mutable_psp_savedata_info_t;
+
+#define ROMX_MUTABLE_PSP_SAVEDATA_INFO_INIT { \
+    (uint32_t)sizeof(romx_mutable_psp_savedata_info_t), UINT32_C(0), \
+    { 0 }, { 0 }, { 0 } \
 }
 
 /* Strict, versioned STATS JSON profile. Every field other than schema/version
@@ -649,6 +807,14 @@ ROMX_API const char *romx_result_string(romx_result_t result);
 ROMX_API const char *romx_platform_name(uint16_t platform_id);
 ROMX_API const char *romx_launch_format_name(uint16_t launch_format_id);
 ROMX_API const char *romx_file_format_name(uint16_t format_id);
+
+/* Returns the frozen 0.2.0 registry classification for an ID.  Platform and
+ * launch-format zero is UNSPECIFIED; RIDX file-format zero is UNKNOWN.
+ * UNKNOWN is otherwise a readable-but-not-supported non-zero standard-range
+ * value; PRIVATE is 0x8000..0xFFFE; PROHIBITED is 0xFFFF. */
+ROMX_API romx_registry_status_t romx_platform_status(uint16_t platform_id);
+ROMX_API romx_registry_status_t romx_launch_format_status(uint16_t launch_format_id);
+ROMX_API romx_registry_status_t romx_file_format_status(uint16_t format_id);
 
 ROMX_API romx_result_t romx_reader_open_path(
     const char *utf8_path,
@@ -1037,8 +1203,83 @@ ROMX_API romx_result_t romx_mutable_bundle_write_path_entries(
     romx_mutable_object_info_t *written_object,
     romx_error_t *error);
 
+/* Host-side SAVE catalog. The source path is never stored in the RMBL wire
+ * format; the catalog owns its copy until romx_save_catalog_close(). A
+ * directory-per-save profile treats each direct child directory as one
+ * logical save and keeps every regular file below that directory together.
+ * Direct files remain independent candidates. */
+ROMX_API romx_result_t romx_save_profile_get(
+    uint16_t platform_id,
+    uint16_t format_id,
+    uint16_t launch_format_id,
+    romx_save_profile_info_t *profile,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_save_catalog_open_path(
+    const char *utf8_source_path,
+    const romx_save_scan_options_t *options,
+    romx_save_catalog_t **out_catalog,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_save_catalog_get_profile(
+    const romx_save_catalog_t *catalog,
+    romx_save_profile_info_t *profile,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_save_catalog_get_candidate_count(
+    const romx_save_catalog_t *catalog,
+    uint32_t *count,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_save_catalog_get_candidate(
+    const romx_save_catalog_t *catalog,
+    uint32_t index,
+    romx_save_candidate_info_t *candidate,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_save_catalog_get_file_count(
+    const romx_save_catalog_t *catalog,
+    uint32_t candidate_index,
+    uint32_t *count,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_save_catalog_get_file(
+    const romx_save_catalog_t *catalog,
+    uint32_t candidate_index,
+    uint32_t file_index,
+    romx_save_file_info_t *file,
+    romx_error_t *error);
+
+ROMX_API romx_result_t romx_save_catalog_copy_candidate_source_path(
+    const romx_save_catalog_t *catalog,
+    uint32_t candidate_index,
+    void *buffer,
+    uint64_t capacity,
+    uint64_t *required_size,
+    romx_error_t *error);
+
+/* Converts one catalog candidate into an RMBL object in the SAVE namespace.
+ * One call writes one logical candidate, keeping all files in one 3DS save
+ * together. When object_key is NULL or empty, the catalog's collision-safe
+ * candidate key is used. Source file names are preserved relative to the
+ * candidate root. */
+ROMX_API romx_result_t romx_save_catalog_write_candidate(
+    const romx_save_catalog_t *catalog,
+    uint32_t candidate_index,
+    const char *utf8_romx_path,
+    const char *object_key,
+    const romx_mutable_bundle_options_t *bundle_options,
+    const romx_mutable_write_options_t *write_options,
+    romx_mutable_object_info_t *written_object,
+    romx_error_t *error);
+
+ROMX_API void romx_save_catalog_close(romx_save_catalog_t *catalog);
+
 /* A bundle borrows its reader. Opening validates the complete bundle,
- * including every per-file CRC32, before any entry can be exposed. */
+ * including every per-file CRC32, before any entry can be exposed. Bundle
+ * entry reads use an internal mutable cursor; do not call read_entry
+ * concurrently on one bundle handle. Open one bundle per consumer/thread,
+ * or serialize access to a shared handle. */
 ROMX_API romx_result_t romx_mutable_bundle_open(
     const romx_reader_t *reader,
     romx_mutable_namespace_t object_namespace,
@@ -1076,6 +1317,17 @@ ROMX_API romx_result_t romx_mutable_bundle_get_save_slot_entry(
     romx_mutable_bundle_entry_info_t *entry,
     romx_error_t *error);
 
+/* Validates a PSP PARAM.SFO without scanning host directories. When
+ * expected_directory_basename is non-NULL, SAVEDATA_DIRECTORY is accepted
+ * only when it matches that basename after PSP identity normalization. A
+ * valid DISC_ID is independently sufficient. */
+ROMX_API romx_result_t romx_mutable_psp_savedata_inspect_sfo(
+    const void *sfo_bytes,
+    uint64_t sfo_size,
+    const char *expected_directory_basename,
+    romx_mutable_psp_savedata_info_t *info,
+    romx_error_t *error);
+
 ROMX_API romx_result_t romx_mutable_bundle_read_entry(
     romx_mutable_bundle_t *bundle,
     uint32_t index,
@@ -1091,6 +1343,17 @@ ROMX_API romx_result_t romx_mutable_stats_parse_json(
     const void *json,
     uint64_t json_size,
     romx_mutable_stats_t *stats,
+    romx_error_t *error);
+
+/* Merge one frontend session delta into the latest cumulative baseline. Time
+ * and launch counters are added with safe-integer overflow checks; first/last
+ * timestamps use min/max; user state and achievement summaries supplied by
+ * the delta replace the baseline values. The input delta is not an absolute
+ * stale snapshot. */
+ROMX_API romx_result_t romx_mutable_stats_merge_session_delta(
+    const romx_mutable_stats_t *baseline,
+    const romx_mutable_stats_t *session_delta,
+    romx_mutable_stats_t *merged,
     romx_error_t *error);
 
 ROMX_API romx_result_t romx_mutable_stats_serialize_json(

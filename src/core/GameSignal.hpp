@@ -200,6 +200,58 @@ public:
             m_gameButtonMasks[player].store(mask, std::memory_order_release);
     }
 
+    // ---- 游戏模拟输入（摇杆/扳机） ------------------------------------
+#if defined(__APPLE__) && !defined(__SWITCH__)
+
+    struct AnalogState
+    {
+        unsigned char leftTrigger = 0;
+        unsigned char rightTrigger = 0;
+        int16_t leftStickX = 0;
+        int16_t leftStickY = 0;
+        int16_t rightStickX = 0;
+        int16_t rightStickY = 0;
+    };
+
+    /// UI 线程调用：设置指定玩家的模拟输入快照。
+    void setGameAnalogState(unsigned player, const AnalogState& state) {
+        if (player >= kMaxPlayers)
+            return;
+        m_leftTrigger[player].store(state.leftTrigger, std::memory_order_release);
+        m_rightTrigger[player].store(state.rightTrigger, std::memory_order_release);
+        m_leftStickX[player].store(state.leftStickX, std::memory_order_release);
+        m_leftStickY[player].store(state.leftStickY, std::memory_order_release);
+        m_rightStickX[player].store(state.rightStickX, std::memory_order_release);
+        m_rightStickY[player].store(state.rightStickY, std::memory_order_release);
+    }
+
+    /// 游戏线程调用：获取指定玩家的模拟输入快照。
+    AnalogState getGameAnalogState(unsigned player) const {
+        if (player >= kMaxPlayers)
+            return {};
+        AnalogState state;
+        state.leftTrigger = m_leftTrigger[player].load(std::memory_order_acquire);
+        state.rightTrigger = m_rightTrigger[player].load(std::memory_order_acquire);
+        state.leftStickX = m_leftStickX[player].load(std::memory_order_acquire);
+        state.leftStickY = m_leftStickY[player].load(std::memory_order_acquire);
+        state.rightStickX = m_rightStickX[player].load(std::memory_order_acquire);
+        state.rightStickY = m_rightStickY[player].load(std::memory_order_acquire);
+        return state;
+    }
+
+    /// 重置指定玩家的模拟输入。
+    void clearGameAnalogState(unsigned player) {
+        if (player >= kMaxPlayers)
+            return;
+        m_leftTrigger[player].store(0, std::memory_order_release);
+        m_rightTrigger[player].store(0, std::memory_order_release);
+        m_leftStickX[player].store(0, std::memory_order_release);
+        m_leftStickY[player].store(0, std::memory_order_release);
+        m_rightStickX[player].store(0, std::memory_order_release);
+        m_rightStickY[player].store(0, std::memory_order_release);
+    }
+#endif
+
     // ---- 金手指更新信号 -------------------------------------------------
 
     struct CheatPathReq { std::string path; bool pending = false; };
@@ -347,6 +399,16 @@ public:
         m_pendingConfigUpdate.store(false, std::memory_order_relaxed);
         for (auto& mask : m_gameButtonMasks)
             mask.store(0, std::memory_order_relaxed);
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        for (unsigned player = 0; player < kMaxPlayers; ++player) {
+            m_leftTrigger[player].store(0, std::memory_order_relaxed);
+            m_rightTrigger[player].store(0, std::memory_order_relaxed);
+            m_leftStickX[player].store(0, std::memory_order_relaxed);
+            m_leftStickY[player].store(0, std::memory_order_relaxed);
+            m_rightStickX[player].store(0, std::memory_order_relaxed);
+            m_rightStickY[player].store(0, std::memory_order_relaxed);
+        }
+#endif
     }
 
 private:
@@ -373,6 +435,14 @@ private:
     std::atomic<bool> m_autoSaveDone{false};             ///< 退出自动存档是否已处理完毕
     std::atomic<bool> m_pendingConfigUpdate{false};    ///< 待刷新核心配置
     std::atomic<uint32_t> m_gameButtonMasks[kMaxPlayers]{};  ///< 游戏按键位掩码（bit i = RETRO_DEVICE_ID_JOYPAD_* i）
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    std::atomic<unsigned char> m_leftTrigger[kMaxPlayers]{};
+    std::atomic<unsigned char> m_rightTrigger[kMaxPlayers]{};
+    std::atomic<int16_t> m_leftStickX[kMaxPlayers]{};
+    std::atomic<int16_t> m_leftStickY[kMaxPlayers]{};
+    std::atomic<int16_t> m_rightStickX[kMaxPlayers]{};
+    std::atomic<int16_t> m_rightStickY[kMaxPlayers]{};
+#endif
 };
 
 } // namespace beiklive

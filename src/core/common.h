@@ -334,9 +334,19 @@ namespace beiklive // 全局功能函数
             return "";  // Snes9x 静态链接，无需路径
         case (int)beiklive::enums::EmuPlatform::EmuGenesis:
             return "";  // Genesis Plus GX 源码静态接入，无需路径
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        case (int)beiklive::enums::EmuPlatform::Emu3DS:
+            return path::corePath() + "/azahar_libretro.dylib";
+        case (int)beiklive::enums::EmuPlatform::EmuArcade:
+            return path::corePath() + "/fbneo_libretro.dylib";
+        case (int)beiklive::enums::EmuPlatform::EmuPSP:
+            return path::corePath() + "/ppsspp_libretro.dylib";
+        case (int)beiklive::enums::EmuPlatform::EmuDreamcast:
+#else
         case (int)beiklive::enums::EmuPlatform::EmuArcade:
         case (int)beiklive::enums::EmuPlatform::EmuDreamcast:
         case (int)beiklive::enums::EmuPlatform::EmuPSP:
+#endif
         case (int)beiklive::enums::EmuPlatform::EmuPS1:
         case (int)beiklive::enums::EmuPlatform::EmuSaturn:
         case (int)beiklive::enums::EmuPlatform::EmuDolphin:

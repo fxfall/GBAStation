@@ -32,6 +32,7 @@ add_library(romx
     src/region.c
     src/reader.c
     src/registry.c
+    src/save_manager.c
     src/sha256.c
     src/validate.c
     src/vfs_file.c

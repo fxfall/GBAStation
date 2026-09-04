@@ -40,6 +40,22 @@ public:
         uint32_t entryCount = 0;
     };
 
+    /// A platform-normalized save discovered by libromx on the host.  The
+    /// frontend only displays this description; it does not inspect 3DS
+    /// directory names or decide which files belong to one save.
+    struct LocalSaveCandidate
+    {
+        std::string key;
+        std::string displayName;
+        std::string titleId;
+        std::string sourcePath;
+        uint16_t sourceFormat = 0;
+        uint16_t grouping = 0;
+        uint32_t fileCount = 0;
+        uint64_t dataSize = 0;
+        bool isDirectory = false;
+    };
+
     struct Options
     {
         bool extractCover = true;
@@ -67,6 +83,27 @@ public:
     static std::vector<SaveSlot> listSaveSlots(const GameEntry& entry,
                                                std::string* error = nullptr);
 
+    /// Discovers native 3DS saves from a file or directory.  SaveDataFiler,
+    /// Citra, Gateway, marker-directory, and single-file layouts are grouped
+    /// by libromx; the GUI does not duplicate those format rules.
+    static std::vector<LocalSaveCandidate> listLocalSaveCandidates(
+        const GameEntry& entry, const std::string& sourcePath,
+        std::string* error = nullptr);
+
+    /// Writes every recognized native 3DS save candidate into an existing
+    /// ROMX container.  Native ROM paths are rejected; this API never creates
+    /// a ROMX container.  Each candidate is a separate SAVE object so
+    /// multiple folder saves remain independently selectable in the frontend.
+    static SyncResult writeLocalSavesToRomx(
+        const GameEntry& entry, const std::string& sourcePath,
+        std::string* outputPath = nullptr, uint32_t* writtenCount = nullptr,
+        std::string* error = nullptr);
+
+    /// Returns the native 3DS save directory used by the macOS Azahar
+    /// libretro core.  The GUI and ROMX adapter share this mapping so a
+    /// restored SAVE object is visible to the core without modifying it.
+    static std::string nativeSaveDirectory(const GameEntry& entry);
+
     /// Validates a user supplied UTF-8 SAVE object key before a write.  Keys
     /// are labels, not local paths: slash, dot components, NUL, and an empty
     /// label are rejected.  The byte limit follows ROMX 0.2.0's 448-byte key
@@ -81,12 +118,13 @@ public:
     /// restore always replaces one local active DISC_ID directory.  The
     /// selectionKey returned by listSaveSlots is an adapter-only selector for
     /// a logical slot inside an RMBL SAVE bundle.  Other platforms continue
-    /// to use the interoperable `libretro` object.  On built-in
-    /// battery-backed platforms, SAVE restore derives the local destination
-    /// from `GameEntry.path` (`<stem>.sav`, or Genesis `.srm`) instead of
-    /// trusting the mutable bundle's relative filename.  SAVE export for
-    /// non-PSP entries contains only the core's stem-matched battery file,
-    /// never savestates/thumbnails.
+    /// to use the interoperable `libretro` object.  On built-in battery-backed
+    /// platforms, SAVE restore derives the local destination from
+    /// `GameEntry.path` (`<stem>.sav`, or Genesis `.srm`) instead of trusting
+    /// the mutable bundle's relative filename.  3DS SAVE export uses
+    /// libromx's platform catalog and keeps each recognized native save as a
+    /// separate mutable object; generic export never copies savestates or
+    /// thumbnails.
     static SyncResult restoreSave(GameEntry& entry, std::string* error = nullptr);
     /// Restores one named SAVE object.  The key is the ROMX slot label and is
     /// interpreted as UTF-8; selecting an existing key is an overwrite of the

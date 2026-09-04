@@ -22,6 +22,20 @@ namespace beiklive::input_mapping
     inline constexpr unsigned kPlatformExplicitRightStick =
         kPlatformGbFamily | kPlatformNes | kPlatformSfc | kPlatformThreeDs | kPlatformGenesis;
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    inline constexpr unsigned kPlatformShoulderButtons =
+        kPlatformGbFamily | kPlatformSfc | kPlatformNds | kPlatformThreeDs |
+        kPlatformGenesis | kPlatformArcade | kPlatformDreamcast | kPlatformPsp |
+        kPlatformPs1 | kPlatformSaturn | kPlatformDolphin;
+    inline constexpr unsigned kPlatformLeftStickButtons = kPlatformThreeDs | kPlatformPsp;
+#else
+    inline constexpr unsigned kPlatformShoulderButtons =
+        kPlatformGbFamily | kPlatformSfc | kPlatformNds | kPlatformThreeDs |
+        kPlatformGenesis | kPlatformArcade | kPlatformDreamcast | kPlatformPsp |
+        kPlatformSaturn | kPlatformDolphin;
+    inline constexpr unsigned kPlatformLeftStickButtons = kPlatformThreeDs;
+#endif
+
     struct GameButtonDefault
     {
         const char* label;
@@ -41,23 +55,60 @@ namespace beiklive::input_mapping
         {"方向键下", "down", "PAD_DOWN", kPlatformAll},
         {"方向键左", "left", "PAD_LEFT", kPlatformAll},
         {"方向键右", "right", "PAD_RIGHT", kPlatformAll},
-        {"L键", "l", "PAD_LB", kPlatformGbFamily | kPlatformSfc | kPlatformNds | kPlatformThreeDs | kPlatformGenesis | kPlatformArcade | kPlatformDreamcast | kPlatformPsp | kPlatformSaturn | kPlatformDolphin},
-        {"R键", "r", "PAD_RB", kPlatformGbFamily | kPlatformSfc | kPlatformNds | kPlatformThreeDs | kPlatformGenesis | kPlatformArcade | kPlatformDreamcast | kPlatformPsp | kPlatformSaturn | kPlatformDolphin},
-        // ZL/ZR only exist on the 3DS; the external cores use these physical
-        // buttons for their own inputs (arcade button 7/8 on FBNeo).
+        {"L键", "l", "PAD_LB", kPlatformShoulderButtons},
+        {"R键", "r", "PAD_RB", kPlatformShoulderButtons},
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        {"L3键", "l3", "PAD_LSB", kPlatformThreeDs | kPlatformArcade | kPlatformDreamcast | kPlatformPsp | kPlatformPs1 | kPlatformSaturn | kPlatformDolphin},
+        {"R3键", "r3", "PAD_RSB", kPlatformThreeDs | kPlatformArcade | kPlatformDreamcast | kPlatformPsp | kPlatformPs1 | kPlatformSaturn | kPlatformDolphin},
+#endif
         {"ZL键", "l2", "PAD_LT", kPlatformThreeDs | kPlatformArcade | kPlatformPs1 | kPlatformSaturn | kPlatformDolphin},
         {"ZR键", "r2", "PAD_RT", kPlatformThreeDs | kPlatformArcade | kPlatformPs1 | kPlatformSaturn | kPlatformDolphin},
         {"开始键", "start", "PAD_START", kPlatformAll},
         {"选择键", "select", "PAD_BACK", kPlatformAll},
-        {"左摇杆上", "lstick_up", "PAD_LEFTSTICKUP", kPlatformThreeDs},
-        {"左摇杆下", "lstick_down", "PAD_LEFTSTICKDOWN", kPlatformThreeDs},
-        {"左摇杆左", "lstick_left", "PAD_LEFTSTICKLEFT", kPlatformThreeDs},
-        {"左摇杆右", "lstick_right", "PAD_LEFTSTICKRIGHT", kPlatformThreeDs},
+        {"左摇杆上", "lstick_up", "PAD_LEFTSTICKUP", kPlatformLeftStickButtons},
+        {"左摇杆下", "lstick_down", "PAD_LEFTSTICKDOWN", kPlatformLeftStickButtons},
+        {"左摇杆左", "lstick_left", "PAD_LEFTSTICKLEFT", kPlatformLeftStickButtons},
+        {"左摇杆右", "lstick_right", "PAD_LEFTSTICKRIGHT", kPlatformLeftStickButtons},
         {"右摇杆上", "rstick_up", "PAD_RIGHTSTICKUP", kPlatformExplicitRightStick},
         {"右摇杆下", "rstick_down", "PAD_RIGHTSTICKDOWN", kPlatformExplicitRightStick},
         {"右摇杆左", "rstick_left", "PAD_RIGHTSTICKLEFT", kPlatformExplicitRightStick},
         {"右摇杆右", "rstick_right", "PAD_RIGHTSTICKRIGHT", kPlatformExplicitRightStick},
     };
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    // Desktop keyboard layout follows the Nintendo Switch button geometry:
+    // I/J/K/L are X/Y/B/A, while Q/Tab/O/P are L/ZL/R/ZR.
+    // The values are combined with the controller defaults below, so both
+    // input sources remain available without a per-core keyboard adapter.
+    struct KeyboardButtonDefault
+    {
+        const char* suffix;
+        const char* value;
+    };
+
+    inline constexpr KeyboardButtonDefault kKeyboardButtonDefaults[] = {
+        {"a", "L"},
+        {"b", "K"},
+        {"x", "I"},
+        {"y", "J"},
+        {"up", "UP"},
+        {"down", "DOWN"},
+        {"left", "LEFT"},
+        {"right", "RIGHT"},
+        {"l", "Q"},
+        {"l2", "TAB"},
+        {"r", "O"},
+        {"r2", "P"},
+        {"l3", "E"},
+        {"r3", "U"},
+        {"start", "ENTER"},
+        {"select", "BACKSPACE"},
+        {"lstick_up", "W"},
+        {"lstick_down", "S"},
+        {"lstick_left", "A"},
+        {"lstick_right", "D"},
+    };
+#endif
 
     struct HotkeyDefault
     {
@@ -204,6 +255,10 @@ namespace beiklive::input_mapping
 
     inline unsigned platformMaskForPrefix(const std::string& prefix)
     {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        if (prefix == "nes.p1." || prefix == "nes.p2.")
+            return kPlatformNes;
+#endif
         if (prefix == "nes.")
             return kPlatformNes;
         if (prefix == "sfc.")
@@ -294,6 +349,15 @@ namespace beiklive::input_mapping
                                                    const std::string& suffix,
                                                    const char* fallback = "none")
     {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        if (prefix == "nes.p1." || prefix == "nes.p2.")
+        {
+            if (suffix == "up") return "PAD_UP|PAD_LEFTSTICKUP";
+            if (suffix == "down") return "PAD_DOWN|PAD_LEFTSTICKDOWN";
+            if (suffix == "left") return "PAD_LEFT|PAD_LEFTSTICKLEFT";
+            if (suffix == "right") return "PAD_RIGHT|PAD_LEFTSTICKRIGHT";
+        }
+#endif
         if (prefix == "saturn.")
         {
             if (suffix == "a") return "PAD_B";
@@ -308,5 +372,38 @@ namespace beiklive::input_mapping
         if (requiresExplicitRightStickMapping(prefix) && isRightStickMapping(suffix))
             return "none";
         return defaultHandleValue(suffix, fallback);
+    }
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    inline const char* defaultKeyboardValue(const std::string& suffix)
+    {
+        for (const auto& entry : kKeyboardButtonDefaults)
+        {
+            if (suffix == entry.suffix)
+                return entry.value;
+        }
+        return nullptr;
+    }
+#endif
+
+    inline std::string defaultInputValueForPrefix(const std::string& prefix,
+                                                  const std::string& suffix,
+                                                  const char* fallback = "none")
+    {
+        const char* controllerValue = defaultHandleValueForPrefix(prefix, suffix, fallback);
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        const char* keyboardValue = defaultKeyboardValue(suffix);
+        if (!keyboardValue || std::string(keyboardValue).empty())
+            return controllerValue ? controllerValue : "none";
+        if (!controllerValue || std::string(controllerValue).empty() ||
+            std::string(controllerValue) == "none")
+            return keyboardValue;
+        return std::string(controllerValue) + "|" + keyboardValue;
+#else
+        // Keep non-macOS defaults byte-for-byte compatible with the original
+        // controller-only configuration.  Keyboard defaults are a macOS
+        // frontend feature and must not leak into the NRO or other targets.
+        return controllerValue ? controllerValue : "none";
+#endif
     }
 }

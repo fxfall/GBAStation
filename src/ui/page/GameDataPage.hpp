@@ -47,6 +47,7 @@ namespace beiklive
         void _confirmSetScreenshotAsCover(int index);
         void _exportSav();
         void _importSav();
+        void _writeThreeDsSavesToRomx(const std::string& sourcePath);
         void _confirmDeleteSav();
         void _backupSav();
         void _confirmClearShaderCache();

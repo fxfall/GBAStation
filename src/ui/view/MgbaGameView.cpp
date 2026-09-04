@@ -1220,7 +1220,9 @@ namespace beiklive
             { EMU_SELECT, "select", 2  }, // RETRO_DEVICE_ID_JOYPAD_SELECT
         };
         for (const auto& info : gameBtnInfos) {
-            const auto* defaultValue = beiklive::input_mapping::defaultHandleValue(info.cfgSuffix);
+            const std::string defaultValue =
+                beiklive::input_mapping::defaultInputValueForPrefix(
+                    mappingPrefix, info.cfgSuffix);
             bool supported = false;
             for (const auto& entry : beiklive::input_mapping::kGameButtonDefaults) {
                 if (std::string(info.cfgSuffix) == entry.suffix) {
@@ -1277,7 +1279,7 @@ namespace beiklive
                 const std::string cfgKey = beiklive::input_mapping::makeHandleKey(mappingPrefix, info.cfgSuffix);
                 std::string val = GET_SETTING_KEY_STR(
                     cfgKey,
-                    beiklive::input_mapping::defaultHandleValueForPrefix(
+                    beiklive::input_mapping::defaultInputValueForPrefix(
                         mappingPrefix, info.cfgSuffix));
                 const bool usePolledGameInput =
                     GET_SETTING_KEY_INT("input.polled_game_input", 1) != 0;
@@ -2815,12 +2817,8 @@ namespace beiklive
             }
 
             // ---- 从输入管理器更新游戏按键状态 ----
-            GameInputManager::instance().setActivePlatform(m_gameEntry.platform);
-            GameInputManager::instance().refreshPlayerInputStatesForPlatform(m_gameEntry.platform);
-            GameSignal::instance().setGameButtonMask(
-                0, GameInputManager::instance().getPlayerInputState(0).buttonMask);
-            GameSignal::instance().setGameButtonMask(
-                1, GameInputManager::instance().getPlayerInputState(1).buttonMask);
+            GameInputManager::instance().publishPlayerInputStatesForPlatform(
+                m_gameEntry.platform);
 
             // 先处理连发（Turbo）状态
             m_turboFrameCount++;

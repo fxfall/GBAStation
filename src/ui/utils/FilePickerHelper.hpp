@@ -30,4 +30,9 @@ namespace beiklive
         const std::string& startPath = "",
         const std::string& filename = "");
 
+    /// 打开目录选取器。选择当前目录后回调完整目录路径。
+    void openDirectoryPicker(
+        std::function<void(const std::string&)> onSelected,
+        const std::string& startPath = "");
+
 } // namespace beiklive

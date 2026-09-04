@@ -1,4 +1,4 @@
-name: Build GBAStation Switch Release
+name: Build GBAStation releases
 
 on:
   workflow_dispatch:
@@ -10,7 +10,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-switch:
+    name: Nintendo Switch package
     runs-on: ubuntu-latest
     timeout-minutes: 90
     container:
@@ -44,8 +45,7 @@ jobs:
           set -euo pipefail
           dkp-pacman -S --noconfirm --needed switch-dev switch-curl
           # ccache is optional: some devkita64 images do not publish it in
-          # their pacman repository, while switchbuild.sh can build without
-          # a compiler launcher.
+          # their pacman repository, while switchbuild.sh can build without it.
           if ! dkp-pacman -S --noconfirm --needed ccache; then
             echo '::warning::ccache is unavailable in this devkitPro image; continuing without it'
           fi
@@ -111,8 +111,6 @@ jobs:
               >> core-release-info/CORE-RELEASES.txt
           }
 
-          # The three new upstream core interfaces are not published as NRO
-          # Releases yet; keep them out of this mandatory download step.
           download_latest fxfall/GBAStation_3DS GBAStation3DSStub.nro
           download_latest fxfall/GBAStation_FBNeo GBAStationFBNeoStub.nro
           download_latest beiklive/GBAStation_flycast GBAStationFlycastStub.nro
@@ -122,6 +120,7 @@ jobs:
       - name: Build frontend and stage external cores
         shell: bash
         run: |
+          set -euo pipefail
           chmod +x switchbuild.sh
           ./switchbuild.sh --core-dir "$GITHUB_WORKSPACE/external-cores" -j "$(nproc)"
 
@@ -133,16 +132,13 @@ jobs:
             ccache --show-stats
           fi
 
-      - name: Create release package
+      - name: Create Nintendo Switch release package
         id: prep
         shell: bash
         run: |
           set -euo pipefail
-          TAG_NAME=${GITHUB_REF_NAME}
-          VERSION_NAME=${TAG_NAME#v}
           PACKAGE_DIR=package
           ZIP_FILE=GBAStation.zip
-          CHANGELOG_FILE="${VERSION_NAME}.txt"
           SUMS_FILE=SHA256SUMS.txt
           CORE_INFO_FILE=CORE-RELEASES.txt
 
@@ -165,11 +161,8 @@ jobs:
           )
           sha256sum "$ZIP_FILE" >> "$SUMS_FILE"
           cp core-release-info/CORE-RELEASES.txt "$CORE_INFO_FILE"
-          printf '%s\n' "$(git tag -l --format='%(contents)' "$TAG_NAME")" > "$CHANGELOG_FILE"
 
-          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
-          echo "changelog_file=$CHANGELOG_FILE" >> "$GITHUB_OUTPUT"
           echo "sums_file=$SUMS_FILE" >> "$GITHUB_OUTPUT"
           echo "core_info_file=$CORE_INFO_FILE" >> "$GITHUB_OUTPUT"
 
@@ -181,21 +174,8 @@ jobs:
             ${{ steps.prep.outputs.zip_file }}
             ${{ steps.prep.outputs.sums_file }}
             ${{ steps.prep.outputs.core_info_file }}
-            ${{ steps.prep.outputs.changelog_file }}
           if-no-files-found: error
           retention-days: 30
-
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          body_path: ${{ steps.prep.outputs.changelog_file }}
-          files: |
-            ${{ steps.prep.outputs.zip_file }}
-            ${{ steps.prep.outputs.sums_file }}
-            ${{ steps.prep.outputs.core_info_file }}
 
       # Keep the historical release repository integration optional. It is not
       # part of the build dependency chain and must not fail the GitHub Release.
@@ -204,3 +184,205 @@ jobs:
         shell: bash
         run: |
           git clone "https://x-access-token:${RELEASE_REPO_TOKEN}@github.com/beiklive/GBAStation_Release.git" release_repo
+
+  build-macos:
+    name: macOS 26 arm64 application
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ secrets.CORE_RELEASE_TOKEN || github.token }}
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+
+    steps:
+      - name: Check out frontend source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out KosmicKrisp source
+        uses: actions/checkout@v4
+        with:
+          repository: beiklive/nxvk
+          ref: switch
+          path: kosmickrisp-source
+          fetch-depth: 1
+
+      - name: Install macOS and KosmicKrisp build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install cmake ninja meson pkg-config llvm libclc \
+            spirv-llvm-translator spirv-tools vulkan-loader vulkan-headers
+          mesa_venv="$RUNNER_TEMP/mesa-venv"
+          python3 -m venv "$mesa_venv"
+          "$mesa_venv/bin/pip" install --upgrade pip
+          "$mesa_venv/bin/pip" install mako packaging pyyaml meson
+
+      - name: Build KosmicKrisp runtime SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          llvm_prefix="$(brew --prefix llvm)"
+          export PATH="$llvm_prefix/bin:$PATH"
+          export LLVM_CONFIG="$llvm_prefix/bin/llvm-config"
+          export LDFLAGS="-L$llvm_prefix/lib ${LDFLAGS:-}"
+          export CPPFLAGS="-I$llvm_prefix/include ${CPPFLAGS:-}"
+          export PKG_CONFIG_PATH="$llvm_prefix/lib/pkgconfig:$(brew --prefix libclc)/lib/pkgconfig:$(brew --prefix spirv-llvm-translator)/lib/pkgconfig:$(brew --prefix spirv-tools)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          mesa_venv="$RUNNER_TEMP/mesa-venv"
+          sdk_dir="$RUNNER_TEMP/kosmickrisp-sdk"
+
+          "$mesa_venv/bin/meson" setup "$RUNNER_TEMP/kosmickrisp-build" kosmickrisp-source \
+            --buildtype=release \
+            --prefix="$sdk_dir" \
+            -Dplatforms=macos \
+            -Dvulkan-drivers=kosmickrisp \
+            -Dgallium-drivers= \
+            -Dopengl=false \
+            -Dzstd=disabled \
+            -Dtools= \
+            -Dbuild-tests=false \
+            -Dllvm=enabled \
+            -Dstatic-libclc=all \
+            --prefer-static
+          "$mesa_venv/bin/meson" compile -C "$RUNNER_TEMP/kosmickrisp-build" -j 3
+          "$mesa_venv/bin/meson" install -C "$RUNNER_TEMP/kosmickrisp-build"
+
+          driver_path="$(find "$sdk_dir" -type f -name 'libvulkan_kosmickrisp.dylib' -print -quit)"
+          test -n "$driver_path"
+          mkdir -p "$sdk_dir/include" "$sdk_dir/lib"
+          rm -rf "$sdk_dir/include/vulkan"
+          cp -R kosmickrisp-source/include/vulkan "$sdk_dir/include/vulkan"
+          cp "$driver_path" "$sdk_dir/lib/libvulkan_kosmickrisp.dylib"
+          cp "$(brew --prefix vulkan-loader)/lib/libvulkan.1.dylib" "$sdk_dir/lib/libvulkan.1.dylib"
+          test -s "$sdk_dir/include/vulkan/vulkan.h"
+          test -s "$sdk_dir/lib/libvulkan_kosmickrisp.dylib"
+          test -s "$sdk_dir/lib/libvulkan.1.dylib"
+          if otool -L "$sdk_dir/lib/libvulkan_kosmickrisp.dylib" | grep -E '/opt/homebrew|/usr/local'; then
+            echo 'KosmicKrisp driver contains a Homebrew runtime dependency' >&2
+            exit 1
+          fi
+          echo "KOSMICKRISP_SDK=$sdk_dir" >> "$GITHUB_ENV"
+
+      - name: Download latest macOS external core Releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p external-cores core-release-info ppsspp-assets
+
+          download_latest() {
+            local repository=$1
+            local asset_name=$2
+            local release_json="core-release-info/${asset_name}.json"
+            local metadata
+            local tag_name
+            local asset_url
+
+            curl --fail --location --retry 3 --retry-all-errors \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --output "$release_json" \
+              "https://api.github.com/repos/${repository}/releases/latest"
+            metadata=$(python3 - "$release_json" "$asset_name" <<'PY'
+          import json
+          import sys
+
+          release_path, asset_name = sys.argv[1:]
+          with open(release_path, encoding='utf-8') as stream:
+              release = json.load(stream)
+          tag = release.get('tag_name')
+          assets = [asset for asset in release.get('assets', [])
+                    if asset.get('name') == asset_name]
+          if not isinstance(tag, str) or not tag or len(assets) != 1:
+              raise SystemExit('latest Release does not contain exactly one required asset: ' + asset_name)
+          url = assets[0].get('browser_download_url')
+          if not isinstance(url, str) or not url:
+              raise SystemExit('invalid asset URL for: ' + asset_name)
+          print(tag + '\t' + url)
+          PY
+          )
+            IFS=$'\t' read -r tag_name asset_url <<< "$metadata"
+            curl --fail --location --retry 3 --retry-all-errors \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --output "external-cores/${asset_name}" "$asset_url"
+            test -s "external-cores/${asset_name}"
+            printf '%s\t%s\t%s\n' "$repository" "$tag_name" "$asset_url" \
+              >> core-release-info/CORE-RELEASES.txt
+          }
+
+          download_latest fxfall/GBAStation_3DS azahar_libretro.dylib
+          download_latest fxfall/GBAStation_FBNeo fbneo_libretro.dylib
+          download_latest fxfall/GBAStation_ppsspp ppsspp_libretro.dylib
+          download_latest fxfall/GBAStation_ppsspp PPSSPP-assets.tar.gz
+          tar -xzf external-cores/PPSSPP-assets.tar.gz -C ppsspp-assets
+          test -s ppsspp-assets/flash0/font/ltn0.pgf
+          cp core-release-info/CORE-RELEASES.txt MACOS-CORE-RELEASES.txt
+
+      - name: Configure macOS frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build_macos -G Ninja \
+            -DPLATFORM_DESKTOP=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUNDLE_MACOS_APP=ON \
+            -DUSE_GLFW=ON \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0 \
+            -DGBASTATION_KOSMICKRISP_SDK="$KOSMICKRISP_SDK" \
+            -DGBASTATION_MACOS_AZAHAR_CORE="$GITHUB_WORKSPACE/external-cores/azahar_libretro.dylib" \
+            -DGBASTATION_MACOS_FBNEO_CORE="$GITHUB_WORKSPACE/external-cores/fbneo_libretro.dylib" \
+            -DGBASTATION_MACOS_PPSSPP_CORE="$GITHUB_WORKSPACE/external-cores/ppsspp_libretro.dylib" \
+            -DGBASTATION_MACOS_PPSSPP_ASSETS="$GITHUB_WORKSPACE/ppsspp-assets" \
+            -DGBASTATION_MACOS_BUNDLE_EXTERNAL_CORES=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build and package macOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build_macos --parallel 3
+          test -d build_macos/GBAStation.app
+          codesign --force --deep --sign - build_macos/GBAStation.app
+          ditto -c -k --sequesterRsrc --keepParent \
+            build_macos/GBAStation.app GBAStation-macOS.zip
+          test -s GBAStation-macOS.zip
+          shasum -a 256 GBAStation-macOS.zip > GBAStation-macOS.zip.sha256
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: GBAStation-macOS-${{ github.sha }}
+          path: |
+            GBAStation-macOS.zip
+            GBAStation-macOS.zip.sha256
+            MACOS-CORE-RELEASES.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish frontend release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-switch
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/GBAStation.zip
+            release-assets/SHA256SUMS.txt
+            release-assets/CORE-RELEASES.txt
+            release-assets/GBAStation-macOS.zip
+            release-assets/GBAStation-macOS.zip.sha256
+            release-assets/MACOS-CORE-RELEASES.txt

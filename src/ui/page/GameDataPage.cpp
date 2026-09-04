@@ -4,6 +4,8 @@
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
 #include "core/common.h"
+#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/RomxGameEntryAdapter.hpp"
 #include "ui/utils/FilePickerHelper.hpp"
 
 #include <miniz.h>
@@ -710,7 +712,14 @@ namespace beiklive
     {
         if (!_isThreeDs())
             return _saveDir();
+#ifdef __SWITCH__
         return beiklive::three_ds::saveDataPath(_threeDsTitleId());
+#else
+        // The macOS Azahar core appends its own Azahar/sdmc save hierarchy to
+        // GameEntry::savePath. Keep catalog scanning, backup, and restore on
+        // that same native save-data directory.
+        return beiklive::romx::GameEntryAdapter::nativeSaveDirectory(m_entry);
+#endif
     }
 
     void GameDataPage::_initView()
@@ -958,22 +967,106 @@ namespace beiklive
         dialog->open();
     }
 
+    void GameDataPage::_writeThreeDsSavesToRomx(const std::string& sourcePath)
+    {
+        if (!_isThreeDs() || !beiklive::romx::isRomxPath(m_entry.path)) {
+            brls::Application::notify(L("只有现有 ROMX 容器支持写入3DS存档"));
+            return;
+        }
+
+        std::string scanError;
+        const auto candidates =
+            beiklive::romx::GameEntryAdapter::listLocalSaveCandidates(
+                m_entry, sourcePath, &scanError);
+        if (candidates.empty()) {
+            if (!scanError.empty())
+                brls::Logger::warning("识别3DS存档失败: {}", scanError);
+            brls::Application::notify(L("未识别到可写入的3DS存档"));
+            return;
+        }
+
+        const std::string message = L("识别到 ") +
+            std::to_string(candidates.size()) + L(" 个3DS存档，将分别写入 ROMX？");
+        auto* dialog = new brls::Dialog(message);
+        dialog->addButton(L("取消"), []() {});
+        const auto alive = m_alive;
+        dialog->addButton(L("写入"), [this, alive, sourcePath]() {
+            if (!alive->load())
+                return;
+            std::string outputPath;
+            uint32_t writtenCount = 0;
+            std::string error;
+            const auto result =
+                beiklive::romx::GameEntryAdapter::writeLocalSavesToRomx(
+                    m_entry, sourcePath, &outputPath, &writtenCount, &error);
+            if (result == beiklive::romx::SyncResult::Success) {
+                brls::Application::notify(
+                    L("已写入 ") + std::to_string(writtenCount) +
+                    L(" 个3DS存档到 ROMX：") + outputPath);
+            } else if (writtenCount != 0) {
+                brls::Logger::warning("3DS存档部分写入失败: {}", error);
+                brls::Application::notify(
+                    L("部分写入成功：") + std::to_string(writtenCount) +
+                    L(" 个，原因：") + error);
+            } else {
+                brls::Logger::warning("3DS存档写入 ROMX 失败: {}", error);
+                brls::Application::notify(L("写入 ROMX 失败：") + error);
+            }
+            _refreshBackupList();
+            m_view->restoreFocus();
+        });
+        dialog->open();
+    }
+
     void GameDataPage::_exportSav()
     {
         if (_isThreeDs()) {
             const std::string titleId = _threeDsTitleId();
-            const fs::path source = _batterySaveDir();
-            if (titleId.empty()) {
-                brls::Application::notify(L("缺少3DS Title ID，无法定位存档"));
-                return;
+            const bool currentIsRomx =
+                beiklive::romx::isRomxPath(m_entry.path);
+            fs::path source = _batterySaveDir();
+            std::string scanError;
+            auto candidates =
+                beiklive::romx::GameEntryAdapter::listLocalSaveCandidates(
+                    m_entry, source.string(), &scanError);
+            // A manually imported 3DS game often keeps its original save
+            // export beside the ROM (`<game>/save/...`) instead of in the
+            // frontend's active save root.  Use that directory only as an
+            // export source when the active root has no recognizable save;
+            // the emulator's runtime save path remains unchanged.
+            if (candidates.empty() && !currentIsRomx) {
+                const fs::path adjacent =
+                    fs::path(m_entry.path).parent_path() / "save";
+                std::string adjacentError;
+                auto adjacentCandidates =
+                    beiklive::romx::GameEntryAdapter::listLocalSaveCandidates(
+                        m_entry, adjacent.string(), &adjacentError);
+                if (!adjacentCandidates.empty()) {
+                    source = adjacent;
+                    candidates = std::move(adjacentCandidates);
+                    scanError.clear();
+                }
             }
-            if (!directoryContainsFiles(source)) {
+            if (candidates.empty()) {
+                if (!scanError.empty())
+                    brls::Logger::warning("识别3DS存档失败: {}", scanError);
                 brls::Application::notify(L("未找到3DS游戏存档"));
                 return;
             }
-            auto* dialog = new brls::Dialog(L("确认导出当前3DS游戏存档为压缩包？"));
+            auto* dialog = new brls::Dialog(L("选择3DS存档操作"));
             dialog->addButton(L("取消"), []() {});
-            dialog->addButton(L("导出"), [source, titleId]() {
+            const auto alive = m_alive;
+            if (currentIsRomx) {
+                dialog->addButton(L("写入 ROMX"), [this, alive, source]() {
+                    if (alive->load())
+                        _writeThreeDsSavesToRomx(source.string());
+                });
+            }
+            dialog->addButton(L("导出压缩包"), [source, titleId]() {
+                if (titleId.empty()) {
+                    brls::Application::notify(L("缺少3DS Title ID，无法导出压缩包"));
+                    return;
+                }
                 const fs::path target = fs::path(beiklive::three_ds::exportDirectory()) /
                     (titleId + "_" + timestampForFile() + ".zip");
                 std::string error;
@@ -1013,16 +1106,31 @@ namespace beiklive
     void GameDataPage::_importSav()
     {
         if (_isThreeDs()) {
-            if (_threeDsTitleId().empty()) {
-                brls::Application::notify(L("缺少3DS Title ID，无法定位存档"));
-                return;
-            }
-            auto* dialog = new brls::Dialog(L("确认导入3DS存档压缩包并覆盖当前存档？"));
+            const bool currentIsRomx =
+                beiklive::romx::isRomxPath(m_entry.path);
+            auto* dialog = new brls::Dialog(L("选择3DS存档导入方式"));
             dialog->addButton(L("取消"), []() {});
             const auto alive = m_alive;
-            dialog->addButton(L("选择文件"), [this, alive]() {
+            if (currentIsRomx) {
+                dialog->addButton(L("选择文件夹并写入 ROMX"), [this, alive]() {
+                    if (!alive->load())
+                        return;
+                    beiklive::openDirectoryPicker(
+                        [this, alive](const std::string& selected) {
+                            if (alive->load())
+                                _writeThreeDsSavesToRomx(selected);
+                        }, beiklive::path::GetRootPath());
+                });
+            }
+            dialog->addButton(L("选择 ZIP 覆盖当前存档"), [this, alive]() {
+                if (!alive->load())
+                    return;
                 beiklive::openFilePicker({"zip"}, [this, alive](const std::string& selected) {
                     if (!alive->load()) return;
+                    if (_threeDsTitleId().empty()) {
+                        brls::Application::notify(L("缺少3DS Title ID，无法定位存档"));
+                        return;
+                    }
                     std::string error;
                     if (!replaceDirectoryFromArchive(selected, _batterySaveDir(), &error)) {
                         brls::Logger::warning("导入3DS存档失败: {}", error);

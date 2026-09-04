@@ -1,6 +1,9 @@
 #include "LibretroLoader.hpp"
 #include "core/romx/RomxGameEntryAdapter.hpp"
 #include "RomxVfs.hpp"
+#if defined(__APPLE__) && !defined(__SWITCH__)
+#include "LibretroVulkanHost.hpp"
+#endif
 #include <romx/romx.h>
 
 #include <cstring>
@@ -314,6 +317,8 @@ LibretroLoader::coreOptions(CoreType coreType)
 // ---- 静态实例指针 ----------------------------------------
 LibretroLoader* LibretroLoader::s_current = nullptr;
 
+LibretroLoader::LibretroLoader() = default;
+
 void LibretroLoader::clearRomxLaunchState(bool resetVfsRequest)
 {
     if (m_romxVfsActive)
@@ -328,6 +333,10 @@ void LibretroLoader::clearRomxLaunchState(bool resetVfsRequest)
         romx_payload_mapping_close(m_romxMapping);
         m_romxMapping = nullptr;
     }
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    m_romxPayloadData = nullptr;
+    m_romxPayloadSize = 0;
+#endif
     m_romxMaterializedPath.clear();
     if (resetVfsRequest)
         m_romxVfsRequested = false;
@@ -335,9 +344,7 @@ void LibretroLoader::clearRomxLaunchState(bool resetVfsRequest)
 
 LibretroLoader::~LibretroLoader()
 {
-    if (m_gameLoaded && fn_unload_game)
-        fn_unload_game();
-    clearRomxLaunchState(true);
+    unload();
 }
 
 // ============================================================
@@ -419,6 +426,7 @@ bool LibretroLoader::load(CoreType coreType)
     unload();
 
     m_coreType = coreType;
+    m_dynamicHandle = false;
     // Gambatte is built as RGB565. Keep this as its fallback in case a core
     // reload reaches video output before pixel negotiation.
     m_pixelFormat = coreType == CoreType::Gambatte
@@ -592,9 +600,11 @@ bool LibretroLoader::load(const std::string& libPath)
     unload();
 
     m_coreType = CoreType::Mgba;
+    m_dynamicHandle = true;
     m_handle = dynOpen(libPath);
     if (!m_handle) {
         dynLoadError();
+        m_dynamicHandle = false;
         return false;
     }
 
@@ -626,6 +636,7 @@ bool LibretroLoader::load(const std::string& libPath)
     if (!ok) {
         dynClose(m_handle);
         m_handle = nullptr;
+        m_dynamicHandle = false;
         return false;
     }
 
@@ -645,11 +656,8 @@ void LibretroLoader::unload()
 {
     brls::Logger::debug("[LibretroLoader] unload: gameLoaded={}, coreReady={}",
         m_gameLoaded, m_coreReady);
-    if (m_gameLoaded && fn_unload_game) {
-        fn_unload_game();
-        m_gameLoaded = false;
-    }
-    clearRomxLaunchState(true);
+    unloadGame();
+    m_romxVfsRequested = false;
 
     // Each loader owns its core session. Do not leave a statically linked core
     // initialized after its callbacks and function bindings have been removed.
@@ -658,10 +666,16 @@ void LibretroLoader::unload()
     m_diskControlExt = {};
     m_hasDiskControl = false;
     m_hasDiskControlExt = false;
+    void* handle = m_handle;
     m_handle = nullptr;
     if (s_current == this) {
         s_current = nullptr;
     }
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    std::memset(m_buttons, 0, sizeof(m_buttons));
+    std::memset(m_analog, 0, sizeof(m_analog));
+    std::memset(m_analogButtons, 0, sizeof(m_analogButtons));
+#endif
     {
         std::lock_guard<std::mutex> lk(m_audioMutex);
         clearAudioBufferLocked();
@@ -690,6 +704,10 @@ void LibretroLoader::unload()
     fn_cheat_set               = nullptr;
     fn_get_memory_data         = nullptr;
     fn_get_memory_size         = nullptr;
+
+    if (m_dynamicHandle)
+        dynClose(handle);
+    m_dynamicHandle = false;
 }
 
 // ============================================================
@@ -773,9 +791,53 @@ bool LibretroLoader::loadGame(const std::string& romPath)
     fn_get_system_info(&systemInfo);
 
     clearRomxLaunchState();
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    m_hwRenderActive = false;
+    m_vulkanNegotiationValid = false;
+    m_hwRenderCallback = {};
+    m_vulkanNegotiation = {};
+#endif
 
     std::vector<uint8_t> romData;
     std::string launchPath = romPath;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    if (beiklive::romx::isRomxPath(romPath) && systemInfo.need_fullpath &&
+        m_romxPayloadPreferred) {
+        std::string error;
+        m_romxSession = std::make_unique<beiklive::romx::LaunchSession>();
+        if (!m_romxSession->open(romPath, &error)) {
+            brls::Logger::error("[LibretroLoader] ROMX payload open failed: {}", error);
+            m_romxSession.reset();
+            return false;
+        }
+        const std::string entrypoint = m_romxSession->info().entrypointPath;
+        const bool isZipEntrypoint = entrypoint.size() >= 4 &&
+            (entrypoint.compare(entrypoint.size() - 4, 4, ".zip") == 0 ||
+             entrypoint.compare(entrypoint.size() - 4, 4, ".ZIP") == 0);
+        if (m_romxSession->info().entryCount != 1 || !isZipEntrypoint) {
+            brls::Logger::error(
+                "[LibretroLoader] FBNeo ROMX must contain exactly one ZIP entrypoint: {}",
+                romPath);
+            m_romxSession.reset();
+            return false;
+        }
+        if (!m_romxSession->mapPayload(&m_romxPayloadData, &m_romxPayloadSize,
+                                       &error) || !m_romxPayloadData ||
+            m_romxPayloadSize == 0) {
+            brls::Logger::error("[LibretroLoader] ROMX payload mapping failed: {}", error);
+            m_romxSession.reset();
+            m_romxPayloadData = nullptr;
+            m_romxPayloadSize = 0;
+            return false;
+        }
+        // FBNeo uses the .romx path to identify the driver and to locate the
+        // mapped archive; the actual ZIP bytes are supplied through data.
+        launchPath = romPath;
+        brls::Logger::info("[LibretroLoader] ROMX ZIP payload mapped: {} bytes",
+                           m_romxPayloadSize);
+    }
+    else
+#endif
     if (beiklive::romx::isRomxPath(romPath) && systemInfo.need_fullpath) {
         std::string error;
         m_romxSession = std::make_unique<beiklive::romx::LaunchSession>();
@@ -790,7 +852,11 @@ bool LibretroLoader::loadGame(const std::string& romPath)
         // temporary extraction and lets companion RIDX files resolve by
         // their normal relative paths.  Cores that do not request VFS use
         // the ordinary materialized-path fallback below.
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        if (m_romxVfsRequested && m_romxVfsAllowed) {
+#else
         if (m_romxVfsRequested) {
+#endif
             m_romxVirtualPath = beiklive::romx_vfs::makeVirtualPath(
                 romPath, m_romxSession->info().entrypointPath);
             if (beiklive::romx_vfs::activate(this, m_romxVirtualPath,
@@ -871,9 +937,19 @@ bool LibretroLoader::loadGame(const std::string& romPath)
     info.path = launchPath.c_str();
     info.data = m_romxMapping
         ? romx_payload_mapping_data(m_romxMapping)
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        : (m_romxPayloadData
+            ? m_romxPayloadData
+            : (romData.empty() ? nullptr : romData.data()));
+    info.size = m_romxMapping
+        ? static_cast<size_t>(romx_payload_mapping_size(m_romxMapping))
+        : (m_romxPayloadData ? static_cast<size_t>(m_romxPayloadSize)
+                              : romData.size());
+#else
         : (romData.empty() ? nullptr : romData.data());
     info.size = m_romxMapping ? static_cast<size_t>(romx_payload_mapping_size(m_romxMapping))
                               : romData.size();
+#endif
     info.meta = nullptr;
 
     bool loaded = fn_load_game(&info);
@@ -909,6 +985,38 @@ bool LibretroLoader::loadGame(const std::string& romPath)
         return false;
     }
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    if (m_hwRenderActive)
+    {
+        if (m_hwRenderCallback.context_type != RETRO_HW_CONTEXT_VULKAN ||
+            !m_vulkanNegotiationValid)
+        {
+            brls::Logger::error(
+                "[LibretroLoader] core requested Vulkan without a negotiation interface");
+            fn_unload_game();
+            clearRomxLaunchState();
+            return false;
+        }
+
+        m_vulkanHost = std::make_unique<LibretroVulkanHost>();
+        if (!m_vulkanHost->initialize(m_vulkanNegotiation) ||
+            !m_hwRenderCallback.context_reset)
+        {
+            brls::Logger::error(
+                "[LibretroLoader] failed to initialize the KosmicKrisp Vulkan host");
+            m_vulkanHost.reset();
+            fn_unload_game();
+            clearRomxLaunchState();
+            return false;
+        }
+
+        // context_reset is the point at which the core may query
+        // RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE.
+        m_gameLoaded = true;
+        m_hwRenderCallback.context_reset();
+    }
+#endif
+
     fn_get_system_av_info(&m_avInfo);
     m_gameLoaded = true;
     brls::Logger::debug("[LibretroLoader] loadGame OK: {}x{} @ {:.2f}fps",
@@ -918,11 +1026,26 @@ bool LibretroLoader::loadGame(const std::string& romPath)
 
 void LibretroLoader::unloadGame()
 {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    if (m_vulkanHost && m_hwRenderActive && m_hwRenderCallback.context_destroy)
+        m_hwRenderCallback.context_destroy();
+#endif
     if (m_gameLoaded) {
         brls::Logger::debug("[LibretroLoader] unloadGame");
         fn_unload_game();
         m_gameLoaded = false;
     }
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    if (m_vulkanHost)
+    {
+        m_vulkanHost->shutdown();
+        m_vulkanHost.reset();
+    }
+    m_hwRenderCallback = {};
+    m_vulkanNegotiation = {};
+    m_hwRenderActive = false;
+    m_vulkanNegotiationValid = false;
+#endif
     clearRomxLaunchState();
     m_diskControl = {};
     m_diskControlExt = {};
@@ -1049,6 +1172,44 @@ bool LibretroLoader::getButtonState(unsigned port, unsigned id) const
     return (port < kMaxInputPorts && id <= RETRO_DEVICE_ID_JOYPAD_R3) ? m_buttons[port][id] : false;
 }
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+void LibretroLoader::setAnalogState(unsigned port, unsigned index, unsigned id, int16_t value)
+{
+    if (port >= kMaxInputPorts)
+        return;
+    if ((index == RETRO_DEVICE_INDEX_ANALOG_LEFT ||
+         index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) &&
+        id <= RETRO_DEVICE_ID_ANALOG_Y)
+    {
+        m_analog[port][index][id] = value;
+        return;
+    }
+    if (index == RETRO_DEVICE_INDEX_ANALOG_BUTTON &&
+        id <= RETRO_DEVICE_ID_JOYPAD_R3)
+    {
+        m_analogButtons[port][id] = value;
+    }
+}
+
+int16_t LibretroLoader::getAnalogState(unsigned port, unsigned index, unsigned id) const
+{
+    if (port >= kMaxInputPorts)
+        return 0;
+    if ((index == RETRO_DEVICE_INDEX_ANALOG_LEFT ||
+         index == RETRO_DEVICE_INDEX_ANALOG_RIGHT) &&
+        id <= RETRO_DEVICE_ID_ANALOG_Y)
+    {
+        return m_analog[port][index][id];
+    }
+    if (index == RETRO_DEVICE_INDEX_ANALOG_BUTTON &&
+        id <= RETRO_DEVICE_ID_JOYPAD_R3)
+    {
+        return m_analogButtons[port][id];
+    }
+    return 0;
+}
+#endif
+
 // ============================================================
 // 内存（SRAM）
 // ============================================================
@@ -1160,6 +1321,56 @@ bool LibretroLoader::s_environmentCallback(unsigned cmd, void* data)
     if (!s_current) return false;
 
     switch (cmd) {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER: {
+            if (!s_current->m_vulkanPreferred || !data)
+                return false;
+            *static_cast<unsigned*>(data) = RETRO_HW_CONTEXT_VULKAN;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_HW_RENDER: {
+            const auto* callback = static_cast<const retro_hw_render_callback*>(data);
+            if (!s_current->m_vulkanPreferred || !callback ||
+                callback->context_type != RETRO_HW_CONTEXT_VULKAN)
+                return false;
+            s_current->m_hwRenderCallback = *callback;
+            s_current->m_hwRenderActive = true;
+            brls::Logger::info("[LibretroLoader] external core selected Vulkan rendering");
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE: {
+            auto** interfacePtr =
+                static_cast<const retro_hw_render_interface**>(data);
+            if (!interfacePtr || !s_current->m_vulkanHost ||
+                !s_current->m_vulkanHost->isInitialized())
+                return false;
+            *interfacePtr = s_current->m_vulkanHost->interfacePtr();
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE: {
+            const auto* base =
+                static_cast<const retro_hw_render_context_negotiation_interface*>(data);
+            if (!base || !s_current->m_vulkanPreferred ||
+                base->interface_type != RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN)
+                return false;
+            const auto* vulkan =
+                static_cast<const retro_hw_render_context_negotiation_interface_vulkan*>(data);
+            s_current->m_vulkanNegotiation = *vulkan;
+            s_current->m_vulkanNegotiationValid = true;
+            return true;
+        }
+        case RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT: {
+            auto* base =
+                static_cast<retro_hw_render_context_negotiation_interface*>(data);
+            if (!base || base->interface_type !=
+                             RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN)
+                return false;
+            // The host intentionally exposes the stable v1 device callback;
+            // cores using the newer struct automatically use its v1 prefix.
+            base->interface_version = 1;
+            return true;
+        }
+#endif
         case RETRO_ENVIRONMENT_GET_LANGUAGE: {
             unsigned* language = static_cast<unsigned*>(data);
             if (language) *language = RETRO_LANGUAGE_CHINESE_SIMPLIFIED;
@@ -1170,6 +1381,12 @@ bool LibretroLoader::s_environmentCallback(unsigned cmd, void* data)
             if (b) *b = true;
             return true;
         }
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
+            // 支持 libretro 的按键位掩码接口。PPSSPP、mGBA、Genesis
+            // 等核心会先询问这个能力，随后用一次 MASK 查询读取全部按键。
+            return true;
+#endif
         case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT: {
             const retro_pixel_format* fmt = static_cast<const retro_pixel_format*>(data);
             if (!fmt) return false;
@@ -1371,6 +1588,10 @@ bool LibretroLoader::s_environmentCallback(unsigned cmd, void* data)
             return true;
         }
         case RETRO_ENVIRONMENT_GET_VFS_INTERFACE: {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+            if (!s_current->m_romxVfsAllowed)
+                return false;
+#endif
             auto* info = static_cast<retro_vfs_interface_info*>(data);
             // The bridge implements the complete libretro VFS v3 surface,
             // including stat/mkdir and directory enumeration.  Keep v1/v2
@@ -1413,7 +1634,28 @@ void LibretroLoader::s_videoRefreshCallback(const void* data,
                                              unsigned width, unsigned height,
                                              size_t pitch)
 {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    if (!s_current) return;
+    if (data == RETRO_HW_FRAME_BUFFER_VALID)
+    {
+        if (!s_current->m_vulkanHost)
+            return;
+
+        std::vector<uint32_t> pixels;
+        if (!s_current->m_vulkanHost->readbackFrame(width, height, pixels))
+            return;
+
+        std::lock_guard<std::mutex> lock(s_current->m_videoMutex);
+        auto& frame = s_current->m_videoFrame;
+        frame.width = width;
+        frame.height = height;
+        frame.pixels = std::move(pixels);
+        return;
+    }
+    if (!data) return;
+#else
     if (!s_current || !data) return;
+#endif
 
     // 防御性检查：合理范围
     if (width < 16 || width > 720 || height < 16 || height > 576)
@@ -1529,14 +1771,40 @@ void LibretroLoader::s_inputPollCallback()
 }
 
 int16_t LibretroLoader::s_inputStateCallback(unsigned port, unsigned device,
-                                               unsigned /*index*/, unsigned id)
+#if defined(__APPLE__) && !defined(__SWITCH__)
+                                               unsigned index,
+#else
+                                               unsigned /*index*/,
+#endif
+                                               unsigned id)
 {
     if (!s_current || port >= kMaxInputPorts) return 0;
-    // The host currently exposes digital joypad state only.  Do not treat
-    // analog axis ids as button ids (axis 0/1 would otherwise read A/B).
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    if (device == RETRO_DEVICE_JOYPAD)
+    {
+        if (id == RETRO_DEVICE_ID_JOYPAD_MASK)
+        {
+            uint16_t mask = 0;
+            for (unsigned button = 0;
+                 button <= RETRO_DEVICE_ID_JOYPAD_R3; ++button)
+            {
+                if (s_current->m_buttons[port][button])
+                    mask |= static_cast<uint16_t>(1u << button);
+            }
+            return static_cast<int16_t>(mask);
+        }
+        if (id > RETRO_DEVICE_ID_JOYPAD_R3) return 0;
+        return s_current->m_buttons[port][id] ? 1 : 0;
+    }
+    if (device == RETRO_DEVICE_ANALOG)
+        return s_current->getAnalogState(port, index, id);
+    return 0;
+#else
+    // Keep the original Switch callback contract: digital joypad queries only.
     if (device != RETRO_DEVICE_JOYPAD) return 0;
     if (id > RETRO_DEVICE_ID_JOYPAD_R3) return 0;
     return s_current->m_buttons[port][id] ? 1 : 0;
+#endif
 }
 
 } // namespace beiklive

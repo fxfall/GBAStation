@@ -244,7 +244,9 @@ namespace beiklive
     {
         auto &db = beiklive::GameDB;                     // 获取全局游戏数据库实例
         brls::Logger::debug("GamePage 开始处理游戏条目，路径: {}", m_gameData.fullPath);
-        
+        const int selectedPlatform =
+            beiklive::tools::platformFromFileType(m_gameData.itemType);
+
         // 若数据库中不存在此游戏记录，先插入含必要字段的最小条目
         if (!db->findByPath(m_gameData.fullPath).has_value())
         {
@@ -261,7 +263,7 @@ namespace beiklive
             }
             else
             {
-                minimal.platform = (int)m_gameData.itemType;
+                minimal.platform = selectedPlatform;
                 minimal.core     = beiklive::GetDefaultCoreId(minimal.platform);
                 minimal.title    = GET_MAPPING_KEY_STR(
                     beiklive::tools::getFileNameWithoutExtension(m_gameData.fileName),
@@ -281,15 +283,24 @@ namespace beiklive
         else
         {
             brls::Logger::debug("GamePage 数据库中已存在此游戏记录: {}", m_gameData.fullPath);
+            // 文件列表中的机种选择是本次启动的明确意图。覆盖旧的
+            // ZIP_FILE/错误机种记录，否则重新选择 Arcade 仍会沿用旧平台。
+            const auto existing = db->findByPath(m_gameData.fullPath);
+            if (selectedPlatform >= 0 && existing &&
+                existing->platform != selectedPlatform)
+            {
+                brls::Logger::info(
+                    "GamePage 使用文件选择覆盖平台: {} -> {}",
+                    existing->platform, selectedPlatform);
+                db->set(m_gameData.fullPath, "platform", selectedPlatform);
+            }
         }
 
         // 使用 setDefault 为可选字段设置首次默认值（已有值时不覆盖）
-        int inferredPlatform = static_cast<int>(m_gameData.itemType);
-        if (m_gameData.itemType == beiklive::enums::FileType::ROMX_FILE)
-        {
+        int inferredPlatform = selectedPlatform;
+        if (inferredPlatform < 0)
             if (const auto resolved = db->findByPath(m_gameData.fullPath))
                 inferredPlatform = resolved->platform;
-        }
         std::string defaultLogo = beiklive::tools::getDefaultLogoPath(
             static_cast<beiklive::enums::EmuPlatform>(inferredPlatform),
             m_gameData.fullPath);
@@ -751,6 +762,20 @@ namespace beiklive
         if (m_archivePrepared) return true;
         m_runtimeGameEntry = m_gameEntry;
         if (!archive::isArchive(m_gameEntry.path)) { m_archivePrepared = true; return true; }
+
+        // FBNeo treats a ZIP as the complete arcade set (parent/clone ROMs,
+        // graphics and metadata), so passing one extracted member would make
+        // the core unable to identify the game.  Keep the original ZIP path
+        // and let the external core open it directly.
+        if (m_gameEntry.platform ==
+            static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade) &&
+            beiklive::tools::getFileExtension(
+                std::filesystem::path(m_gameEntry.path)) == "zip")
+        {
+            m_archivePrepared = true;
+            return true;
+        }
+
         if (!isArchivePlatform(m_gameEntry.platform)) {
             brls::Application::notify(L("该平台暂不支持压缩包运行"));
             return false;

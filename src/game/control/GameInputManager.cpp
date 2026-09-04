@@ -1,5 +1,6 @@
 #include "GameInputManager.hpp"
 #include "game/control/InputMappingDefaults.hpp"
+#include "core/GameSignal.hpp"
 #include "core/Tools.hpp"
 
 namespace beiklive
@@ -11,6 +12,47 @@ namespace beiklive
         float f1 = *(float *)&i;
         return 0.5F * (f1 + f / f1);
     }
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    namespace
+    {
+        void copyAnalogState(const GamepadState& source,
+                             PlayerInputState& target)
+        {
+            target.leftTrigger = source.leftTrigger;
+            target.rightTrigger = source.rightTrigger;
+            target.leftStickX = source.leftStickX;
+            target.leftStickY = source.leftStickY;
+            target.rightStickX = source.rightStickX;
+            target.rightStickY = source.rightStickY;
+        }
+
+        short mergeAxis(short controllerValue, short keyboardValue)
+        {
+            if (keyboardValue == 0)
+                return controllerValue;
+            if (controllerValue == 0)
+                return keyboardValue;
+
+            const int value = std::clamp(
+                static_cast<int>(controllerValue) + static_cast<int>(keyboardValue),
+                -0x7FFF,
+                0x7FFF);
+            return static_cast<short>(value);
+        }
+
+        void mergeKeyboardAnalogState(const GamepadState& keyboard,
+                                      PlayerInputState& target)
+        {
+            target.leftTrigger = std::max(target.leftTrigger, keyboard.leftTrigger);
+            target.rightTrigger = std::max(target.rightTrigger, keyboard.rightTrigger);
+            target.leftStickX = mergeAxis(target.leftStickX, keyboard.leftStickX);
+            target.leftStickY = mergeAxis(target.leftStickY, keyboard.leftStickY);
+            target.rightStickX = mergeAxis(target.rightStickX, keyboard.rightStickX);
+            target.rightStickY = mergeAxis(target.rightStickY, keyboard.rightStickY);
+        }
+    }
+#endif
 
     // std::vector<brls::ControllerButton> parseButton(const GamepadState &state)
     // {
@@ -124,22 +166,38 @@ namespace beiklive
 
         // 清空手柄状态
         GamepadState emptyState;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        {
+            std::lock_guard<std::mutex> lock(gamepadStateMutex);
+            for (int i = 0; i < GAMEPADS_MAX; i++)
+                lastGamepadStates[i] = emptyState;
+        }
+#else
         auto controllersCount = brls::Application::getPlatform()
                                     ->getInputManager()
                                     ->getControllersConnectedCount();
-
         for (int i = 0; i < controllersCount; i++)
         {
             lastGamepadStates[i] = emptyState;
         }
+#endif
 
         // 清空按键时间（LONG_PRESS 依赖这个）
         longPressTriggered.clear();
 
         currentTime = 0;
         activeInputs.clear();
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        for (auto& playerInput : m_playerInputs)
+            playerInput = {};
+        {
+            std::lock_guard<std::mutex> lock(keyboardInputMutex);
+            keyboardInputs.clear();
+        }
+#else
         for (auto& playerInput : m_playerInputs)
             playerInput.buttonMask = 0;
+#endif
     }
 
     void GameInputManager::handleInput(bool ignoreTouch)
@@ -158,11 +216,17 @@ namespace beiklive
         static int lastControllerCount = 0;
 #endif
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        // GLFW key events are delivered on the UI thread.  Keep a compact
+        // snapshot so the game thread can evaluate keyboard mappings without
+        // calling into GLFW concurrently.
+        snapshotKeyboardInputs();
+#endif
+
         // 获取所有控制器数量
         auto controllersCount = brls::Application::getPlatform()
                                     ->getInputManager()
                                     ->getControllersConnectedCount();
-        updatePlayerAssignments(controllersCount);
         int pollCount = controllersCount;
 #ifndef __SWITCH__
         if (pollCount <= 0)
@@ -174,8 +238,17 @@ namespace beiklive
         for (int i = 0; i < pollCount; i++)
         {
             GamepadState gamepadState = getControllerState(i);
+#if defined(__APPLE__) && !defined(__SWITCH__)
+            GamepadState prevGamepadState;
+            {
+                std::lock_guard<std::mutex> lock(gamepadStateMutex);
+                prevGamepadState = lastGamepadStates[i];
+                lastGamepadStates[i] = gamepadState;
+            }
+#else
             GamepadState prevGamepadState = lastGamepadStates[i];
             lastGamepadStates[i] = gamepadState;
+#endif
             currentTime += 16;
 
             if (!gamepadState.is_equal(prevGamepadState))
@@ -196,7 +269,6 @@ namespace beiklive
             }
         }
         rebuildActiveInputsForHotkeys(pollCount);
-        updatePlayerStates();
         updateInputState();
         checkHotkeys();
         updatePreviousNesFunctionStates();
@@ -495,28 +567,22 @@ namespace beiklive
 
     GamepadState GameInputManager::getGamepadState(int controllerNum)
     {
-        return lastGamepadStates[controllerNum];
-    }
-
-    PlayerInputState GameInputManager::getPlayerInputState(int playerIndex) const
-    {
-        if (playerIndex < 0 || playerIndex >= GAME_INPUT_MAX_PLAYERS)
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        if (controllerNum < 0 || controllerNum >= GAMEPADS_MAX)
             return {};
-        return m_playerInputs[playerIndex];
+        std::lock_guard<std::mutex> lock(gamepadStateMutex);
+#endif
+        return lastGamepadStates[controllerNum];
     }
 
     uint32_t GameInputManager::getControllerButtonMask(int controllerIndex) const
     {
         if (controllerIndex < 0 || controllerIndex >= GAMEPADS_MAX)
             return 0;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        std::lock_guard<std::mutex> lock(gamepadStateMutex);
+#endif
         return buildMaskFromGamepadState(lastGamepadStates[controllerIndex]);
-    }
-
-    int GameInputManager::getAssignedControllerForPlayer(int playerIndex) const
-    {
-        if (playerIndex < 0 || playerIndex >= GAME_INPUT_MAX_PLAYERS)
-            return -1;
-        return m_playerAssignments[playerIndex];
     }
 
     void GameInputManager::registerEmuFunctionKey(EmuFunctionKey emuKey, BrlsButtonMatrix buttons, std::function<void()> callback, TriggerType type, float threshold)
@@ -527,27 +593,6 @@ namespace beiklive
     void GameInputManager::clearEmuFunctionKeys()
     {
         hotkeyBindings.clear();
-    }
-
-    void GameInputManager::updatePlayerAssignments(int controllersCount)
-    {
-        m_playerAssignments[0] = controllersCount > 0 ? 0 : -1;
-        m_playerAssignments[1] = controllersCount > 1 ? 1 : -1;
-    }
-
-    void GameInputManager::updatePlayerStates()
-    {
-        for (auto& playerInput : m_playerInputs)
-            playerInput.buttonMask = 0;
-
-        for (int player = 0; player < GAME_INPUT_MAX_PLAYERS; ++player)
-        {
-            int controllerIndex = m_playerAssignments[player];
-            if (controllerIndex < 0 || controllerIndex >= GAMEPADS_MAX)
-                continue;
-
-            m_playerInputs[player].buttonMask = buildMaskFromGamepadState(lastGamepadStates[controllerIndex]);
-        }
     }
 
     bool GameInputManager::isNesDualPlayerMode() const
@@ -690,7 +735,13 @@ namespace beiklive
 
     void GameInputManager::appendKeyboardHotkeyInputs()
     {
-#ifndef __SWITCH__
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        for (const auto& hk : hotkeyBindings)
+            for (const auto& combo : hk.buttons)
+                for (int key : combo)
+                    if (isKeyboardInputPressed(key))
+                        activeInputs.push_back(key);
+#elif !defined(__SWITCH__)
         auto* im = brls::Application::getPlatform()->getInputManager();
         if (!im)
             return;
@@ -703,10 +754,42 @@ namespace beiklive
 #endif
     }
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    void GameInputManager::snapshotKeyboardInputs()
+    {
+        auto* platform = brls::Application::getPlatform();
+        auto* im = platform ? platform->getInputManager() : nullptr;
+        if (!im)
+            return;
+
+        std::set<int> current;
+        for (int key = brls::BRLS_KBD_KEY_SPACE;
+             key < brls::BRLS_KBD_KEY_LAST; ++key)
+        {
+            if (im->getKeyboardKeyState(
+                    static_cast<brls::BrlsKeyboardScancode>(key)))
+                current.insert(key);
+        }
+
+        std::lock_guard<std::mutex> lock(keyboardInputMutex);
+        keyboardInputs = std::move(current);
+    }
+
+    bool GameInputManager::isKeyboardInputPressed(int key) const
+    {
+        std::lock_guard<std::mutex> lock(keyboardInputMutex);
+        return keyboardInputs.count(key) != 0;
+    }
+#endif
+
     void GameInputManager::rebuildActiveInputsForHotkeys(int pollCount)
     {
         activeInputs.clear();
         appendKeyboardHotkeyInputs();
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        std::lock_guard<std::mutex> lock(gamepadStateMutex);
+#endif
 
         if (!isNesDualPlayerMode())
         {
@@ -746,6 +829,68 @@ namespace beiklive
 
     void GameInputManager::refreshPlayerInputStatesForPlatform(int platform)
     {
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        for (auto& playerInput : m_playerInputs)
+            playerInput = {};
+
+        std::lock_guard<std::mutex> lock(gamepadStateMutex);
+
+        const int controllersCount = std::min(getControllerCount(), GAMEPADS_MAX);
+        const std::string mappingPrefix = beiklive::input_mapping::platformPrefix(platform);
+        if (controllersCount <= 0)
+        {
+            // The unified state still contains keyboard and mouse fallback
+            // input when no physical pad is connected.  Run it through the
+            // same platform mapping table as a real controller.
+            m_playerInputs[0].buttonMask =
+                buildMaskFromConfiguredMapping(lastGamepadStates[0], mappingPrefix);
+            copyAnalogState(lastGamepadStates[0], m_playerInputs[0]);
+            mergeKeyboardAnalogState(
+                buildKeyboardMappedState(mappingPrefix), m_playerInputs[0]);
+            return;
+        }
+
+        const bool isNes = platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuNES);
+        const bool nesTwoPlayer = isNes && m_nesDualPlayerEnabled;
+        if (nesTwoPlayer)
+        {
+            for (int player = 0; player < GAME_INPUT_MAX_PLAYERS; ++player)
+            {
+                std::string playerPrefix = player == 0 ? "nes.p1." : "nes.p2.";
+                const int defaultController = player == 0 ? 0 : 1;
+                const int controller = GET_SETTING_KEY_INT((playerPrefix + "controller").c_str(), defaultController);
+                // Keyboard mappings are independent of the assigned pad.  A
+                // physical controller must not disable keyboard L/R/ZL/ZR
+                // bindings, so evaluate the keyboard-only state first and
+                // merge the assigned controller when one is available.
+                m_playerInputs[player].buttonMask =
+                    buildMaskFromConfiguredMapping(GamepadState{}, playerPrefix);
+                if (controller >= 0 && controller < controllersCount)
+                {
+                    m_playerInputs[player].buttonMask |=
+                        buildMaskFromConfiguredMapping(lastGamepadStates[controller], playerPrefix);
+                    copyAnalogState(lastGamepadStates[controller], m_playerInputs[player]);
+                }
+                mergeKeyboardAnalogState(
+                    buildKeyboardMappedState(playerPrefix), m_playerInputs[player]);
+            }
+            return;
+        }
+
+        uint32_t mergedMask = 0;
+        for (int i = 0; i < controllersCount; ++i)
+        {
+            mergedMask |= buildMaskFromConfiguredMapping(lastGamepadStates[i], mappingPrefix);
+        }
+        // Keep the keyboard as a first-class input source even when one or
+        // more physical controllers are connected.  This is what makes the
+        // editable keyboard bindings (including L/R/ZL/ZR) usable on macOS.
+        mergedMask |= buildMaskFromConfiguredMapping(GamepadState{}, mappingPrefix);
+        m_playerInputs[0].buttonMask = mergedMask;
+        copyAnalogState(lastGamepadStates[0], m_playerInputs[0]);
+        mergeKeyboardAnalogState(
+            buildKeyboardMappedState(mappingPrefix), m_playerInputs[0]);
+#else
         for (auto& playerInput : m_playerInputs)
             playerInput.buttonMask = 0;
 
@@ -780,6 +925,26 @@ namespace beiklive
             mergedMask |= buildMaskFromConfiguredMapping(lastGamepadStates[i], mappingPrefix);
         }
         m_playerInputs[0].buttonMask = mergedMask;
+#endif
+    }
+
+    void GameInputManager::publishPlayerInputStatesForPlatform(int platform)
+    {
+        setActivePlatform(platform);
+        refreshPlayerInputStatesForPlatform(platform);
+
+        auto& gameSignal = GameSignal::instance();
+        for (int player = 0; player < GAME_INPUT_MAX_PLAYERS; ++player)
+        {
+            const auto& input = m_playerInputs[player];
+            gameSignal.setGameButtonMask(player, input.buttonMask);
+#if defined(__APPLE__) && !defined(__SWITCH__)
+            gameSignal.setGameAnalogState(player, {
+                input.leftTrigger, input.rightTrigger,
+                input.leftStickX, input.leftStickY,
+                input.rightStickX, input.rightStickY});
+#endif
+        }
     }
 
     uint32_t GameInputManager::buildMaskFromGamepadState(const GamepadState& pad) const
@@ -809,6 +974,9 @@ namespace beiklive
         for (int key : combo)
         {
             bool pressed = false;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+            bool isPadInput = true;
+#endif
             switch (key)
             {
                 case brls::BUTTON_A: pressed = (pad.buttonFlags & A_FLAG) != 0; break;
@@ -835,13 +1003,87 @@ namespace beiklive
                 case STATE_PAD_RIGHT_STICK_RIGHT: pressed = pad.rightStickX > 0x4000; break;
                 case STATE_PAD_RIGHT_STICK_UP: pressed = pad.rightStickY > 0x4000; break;
                 case STATE_PAD_RIGHT_STICK_DOWN: pressed = pad.rightStickY < -0x4000; break;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+                case STATE_PAD_LEFT_STICK_X: pressed = std::abs(pad.leftStickX) > 0x4000; break;
+                case STATE_PAD_LEFT_STICK_Y: pressed = std::abs(pad.leftStickY) > 0x4000; break;
+                case STATE_PAD_RIGHT_STICK_X: pressed = std::abs(pad.rightStickX) > 0x4000; break;
+                case STATE_PAD_RIGHT_STICK_Y: pressed = std::abs(pad.rightStickY) > 0x4000; break;
+                default:
+                    isPadInput = false;
+                    break;
+#else
                 default: break;
+#endif
             }
+#if defined(__APPLE__) && !defined(__SWITCH__)
+            if (!isPadInput)
+                pressed = isKeyboardInputPressed(key);
+#endif
             if (!pressed)
                 return false;
         }
         return true;
     }
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    GamepadState GameInputManager::buildKeyboardMappedState(const std::string& prefix) const
+    {
+        GamepadState state{};
+        const unsigned platformMask = beiklive::input_mapping::platformMaskForPrefix(prefix);
+
+        auto supported = [&](const char* suffix) {
+            for (const auto& entry : beiklive::input_mapping::kGameButtonDefaults)
+            {
+                if (std::string(entry.suffix) == suffix)
+                    return (entry.platformMask & platformMask) != 0;
+            }
+            return false;
+        };
+
+        auto pressed = [&](const char* suffix) {
+            if (!supported(suffix))
+                return false;
+            const std::string key = beiklive::input_mapping::makeHandleKey(prefix, suffix);
+            const std::string value = GET_SETTING_KEY_STR(
+                key.c_str(),
+                beiklive::input_mapping::defaultInputValueForPrefix(prefix, suffix));
+            if (value.empty() || value == "none")
+                return false;
+            for (const auto& combo : beiklive::tools::parseMultiCombo(value))
+            {
+                // An empty GamepadState deliberately filters out PAD_* tokens,
+                // leaving only currently pressed keyboard keys in the combo.
+                if (containsComboInMask(GamepadState{}, combo))
+                    return true;
+            }
+            return false;
+        };
+
+        const bool leftUp = pressed("lstick_up");
+        const bool leftDown = pressed("lstick_down");
+        const bool leftLeft = pressed("lstick_left");
+        const bool leftRight = pressed("lstick_right");
+        const bool rightUp = pressed("rstick_up");
+        const bool rightDown = pressed("rstick_down");
+        const bool rightLeft = pressed("rstick_left");
+        const bool rightRight = pressed("rstick_right");
+
+        if (leftUp != leftDown)
+            state.leftStickY = leftUp ? 0x7FFF : -0x7FFF;
+        if (leftLeft != leftRight)
+            state.leftStickX = leftRight ? 0x7FFF : -0x7FFF;
+        if (rightUp != rightDown)
+            state.rightStickY = rightUp ? 0x7FFF : -0x7FFF;
+        if (rightLeft != rightRight)
+            state.rightStickX = rightRight ? 0x7FFF : -0x7FFF;
+
+        if (pressed("l2"))
+            state.leftTrigger = 0xFF;
+        if (pressed("r2"))
+            state.rightTrigger = 0xFF;
+        return state;
+    }
+#endif
 
     uint32_t GameInputManager::buildMaskFromConfiguredMapping(const GamepadState& pad, const std::string& prefix) const
     {
@@ -856,6 +1098,13 @@ namespace beiklive
             {"b", "PAD_B", RETRO_DEVICE_ID_JOYPAD_B},
             {"x", "PAD_X", RETRO_DEVICE_ID_JOYPAD_X},
             {"y", "PAD_Y", RETRO_DEVICE_ID_JOYPAD_Y},
+#if defined(__APPLE__) && !defined(__SWITCH__)
+            // Saturn's C/Z labels share the libretro X/R slots in the
+            // canonical Saturn mapping, but still need their own config
+            // entries so the two visible bindings are not ignored.
+            {"c", "PAD_X", RETRO_DEVICE_ID_JOYPAD_X},
+            {"z", "PAD_RB", RETRO_DEVICE_ID_JOYPAD_R},
+#endif
             {"up", "PAD_UP", RETRO_DEVICE_ID_JOYPAD_UP},
             {"down", "PAD_DOWN", RETRO_DEVICE_ID_JOYPAD_DOWN},
             {"left", "PAD_LEFT", RETRO_DEVICE_ID_JOYPAD_LEFT},
@@ -919,7 +1168,7 @@ namespace beiklive
             const std::string key = prefix + "handle." + entry.suffix;
             const std::string value = GET_SETTING_KEY_STR(
                 key.c_str(),
-                beiklive::input_mapping::defaultHandleValueForPrefix(
+                beiklive::input_mapping::defaultInputValueForPrefix(
                     prefix, entry.suffix, entry.fallback));
             if (value.empty() || value == "none")
                 continue;

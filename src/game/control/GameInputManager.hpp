@@ -8,6 +8,9 @@
 #include <map>
 #include <vector>
 #include <functional>
+#if defined(__APPLE__) && !defined(__SWITCH__)
+#include <mutex>
+#endif
 
 
 using BrlsButtonMatrix = std::vector<std::vector<int>>;
@@ -81,6 +84,14 @@ namespace beiklive
     struct PlayerInputState
     {
         uint32_t buttonMask = 0;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        unsigned char leftTrigger = 0;
+        unsigned char rightTrigger = 0;
+        short leftStickX = 0;
+        short leftStickY = 0;
+        short rightStickX = 0;
+        short rightStickY = 0;
+#endif
     };
 
     class GameInputManager : public Singleton<GameInputManager>
@@ -96,9 +107,9 @@ namespace beiklive
         bool isInputEnabled() const { return inputEnabled; }
 
         GamepadState getGamepadState(int controllerNum);
-        PlayerInputState getPlayerInputState(int playerIndex) const;
         uint32_t getControllerButtonMask(int controllerIndex) const;
         void refreshPlayerInputStatesForPlatform(int platform);
+        void publishPlayerInputStatesForPlatform(int platform);
         void setActivePlatform(int platform) { m_activePlatform = platform; }
         void setNesDualPlayerEnabled(bool enabled) { m_nesDualPlayerEnabled = enabled; }
         bool isNesDualPlayerEnabled() const { return m_nesDualPlayerEnabled; }
@@ -108,7 +119,6 @@ namespace beiklive
                 ->getInputManager()
                 ->getControllersConnectedCount();
         }
-        int getAssignedControllerForPlayer(int playerIndex) const;
 
         // 注册一个模拟器功能键的回调函数，当对应的按键组合被按下时调用回调函数
         void registerEmuFunctionKey(
@@ -132,13 +142,15 @@ namespace beiklive
         bool m_nesDualPlayerEnabled = false;
         GamepadState lastGamepadStates[GAMEPADS_MAX];
         PlayerInputState m_playerInputs[GAME_INPUT_MAX_PLAYERS];
-        int m_playerAssignments[GAME_INPUT_MAX_PLAYERS] = {0, 1};
         bool m_nesMenuPressed[GAME_INPUT_MAX_PLAYERS] = {false, false};
         bool m_prevNesMenuPressed[GAME_INPUT_MAX_PLAYERS] = {false, false};
         bool m_nesFastForwardPressed[GAME_INPUT_MAX_PLAYERS] = {false, false};
         bool m_nesRewindPressed[GAME_INPUT_MAX_PLAYERS] = {false, false};
         bool m_prevNesFastForwardPressed[GAME_INPUT_MAX_PLAYERS] = {false, false};
         bool m_prevNesRewindPressed[GAME_INPUT_MAX_PLAYERS] = {false, false};
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        mutable std::mutex gamepadStateMutex;
+#endif
 
         InputState inputState;
         std::map<int, uint64_t > pressTime;
@@ -153,10 +165,11 @@ namespace beiklive
 
         // 处理控制器的输入
         void handleControllerInput();
-        void updatePlayerAssignments(int controllersCount);
-        void updatePlayerStates();
         uint32_t buildMaskFromGamepadState(const GamepadState& pad) const;
         uint32_t buildMaskFromConfiguredMapping(const GamepadState& pad, const std::string& prefix) const;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        GamepadState buildKeyboardMappedState(const std::string& prefix) const;
+#endif
         bool containsComboInMask(const GamepadState& pad, const std::vector<int>& combo) const;
         bool isNesDualPlayerMode() const;
         bool consumeNesPlayerMenuPress();
@@ -166,6 +179,10 @@ namespace beiklive
         void rebuildActiveInputsForHotkeys(int pollCount);
         void appendActiveInputsFromGamepadState(const GamepadState& state);
         void appendKeyboardHotkeyInputs();
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        void snapshotKeyboardInputs();
+        bool isKeyboardInputPressed(int key) const;
+#endif
         void checkHotkeys();
         GamepadState getControllerState(int controllerNum);
         void updateInputState();
@@ -180,6 +197,11 @@ namespace beiklive
         bool isShortPress(int key, float threshold = 0.5f);
         
         void printactiveInputs();
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        mutable std::mutex keyboardInputMutex;
+        std::set<int> keyboardInputs;
+#endif
 
     };
 

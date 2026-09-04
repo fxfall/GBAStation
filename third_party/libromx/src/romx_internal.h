@@ -132,6 +132,13 @@ romx_result_t romx_error_set(
     uint64_t byte_offset,
     const char *message);
 
+/* Persist the directory entry created by an atomic publish.  On POSIX this
+ * fsyncs the containing directory; Windows has no portable directory flush
+ * and relies on MoveFileEx/FlushFileBuffers semantics. */
+romx_result_t romx_sync_parent_directory(
+    const char *utf8_path,
+    romx_error_t *error);
+
 romx_result_t romx_parse_footer(
     const uint8_t footer[ROMX_FOOTER_SIZE],
     uint64_t file_size,

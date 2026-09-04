@@ -12,11 +12,22 @@
 
 // libretro public API types
 #include "third_party/mgba/src/platform/libretro/libretro.h"
+#if defined(__APPLE__) && !defined(__SWITCH__)
+#include "third_party/RetroArch-1.22.2/libretro-common/include/libretro_vulkan.h"
+#ifndef RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT
+#define RETRO_ENVIRONMENT_GET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_SUPPORT \
+    (73 | RETRO_ENVIRONMENT_EXPERIMENTAL)
+#endif
+#endif
 #include "core/ConfigManager.hpp"
 #include "core/enums.h"
 #include "core/romx/RomxFrontend.hpp"
 
 namespace beiklive {
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+class LibretroVulkanHost;
+#endif
 
 /// 封装单个已加载的libretro核心。
 /// 处理动态库加载（桌面）或静态符号绑定（Switch/静态链接），
@@ -42,7 +53,7 @@ public:
 
     static constexpr unsigned kMaxInputPorts = 2;
 
-    LibretroLoader()  = default;
+    LibretroLoader();
     ~LibretroLoader();
 
     LibretroLoader(const LibretroLoader&)            = delete;
@@ -112,6 +123,24 @@ public:
     /// 设置核心使用的系统/BIOS目录。
     void setSystemDirectory(const std::string& dir) { m_systemDirectory = dir; }
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    /// Disable the ROMX VFS bridge for cores whose own path handling does not
+    /// tolerate URI-like entrypoints.  The materialized ROMX entrypoint is
+    /// used instead and the built-in cores keep the default VFS behavior.
+    void setRomxVfsAllowed(bool allowed) { m_romxVfsAllowed = allowed; }
+
+    /// Prefer passing a single-file ROMX payload through retro_game_info.data
+    /// for cores that can consume an in-memory archive themselves.  The path
+    /// is still passed as the identity/driver-name hint.
+    void setRomxPayloadPreferred(bool preferred) { m_romxPayloadPreferred = preferred; }
+#endif
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    /// Enable the macOS Vulkan host for an external hardware-rendering core.
+    /// The frontend UI remains on its existing OpenGL path.
+    void setVulkanPreferred(bool preferred) { m_vulkanPreferred = preferred; }
+#endif
+
     // ---- 视频帧 -----------------------------------------------------
 
     struct VideoFrame {
@@ -132,6 +161,13 @@ public:
     /// 数字手柄按键状态，索引 = RETRO_DEVICE_ID_JOYPAD_*。
     void setButtonState(unsigned port, unsigned id, bool pressed);
     bool getButtonState(unsigned port, unsigned id) const;
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    /// 模拟手柄状态。摇杆轴范围为 [-0x8000, 0x7fff]，模拟扳机/按键
+    /// 范围为 [0, 0x7fff]，与 libretro RETRO_DEVICE_ANALOG 约定一致。
+    void setAnalogState(unsigned port, unsigned index, unsigned id, int16_t value);
+    int16_t getAnalogState(unsigned port, unsigned index, unsigned id) const;
+#endif
 
     // ---- 几何信息 ---------------------------------------------------
 
@@ -194,7 +230,6 @@ private:
     bool (*fn_unserialize)(const void*, size_t)              = nullptr;
     bool (*fn_load_game)(const retro_game_info*)             = nullptr;
     void (*fn_unload_game)()                                 = nullptr;
-    void (*fn_get_region)()                                  = nullptr;
     // ---- 金手指/内存API ---------------------------------------------
     void (*fn_cheat_reset)()                                 = nullptr;
     void (*fn_cheat_set)(unsigned, bool, const char*)        = nullptr;
@@ -206,6 +241,7 @@ private:
     retro_pixel_format   m_pixelFormat = RETRO_PIXEL_FORMAT_0RGB1555;
     bool m_coreReady  = false;
     bool m_gameLoaded = false;
+    bool m_dynamicHandle = false;
     bool m_loggedFirstRun = false;
 
     // ---- 视频帧存储 -------------------------------------------------
@@ -226,6 +262,10 @@ private:
 
     // ---- 输入状态 ---------------------------------------------------
     bool m_buttons[kMaxInputPorts][RETRO_DEVICE_ID_JOYPAD_R3 + 1] = {};
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    int16_t m_analog[kMaxInputPorts][2][2] = {};
+    int16_t m_analogButtons[kMaxInputPorts][RETRO_DEVICE_ID_JOYPAD_R3 + 1] = {};
+#endif
 
     // ---- 核心变量/设置存储 ------------------------------------------
     // ConfigManager提供用户保存的值；m_coreVarStorage保存c_str()指针，
@@ -243,6 +283,10 @@ private:
     // made.  Multi-file descriptors and need_fullpath cores use the module's
     // filesystem fallback instead.
     romx_payload_mapping* m_romxMapping = nullptr;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    const void* m_romxPayloadData = nullptr;
+    uint64_t m_romxPayloadSize = 0;
+#endif
     std::string m_romxMaterializedPath;
 
     // A need_fullpath core may still ask for Libretro VFS.  In that case the
@@ -254,6 +298,20 @@ private:
     std::string m_romxVirtualPath;
     bool m_romxVfsRequested = false;
     bool m_romxVfsActive = false;
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    bool m_romxVfsAllowed = true;
+    bool m_romxPayloadPreferred = false;
+
+    // ---- macOS libretro Vulkan host ---------------------------------
+    // Only external PSP/3DS cores opt in.  The existing built-in cores and
+    // the OpenGL UI keep their current rendering paths.
+    bool m_vulkanPreferred = false;
+    std::unique_ptr<LibretroVulkanHost> m_vulkanHost;
+    retro_hw_render_callback m_hwRenderCallback{};
+    retro_hw_render_context_negotiation_interface_vulkan m_vulkanNegotiation{};
+    bool m_hwRenderActive = false;
+    bool m_vulkanNegotiationValid = false;
+#endif
 
     // ---- 磁盘控制 ----------------------------------------------------
     retro_disk_control_callback m_diskControl{};

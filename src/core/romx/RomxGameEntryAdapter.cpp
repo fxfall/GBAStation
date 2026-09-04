@@ -1,6 +1,7 @@
 #include "RomxGameEntryAdapter.hpp"
 
 #include "RomxFrontend.hpp"
+#include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
 #include "core/constexpr.h"
 
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -52,12 +54,18 @@ void assignError(std::string* output, const std::string& message)
 }
 
 constexpr int kPspPlatform = static_cast<int>(enums::EmuPlatform::EmuPSP);
+constexpr int kThreeDsPlatform = static_cast<int>(enums::EmuPlatform::Emu3DS);
 constexpr uint64_t kPspSfoMaximumSize = 4U * 1024U * 1024U;
 constexpr uint64_t kPspDirectoryMaximumSize = 32U * 1024U * 1024U;
 
 bool isPsp(const GameEntry& entry)
 {
     return entry.platform == kPspPlatform;
+}
+
+bool isThreeDs(const GameEntry& entry)
+{
+    return entry.platform == kThreeDsPlatform;
 }
 
 std::string upperAlphanumeric(std::string value)
@@ -852,6 +860,40 @@ fs::path resolvedCheatPath(const GameEntry& entry)
     return fs::path(beiklive::path::cheatPath()) / filename;
 }
 
+fs::path threeDsNativeSaveDirectory(const GameEntry& entry)
+{
+    const fs::path root = entry.savePath.empty()
+        ? fs::path(beiklive::tools::defaultGameSavePath(entry.platform, entry.path))
+        : fs::path(entry.savePath);
+    if (root.empty())
+        return {};
+
+#ifdef __SWITCH__
+    // The built-in core already owns the canonical SDMC mapping.  Keep the
+    // existing Switch save root untouched.
+    return root;
+#else
+    const std::string titleId =
+        beiklive::three_ds::resolveTitleId(entry.threeDsTitleId, entry.path);
+    if (titleId.size() != 16U)
+        return root;
+    std::string lowerTitleId = titleId;
+    std::transform(lowerTitleId.begin(), lowerTitleId.end(), lowerTitleId.begin(),
+                   [](unsigned char value) {
+                       return static_cast<char>(std::tolower(value));
+                   });
+
+    // Azahar receives `savePath` as its libretro root and appends Azahar/
+    // before deriving SDMCDir. Its save-data archive is then split into the
+    // high/low 32-bit Title ID directories below data/00000001.
+    constexpr const char* kZeroId =
+        "00000000000000000000000000000000";
+    return root / "Azahar" / "sdmc" / "Nintendo 3DS" / kZeroId / kZeroId /
+           "title" / lowerTitleId.substr(0, 8U) / lowerTitleId.substr(8U, 8U) /
+           "data" / "00000001";
+#endif
+}
+
 std::string namespaceDirectory(const GameEntry& entry, romx_mutable_namespace_t ns)
 {
     if (ns == ROMX_MUTABLE_NAMESPACE_CHEAT)
@@ -869,6 +911,8 @@ std::string namespaceDirectory(const GameEntry& entry, romx_mutable_namespace_t 
 
     if (isPsp(entry))
         return pspSaveRoot().string();
+    if (isThreeDs(entry))
+        return threeDsNativeSaveDirectory(entry).string();
     return entry.savePath.empty()
         ? beiklive::tools::defaultGameSavePath(entry.platform, entry.path)
         : entry.savePath;
@@ -1245,6 +1289,261 @@ std::string pspTemporarySuffix()
     return std::to_string(ticks);
 }
 
+bool openThreeDsSaveCatalog(const fs::path& source,
+                            romx_save_catalog_t** catalog,
+                            uint32_t* candidateCount,
+                            std::string* error)
+{
+    if (catalog)
+        *catalog = nullptr;
+    if (candidateCount)
+        *candidateCount = 0;
+    if (source.empty()) {
+        assignError(error, "3DS save source path is empty");
+        return false;
+    }
+
+    romx_save_scan_options_t scanOptions = ROMX_SAVE_SCAN_OPTIONS_INIT;
+    scanOptions.platform_id = ROMX_PLATFORM_NINTENDO_3DS;
+    scanOptions.format_id = ROMX_FORMAT_N3DS;
+    scanOptions.launch_format_id = ROMX_LAUNCH_RAW_SINGLE_FILE;
+
+    romx_error_t err{};
+    const romx_result_t openResult = romx_save_catalog_open_path(
+        source.string().c_str(), &scanOptions, catalog, &err);
+    if (openResult != ROMX_OK) {
+        assignError(error, errorText("romx_save_catalog_open_path", err,
+                                     openResult));
+        return false;
+    }
+
+    uint32_t count = 0;
+    const romx_result_t countResult = romx_save_catalog_get_candidate_count(
+        *catalog, &count, &err);
+    if (countResult != ROMX_OK) {
+        romx_save_catalog_close(*catalog);
+        *catalog = nullptr;
+        assignError(error, errorText("romx_save_catalog_get_candidate_count",
+                                     err, countResult));
+        return false;
+    }
+    if (candidateCount)
+        *candidateCount = count;
+    return true;
+}
+
+std::string copyThreeDsCandidateSourcePath(const romx_save_catalog_t* catalog,
+                                            uint32_t candidateIndex,
+                                            std::string* error)
+{
+    romx_error_t err{};
+    uint64_t required = 0;
+    romx_result_t result = romx_save_catalog_copy_candidate_source_path(
+        catalog, candidateIndex, nullptr, 0, &required, &err);
+    if (result != ROMX_E_BUFFER_TOO_SMALL && result != ROMX_OK) {
+        assignError(error, errorText(
+            "romx_save_catalog_copy_candidate_source_path", err, result));
+        return {};
+    }
+    if (required == 0 || required > static_cast<uint64_t>(
+            std::numeric_limits<std::size_t>::max())) {
+        assignError(error, "3DS save source path size is invalid");
+        return {};
+    }
+    std::vector<char> buffer(static_cast<std::size_t>(required));
+    result = romx_save_catalog_copy_candidate_source_path(
+        catalog, candidateIndex, buffer.data(), required, &required, &err);
+    if (result != ROMX_OK) {
+        assignError(error, errorText(
+            "romx_save_catalog_copy_candidate_source_path", err, result));
+        return {};
+    }
+    return std::string(buffer.data());
+}
+
+std::string threeDsCandidateText(const char* value, std::size_t capacity,
+                                 uint32_t size)
+{
+    if (value == nullptr || capacity == 0)
+        return {};
+    const std::size_t bounded = std::min<std::size_t>(size, capacity - 1U);
+    return std::string(value, bounded);
+}
+
+std::vector<GameEntryAdapter::LocalSaveCandidate> listThreeDsSaveCandidates(
+    const GameEntry& entry, const fs::path& source, std::string* error)
+{
+    std::vector<GameEntryAdapter::LocalSaveCandidate> candidates;
+    if (!isThreeDs(entry)) {
+        assignError(error, "SAVE catalog is only available for 3DS entries");
+        return candidates;
+    }
+
+    romx_save_catalog_t* catalog = nullptr;
+    uint32_t count = 0;
+    if (!openThreeDsSaveCatalog(source, &catalog, &count, error))
+        return candidates;
+
+    candidates.reserve(count);
+    for (uint32_t index = 0; index < count; ++index) {
+        romx_save_candidate_info_t candidate = ROMX_SAVE_CANDIDATE_INFO_INIT;
+        romx_error_t err{};
+        const romx_result_t result = romx_save_catalog_get_candidate(
+            catalog, index, &candidate, &err);
+        if (result != ROMX_OK) {
+            assignError(error, errorText("romx_save_catalog_get_candidate",
+                                         err, result));
+            candidates.clear();
+            break;
+        }
+
+        GameEntryAdapter::LocalSaveCandidate item;
+        item.key = threeDsCandidateText(candidate.key, sizeof(candidate.key),
+                                        candidate.key_size);
+        item.displayName = threeDsCandidateText(
+            candidate.display_name, sizeof(candidate.display_name),
+            candidate.display_name_size);
+        if (item.displayName.empty())
+            item.displayName = item.key;
+        item.titleId = threeDsCandidateText(candidate.title_id,
+                                            sizeof(candidate.title_id),
+                                            candidate.title_id_size);
+        item.sourcePath = copyThreeDsCandidateSourcePath(catalog, index, error);
+        if (item.sourcePath.empty()) {
+            candidates.clear();
+            break;
+        }
+        item.sourceFormat = candidate.source_format;
+        item.grouping = candidate.grouping;
+        item.fileCount = candidate.file_count;
+        item.dataSize = candidate.data_size;
+        item.isDirectory = (candidate.flags & ROMX_SAVE_CANDIDATE_IS_DIRECTORY) != 0;
+        candidates.push_back(std::move(item));
+    }
+    romx_save_catalog_close(catalog);
+    return candidates;
+}
+
+bool hasThreeDsSaveObject(const fs::path& destination,
+                          const std::string& key)
+{
+    if (destination.empty() || key.empty())
+        return false;
+    romx_reader_t* reader = nullptr;
+    romx_error_t err{};
+    if (romx_reader_open_path(destination.string().c_str(), nullptr, &reader,
+                              &err) != ROMX_OK)
+        return false;
+    uint32_t count = 0;
+    const romx_result_t countResult =
+        romx_reader_get_mutable_object_count(reader, &count, &err);
+    bool found = false;
+    if (countResult == ROMX_OK) {
+        for (uint32_t index = 0; index < count; ++index) {
+            romx_mutable_object_info_t object = ROMX_MUTABLE_OBJECT_INFO_INIT;
+            if (romx_reader_get_mutable_object(reader, index, &object, &err) !=
+                    ROMX_OK ||
+                object.object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE)
+                continue;
+            if (std::string(object.key,
+                            std::min<std::size_t>(object.key_size,
+                                                  sizeof(object.key) - 1U)) == key) {
+                found = true;
+                break;
+            }
+        }
+    }
+    romx_reader_close(reader);
+    return found;
+}
+
+SyncResult writeThreeDsSaveCatalog(const fs::path& source,
+                                   const fs::path& destination,
+                                   const std::string& preferredKey,
+                                   uint32_t* writtenCount,
+                                   std::string* error)
+{
+    if (writtenCount)
+        *writtenCount = 0;
+    if (source.empty() || destination.empty()) {
+        assignError(error, "3DS SAVE source or ROMX destination is empty");
+        return SyncResult::Failed;
+    }
+    if (!preferredKey.empty() && !validateSaveSlotKeyImpl(preferredKey, error))
+        return SyncResult::Failed;
+
+    romx_save_catalog_t* catalog = nullptr;
+    uint32_t count = 0;
+    if (!openThreeDsSaveCatalog(source, &catalog, &count, error))
+        return SyncResult::Failed;
+    if (count == 0) {
+        romx_save_catalog_close(catalog);
+        return SyncResult::Skipped;
+    }
+
+    uint32_t succeeded = 0;
+    std::string firstError;
+    for (uint32_t index = 0; index < count; ++index) {
+        romx_save_candidate_info_t candidate = ROMX_SAVE_CANDIDATE_INFO_INIT;
+        romx_error_t err{};
+        const romx_result_t candidateResult = romx_save_catalog_get_candidate(
+            catalog, index, &candidate, &err);
+        if (candidateResult != ROMX_OK) {
+            if (firstError.empty())
+                firstError = errorText("romx_save_catalog_get_candidate", err,
+                                       candidateResult);
+            continue;
+        }
+
+        const std::string candidateKey = threeDsCandidateText(
+            candidate.key, sizeof(candidate.key), candidate.key_size);
+        // Keep the historical `libretro` key when it already exists, but use
+        // the catalog's real folder/file key for a new single-save ROMX. This
+        // preserves old containers while making a newly imported folder
+        // visible as its own save name in the frontend.
+        const bool reusePreferred = preferredKey.empty() ||
+            preferredKey != "libretro" ||
+            hasThreeDsSaveObject(destination, preferredKey);
+        const std::string objectKey = count == 1 && reusePreferred &&
+                                      !preferredKey.empty()
+            ? preferredKey : candidateKey;
+        if (!validateSaveSlotKeyImpl(objectKey, nullptr)) {
+            if (firstError.empty())
+                firstError = "3DS SAVE candidate has an invalid object key";
+            continue;
+        }
+
+        romx_mutable_write_options_t writeOptions =
+            ROMX_MUTABLE_WRITE_OPTIONS_INIT;
+        writeOptions.data_capacity = 0;
+        romx_mutable_object_info_t written = ROMX_MUTABLE_OBJECT_INFO_INIT;
+        const romx_result_t result = romx_save_catalog_write_candidate(
+            catalog, index, destination.string().c_str(), objectKey.c_str(),
+            nullptr, &writeOptions, &written, &err);
+        if (result != ROMX_OK) {
+            if (firstError.empty())
+                firstError = errorText("romx_save_catalog_write_candidate", err,
+                                       result);
+            continue;
+        }
+        ++succeeded;
+    }
+    romx_save_catalog_close(catalog);
+    if (writtenCount)
+        *writtenCount = succeeded;
+    if (succeeded == count)
+        return SyncResult::Success;
+    if (succeeded != 0) {
+        assignError(error, "仅写入 " + std::to_string(succeeded) + "/" +
+                            std::to_string(count) + " 个3DS存档" +
+                            (firstError.empty() ? std::string() :
+                                "：" + firstError));
+        return SyncResult::Failed;
+    }
+    assignError(error, firstError.empty() ? "没有3DS存档被写入 ROMX" : firstError);
+    return SyncResult::Failed;
+}
+
 SyncResult extractPspSaveBundle(const romx_reader_t* reader,
                                 const GameEntry& entry,
                                 const char* key,
@@ -1420,23 +1719,8 @@ void updateCheatPathFromRestored(GameEntry& entry,
         ? restoredPaths.front() : *preferred).string();
 }
 
-SyncResult importBundleNamespace(GameEntry& entry,
-                                 romx_mutable_namespace_t objectNamespace,
-                                 bool overwrite, std::string* error,
-                                 const std::string* requestedKey);
-
 void importMutableObjects(const std::string& path, GameEntry& entry)
 {
-    if (isPsp(entry))
-    {
-        // PSP has one active native savedata directory locally.  Import only
-        // the highest-priority ROMX SAVE object/directory on first use; the
-        // frontend exposes the remaining logical slots for explicit restore.
-        std::string ignored;
-        (void)importBundleNamespace(entry, ROMX_MUTABLE_NAMESPACE_SAVE, false,
-                                    &ignored, nullptr);
-    }
-
     romx_reader_t* reader = nullptr;
     romx_error_t err{};
     if (romx_reader_open_path(path.c_str(), nullptr, &reader, &err) != ROMX_OK)
@@ -1455,7 +1739,11 @@ void importMutableObjects(const std::string& path, GameEntry& entry)
         if (object.object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE &&
             object.object_namespace != ROMX_MUTABLE_NAMESPACE_CHEAT)
             continue;
-        if (isPsp(entry) && object.object_namespace == ROMX_MUTABLE_NAMESPACE_SAVE)
+        // PSP and 3DS SAVE objects are restored only after an explicit user
+        // action.  Their native layouts can contain multiple selectable
+        // saves, so opening a ROMX must never overwrite the active local save.
+        if ((isPsp(entry) || isThreeDs(entry)) &&
+            object.object_namespace == ROMX_MUTABLE_NAMESPACE_SAVE)
             continue;
         const fs::path root(namespaceDirectory(entry, object.object_namespace));
         std::vector<fs::path> restoredPaths;
@@ -1948,6 +2236,10 @@ SyncResult writeBundlePathEntries(const GameEntry& entry,
 SyncResult writeBundle(const GameEntry& entry, romx_mutable_namespace_t ns,
                        const char* key, std::string* error)
 {
+    if (isThreeDs(entry) && ns == ROMX_MUTABLE_NAMESPACE_SAVE)
+        return writeThreeDsSaveCatalog(
+            namespaceDirectory(entry, ROMX_MUTABLE_NAMESPACE_SAVE),
+            entry.path, key ? std::string(key) : std::string(), nullptr, error);
     if (isPsp(entry) && pspDiscId(entry).empty())
     {
         assignError(error, "PSP ROMX payload does not contain a valid DISC_ID");
@@ -2367,6 +2659,32 @@ std::vector<GameEntryAdapter::SaveSlot> enumerateSaveSlots(
             &bundle, &err);
         if (bundleResult != ROMX_OK)
             continue; // Opaque SAVE objects are not selectable by this UI.
+
+        // libromx writes each native 3DS catalog candidate as one outer SAVE
+        // object.  A candidate may contain several files directly below its
+        // source root; do not let the generic 3DS bundle path heuristic split
+        // those files into separate UI saves.  The object itself is the
+        // selectable folder-save, matching the native 3DS directory model.
+        if (isThreeDs(entry))
+        {
+            uint32_t entryCount = 0;
+            if (romx_mutable_bundle_get_entry_count(bundle, &entryCount, &err) ==
+                ROMX_OK && entryCount != 0U)
+            {
+                slot.entryCount = entryCount;
+                slot.selectionKey.clear();
+                romx_mutable_bundle_entry_info_t bundleEntry =
+                    ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
+                if (romx_mutable_bundle_get_entry(bundle, 0U, &bundleEntry,
+                                                  &err) == ROMX_OK)
+                    slot.entryPath.assign(bundleEntry.path,
+                                          bundleEntry.path_size);
+                slots.push_back(std::move(slot));
+            }
+            romx_mutable_bundle_close(bundle);
+            continue;
+        }
+
         uint32_t saveSlotCount = 0;
         if (romx_mutable_bundle_get_save_slot_count(bundle, &saveSlotCount,
                                                      &err) != ROMX_OK)
@@ -2432,6 +2750,13 @@ std::vector<GameEntryAdapter::SaveSlot> enumerateSaveSlots(
 std::string GameEntryAdapter::payloadCacheDirectory()
 {
     return (fs::path(beiklive::path::cachePath()) / "romx" / "payloads").string();
+}
+
+std::string GameEntryAdapter::nativeSaveDirectory(const GameEntry& entry)
+{
+    if (!isThreeDs(entry))
+        return {};
+    return threeDsNativeSaveDirectory(entry).string();
 }
 
 bool GameEntryAdapter::apply(const std::string& path, GameEntry& entry,
@@ -2505,6 +2830,12 @@ bool GameEntryAdapter::apply(const std::string& path, GameEntry& entry,
             entry.cheatPath = (pspCheatRoot() / (discId + ".ini")).string();
         }
     }
+    else if (isThreeDs(entry))
+    {
+        const std::string titleId = beiklive::three_ds::normalizeTitleId(info.serial);
+        if (!titleId.empty())
+            entry.threeDsTitleId = titleId;
+    }
 
     std::error_code ec;
     fs::create_directories(isPsp(entry) ? pspSaveRoot() : fs::path(entry.savePath), ec);
@@ -2563,6 +2894,10 @@ SyncResult GameEntryAdapter::exportSave(const GameEntry& entry, const std::strin
     {
         if (isPsp(entry))
             return writePspSaveBundle(entry, objectKey, slotKey, error);
+        if (isThreeDs(entry))
+            return writeThreeDsSaveCatalog(
+                namespaceDirectory(entry, ROMX_MUTABLE_NAMESPACE_SAVE),
+                entry.path, objectKey, nullptr, error);
         return mergeSaveBundleSlot(entry, objectKey, slotKey, error);
     }
     if (!validateSaveSlotKeyImpl(key, error))
@@ -2573,6 +2908,10 @@ SyncResult GameEntryAdapter::exportSave(const GameEntry& entry, const std::strin
         // replaces one logical PSP slot.
         return writePspSaveBundle(entry, key, {}, error);
     }
+    if (isThreeDs(entry))
+        return writeThreeDsSaveCatalog(
+            namespaceDirectory(entry, ROMX_MUTABLE_NAMESPACE_SAVE),
+            entry.path, key, nullptr, error);
     return writeBundle(entry, ROMX_MUTABLE_NAMESPACE_SAVE, key.c_str(), error);
 }
 
@@ -2669,6 +3008,68 @@ std::vector<GameEntryAdapter::SaveSlot> GameEntryAdapter::listSaveSlots(
     const GameEntry& entry, std::string* error)
 {
     return enumerateSaveSlots(entry, error);
+}
+
+std::vector<GameEntryAdapter::LocalSaveCandidate>
+GameEntryAdapter::listLocalSaveCandidates(const GameEntry& entry,
+                                           const std::string& sourcePath,
+                                           std::string* error)
+{
+    return listThreeDsSaveCandidates(entry, fs::path(sourcePath), error);
+}
+
+SyncResult GameEntryAdapter::writeLocalSavesToRomx(
+    const GameEntry& entry, const std::string& sourcePath,
+    std::string* outputPath, uint32_t* writtenCount, std::string* error)
+{
+    if (outputPath)
+        outputPath->clear();
+    if (writtenCount)
+        *writtenCount = 0;
+    if (!isThreeDs(entry)) {
+        assignError(error, "只有3DS游戏支持从目录写入 ROMX");
+        return SyncResult::Failed;
+    }
+    if (!isRomxPath(entry.path)) {
+        assignError(error, "只能向现有3DS ROMX容器写入存档，普通ROM不会自动生成 ROMX");
+        return SyncResult::Failed;
+    }
+
+    const fs::path source(sourcePath);
+    std::string scanError;
+    const auto candidates = listThreeDsSaveCandidates(entry, source, &scanError);
+    if (candidates.empty()) {
+        if (!scanError.empty())
+            assignError(error, scanError);
+        return SyncResult::Skipped;
+    }
+
+    const fs::path destination(entry.path);
+    if (destination.empty()) {
+        assignError(error, "无法确定3DS ROMX容器路径");
+        return SyncResult::Failed;
+    }
+
+    std::error_code ec;
+    if (!fs::is_regular_file(destination, ec) || ec) {
+        assignError(error, "现有 ROMX 容器不存在或不是普通文件");
+        return SyncResult::Failed;
+    }
+    Info info;
+    std::string infoError;
+    if (!readInfo(destination.string(), info, &infoError) ||
+        info.platform != kThreeDsPlatform) {
+        assignError(error, infoError.empty()
+            ? "现有 ROMX 不是3DS容器" : infoError);
+        return SyncResult::Failed;
+    }
+
+    const SyncResult result = writeThreeDsSaveCatalog(
+        source, destination, "libretro", writtenCount, error);
+    if (outputPath && (result == SyncResult::Success ||
+                       (writtenCount && *writtenCount != 0)))
+        *outputPath = destination.string();
+    return result;
 }
 
 bool GameEntryAdapter::validateSaveSlotKey(const std::string& key,

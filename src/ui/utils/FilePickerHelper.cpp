@@ -111,4 +111,74 @@ namespace beiklive
             flPage->showDriveList();
     }
 
+    void openDirectoryPicker(
+        std::function<void(const std::string&)> onSelected,
+        const std::string& startPath)
+    {
+        struct PickerState
+        {
+            std::function<void(const std::string&)> onSelected;
+            std::string selectedPath;
+            bool hasSelection = false;
+        };
+        auto state = std::make_shared<PickerState>();
+        state->onSelected = std::move(onSelected);
+
+        auto* flPage = new beiklive::FileListPage();
+        flPage->setDirSelectionMode(true);
+        bool hasStartDir = false;
+        if (!startPath.empty()) {
+            std::error_code ec;
+            hasStartDir = fs::exists(startPath, ec) &&
+                          fs::is_directory(startPath, ec);
+        }
+        flPage->registerAction(
+            L("选择目录"), brls::BUTTON_Y,
+            [flPage, state](brls::View*) -> bool {
+                const std::string path = flPage->getHeader()->getPath();
+                if (path.empty()) {
+                    brls::Application::notify(L("当前目录不可用"));
+                    return true;
+                }
+                std::error_code ec;
+                if (!fs::is_directory(path, ec) || ec) {
+                    brls::Application::notify(L("当前路径不是目录"));
+                    return true;
+                }
+                state->selectedPath = path;
+                state->hasSelection = true;
+                flPage->requestClose();
+                return true;
+            });
+        flPage->onRequestClose = [state]() {
+            brls::Application::popActivity(brls::TransitionAnimation::FADE,
+                [state]() {
+                    if (state->hasSelection && state->onSelected)
+                        state->onSelected(state->selectedPath);
+                });
+        };
+
+        auto* container = new brls::Box(brls::Axis::COLUMN);
+        container->setGrow(1.0f);
+        container->addView(flPage);
+        container->registerAction(
+            L("关闭"), brls::BUTTON_START,
+            [flPage](brls::View*) {
+                flPage->requestClose();
+                return true;
+            });
+
+        auto* frame = new brls::AppletFrame(container);
+        frame->setHeaderVisibility(brls::Visibility::GONE);
+        frame->setFooterVisibility(brls::Visibility::GONE);
+        frame->setBackground(brls::ViewBackground::NONE);
+        brls::Application::pushActivity(new brls::Activity(frame),
+                                        brls::TransitionAnimation::FADE);
+
+        if (hasStartDir)
+            flPage->setPath(startPath);
+        else
+            flPage->showDriveList();
+    }
+
 } // namespace beiklive

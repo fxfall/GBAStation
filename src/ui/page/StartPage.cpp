@@ -1,5 +1,6 @@
 #include "StartPage.hpp"
 #include "core/Translation.hpp"
+#include "emulator/ExternalCorePolicy.hpp"
 #include "SteamGridDbPage.hpp"
 #include "CoverEditorPage.hpp"
 #include "core/SteamGridDb.hpp"
@@ -712,9 +713,9 @@ namespace beiklive
                     _utf8(beiklive::material::EDIT),
                     _utf8(beiklive::material::SETTINGS),
                 };
-                const char* labels[2] = {
-                    L("布局调整").c_str(),
-                    L("卡片设置").c_str(),
+                const std::string labels[2] = {
+                    L("布局调整"),
+                    L("卡片设置"),
                 };
                 for (int i = 0; i < 2; ++i) {
                     const bool selected = m_selectedRow == i;
@@ -747,7 +748,7 @@ namespace beiklive
                     nvgFillColor(vg, selected
                         ? nvgRGBA(18, 24, 34, 245)
                         : nvgRGBA(242, 245, 250, 242));
-                    nvgText(vg, rowX + 68.f, ry + rowH * 0.5f, labels[i], nullptr);
+                    nvgText(vg, rowX + 68.f, ry + rowH * 0.5f, labels[i].c_str(), nullptr);
                     nvgRestore(vg);
                 }
             } else if (m_showPico8Option) {
@@ -918,6 +919,12 @@ namespace beiklive
                         static_cast<int>(platform));
         }
 
+        bool allowExternalNro(bool matches,
+                              beiklive::enums::EmuPlatform platform)
+        {
+            return matches && !beiklive::external::runsInProcess(platform);
+        }
+
         bool shouldUseNdsExternalNro(const beiklive::GameEntry& entry)
         {
 #ifdef __SWITCH__
@@ -942,25 +949,33 @@ namespace beiklive
 
         bool shouldUseThreeDsExternalNro(const beiklive::GameEntry& entry)
         {
-            return entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS);
+            return allowExternalNro(
+                entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::Emu3DS),
+                beiklive::enums::EmuPlatform::Emu3DS);
         }
 
         bool shouldUseThreeDsExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItemMatchesPlatform(
-                dirItem, beiklive::enums::FileType::THREEDS_ROM,
+            return allowExternalNro(
+                dirItemMatchesPlatform(
+                    dirItem, beiklive::enums::FileType::THREEDS_ROM,
+                    beiklive::enums::EmuPlatform::Emu3DS),
                 beiklive::enums::EmuPlatform::Emu3DS);
         }
 
         bool shouldUseArcadeExternalNro(const beiklive::GameEntry& entry)
         {
-            return entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade);
+            return allowExternalNro(
+                entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade),
+                beiklive::enums::EmuPlatform::EmuArcade);
         }
 
         bool shouldUseArcadeExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItemMatchesPlatform(
-                dirItem, beiklive::enums::FileType::ARCADE_ROM,
+            return allowExternalNro(
+                dirItemMatchesPlatform(
+                    dirItem, beiklive::enums::FileType::ARCADE_ROM,
+                    beiklive::enums::EmuPlatform::EmuArcade),
                 beiklive::enums::EmuPlatform::EmuArcade);
         }
 
@@ -978,13 +993,17 @@ namespace beiklive
 
         bool shouldUsePspExternalNro(const beiklive::GameEntry& entry)
         {
-            return entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP);
+            return allowExternalNro(
+                entry.platform == static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP),
+                beiklive::enums::EmuPlatform::EmuPSP);
         }
 
         bool shouldUsePspExternalNro(const beiklive::DirListData& dirItem)
         {
-            return dirItemMatchesPlatform(
-                dirItem, beiklive::enums::FileType::PSP_ROM,
+            return allowExternalNro(
+                dirItemMatchesPlatform(
+                    dirItem, beiklive::enums::FileType::PSP_ROM,
+                    beiklive::enums::EmuPlatform::EmuPSP),
                 beiklive::enums::EmuPlatform::EmuPSP);
         }
 

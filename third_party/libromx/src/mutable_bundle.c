@@ -81,9 +81,11 @@ typedef struct bundle_entry {
 
 typedef struct bundle_save_slot {
     char *key;
+    char *display_name;
     uint32_t *entry_indices;
     uint32_t entry_count;
     uint64_t data_size;
+    int is_directory;
 } bundle_save_slot_t;
 
 struct romx_mutable_bundle {
@@ -93,8 +95,29 @@ struct romx_mutable_bundle {
     uint32_t io_chunk_size;
     romx_mutable_namespace_t object_namespace;
     uint16_t platform_id;
+    uint16_t launch_format_id;
     bundle_save_slot_t *save_slots;
     uint32_t save_slot_count;
+};
+
+typedef enum mutable_save_profile {
+    MUTABLE_SAVE_PROFILE_SINGLE_FILE = 1,
+    MUTABLE_SAVE_PROFILE_PSP_DIRECTORY = 2,
+    MUTABLE_SAVE_PROFILE_DIRECTORY_PER_SAVE = 3
+} mutable_save_profile_t;
+
+typedef struct mutable_save_profile_rule {
+    uint16_t platform_id;
+    uint16_t launch_format_id; /* ROMX_LAUNCH_UNSPECIFIED means any. */
+    mutable_save_profile_t profile;
+} mutable_save_profile_rule_t;
+
+/* Save ownership is a ROM-type registry, never a directory-count heuristic. */
+static const mutable_save_profile_rule_t save_profile_rules[] = {
+    { ROMX_PLATFORM_PSP, ROMX_LAUNCH_UNSPECIFIED,
+      MUTABLE_SAVE_PROFILE_PSP_DIRECTORY },
+    { ROMX_PLATFORM_NINTENDO_3DS, ROMX_LAUNCH_UNSPECIFIED,
+      MUTABLE_SAVE_PROFILE_DIRECTORY_PER_SAVE }
 };
 
 static uint16_t read_le16(const uint8_t *bytes)
@@ -245,22 +268,6 @@ static int folded_path_pointer_compare(const void *left, const void *right)
     return ascii_fold_compare(*a, *b);
 }
 
-static size_t top_level_path_size(const char *path)
-{
-    const char *separator = strchr(path, '/');
-    return separator == NULL ? strlen(path) : (size_t)(separator - path);
-}
-
-static char *duplicate_top_level_path(const char *path)
-{
-    const size_t size = top_level_path_size(path);
-    char *copy = (char *)malloc(size + 1U);
-    if (copy == NULL) return NULL;
-    memcpy(copy, path, size);
-    copy[size] = '\0';
-    return copy;
-}
-
 static char *duplicate_path(const char *path)
 {
     const size_t size = strlen(path);
@@ -270,12 +277,6 @@ static char *duplicate_path(const char *path)
     return copy;
 }
 
-static int save_slot_uses_top_level_directory(uint16_t platform_id)
-{
-    /* PSP savedata is natively a directory with multiple member files. */
-    return platform_id == ROMX_PLATFORM_PSP;
-}
-
 static void destroy_save_slot_array(bundle_save_slot_t *slots,
     uint32_t count)
 {
@@ -283,70 +284,534 @@ static void destroy_save_slot_array(bundle_save_slot_t *slots,
     if (slots == NULL) return;
     for (index = 0U; index < count; ++index) {
         free(slots[index].key);
+        free(slots[index].display_name);
         free(slots[index].entry_indices);
     }
     free(slots);
 }
 
-static romx_result_t build_save_slots(romx_mutable_bundle_t *bundle,
+static int ascii_name_equal(const char *left, size_t left_size,
+    const char *right)
+{
+    size_t index;
+    if (strlen(right) != left_size) return 0;
+    for (index = 0U; index < left_size; ++index) {
+        unsigned char a = (unsigned char)left[index];
+        unsigned char b = (unsigned char)right[index];
+        if (a >= 'a' && a <= 'z') a = (unsigned char)(a - 'a' + 'A');
+        if (b >= 'a' && b <= 'z') b = (unsigned char)(b - 'a' + 'A');
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static uint16_t read_sfo_le16(const uint8_t *bytes)
+{
+    return (uint16_t)((uint16_t)bytes[0] |
+        ((uint16_t)bytes[1] << 8U));
+}
+
+static uint32_t read_sfo_le32(const uint8_t *bytes)
+{
+    return (uint32_t)((uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) |
+        ((uint32_t)bytes[2] << 16U) | ((uint32_t)bytes[3] << 24U));
+}
+
+/* ROMX 0.2.0 PSP profile accepts the on-disk PARAM.SFO v1.01 table and the
+ * three parameter encodings used by retail savedata.  We validate the entire
+ * bounded table before looking up an identity key, so a malformed unrelated
+ * record cannot be mistaken for a valid save directory. */
+static int sfo_validate(const uint8_t *bytes, size_t size)
+{
+    uint32_t key_table, data_table, count;
+    uint64_t records_end;
+    uint32_t index;
+
+    if (bytes == NULL || size < 20U ||
+        bytes[0] != 0U || bytes[1] != 'P' || bytes[2] != 'S' ||
+        bytes[3] != 'F' || read_sfo_le32(bytes + 4U) != UINT32_C(0x00000101))
+        return 0;
+    key_table = read_sfo_le32(bytes + 8U);
+    data_table = read_sfo_le32(bytes + 12U);
+    count = read_sfo_le32(bytes + 16U);
+    if (count == 0U || count > UINT32_C(4096)) return 0;
+    records_end = UINT64_C(20) + (uint64_t)count * UINT64_C(16);
+    if (records_end > (uint64_t)size || key_table < records_end ||
+        key_table > data_table || data_table > (uint64_t)size)
+        return 0;
+    for (index = 0U; index < count; ++index) {
+        const uint8_t *record = bytes + 20U + (size_t)index * 16U;
+        uint16_t format = read_sfo_le16(record + 2U);
+        uint32_t data_length = read_sfo_le32(record + 4U);
+        uint32_t data_maximum = read_sfo_le32(record + 8U);
+        uint32_t data_offset = read_sfo_le32(record + 12U);
+        uint64_t key_position = (uint64_t)key_table +
+            (uint64_t)read_sfo_le16(record);
+        uint64_t data_position = (uint64_t)data_table + data_offset;
+        uint64_t key_limit = (uint64_t)data_table;
+        uint64_t key_end;
+        uint32_t other;
+
+        if (key_position >= key_limit || data_position > (uint64_t)size ||
+            data_length > (uint64_t)size - data_position ||
+            data_maximum < data_length ||
+            (format != UINT16_C(0x0004) && format != UINT16_C(0x0204) &&
+             format != UINT16_C(0x0404))) return 0;
+        key_end = key_position;
+        while (key_end < key_limit && bytes[key_end] != 0U) ++key_end;
+        if (key_end >= key_limit || key_end == key_position) return 0;
+        for (other = 0U; other < index; ++other) {
+            const uint8_t *other_record = bytes + 20U +
+                (size_t)other * 16U;
+            uint64_t other_key_position = (uint64_t)key_table +
+                (uint64_t)read_sfo_le16(other_record);
+            uint64_t other_key_end = other_key_position;
+            while (other_key_end < key_limit &&
+                   bytes[other_key_end] != 0U) ++other_key_end;
+            if (other_key_end >= key_limit ||
+                other_key_end - other_key_position != key_end - key_position)
+                return 0;
+            {
+                uint64_t key_cursor = key_position;
+                uint64_t other_cursor = other_key_position;
+                while (key_cursor < key_end) {
+                    unsigned char current = bytes[key_cursor++];
+                    unsigned char previous = bytes[other_cursor++];
+                    if (current >= (unsigned char)'a' &&
+                        current <= (unsigned char)'z')
+                        current = (unsigned char)(current - 'a' + 'A');
+                    if (previous >= (unsigned char)'a' &&
+                        previous <= (unsigned char)'z')
+                        previous = (unsigned char)(previous - 'a' + 'A');
+                    if (current != previous) break;
+                    if (key_cursor == key_end) return 0;
+                }
+            }
+        }
+        if (format == UINT16_C(0x0204)) {
+            uint64_t value_end = data_position;
+            while (value_end < data_position + data_length &&
+                   bytes[value_end] != 0U) ++value_end;
+            if (data_length == 0U || value_end >= data_position + data_length)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+static int sfo_get_string(const uint8_t *bytes, size_t size,
+    const char *wanted, char *value, size_t capacity)
+{
+    uint32_t key_table, data_table, count, index;
+    if (value == NULL || capacity == 0U || wanted == NULL ||
+        !sfo_validate(bytes, size)) return 0;
+    key_table = read_sfo_le32(bytes + 8U);
+    data_table = read_sfo_le32(bytes + 12U);
+    count = read_sfo_le32(bytes + 16U);
+    for (index = 0U; index < count; ++index) {
+        const uint8_t *record = bytes + 20U + (size_t)index * 16U;
+        uint16_t key_offset = read_sfo_le16(record);
+        uint32_t data_length = read_sfo_le32(record + 4U);
+        uint32_t data_offset = read_sfo_le32(record + 12U);
+        uint64_t key_position = (uint64_t)key_table + key_offset;
+        uint64_t data_position = (uint64_t)data_table + data_offset;
+        size_t key_length = 0U, value_length = 0U;
+        if (key_position >= size || data_position > size ||
+            data_length > size - data_position ||
+            read_sfo_le16(record + 2U) != UINT16_C(0x0204)) continue;
+        while (key_position + key_length < size &&
+               bytes[key_position + key_length] != 0U) ++key_length;
+        if (key_position + key_length >= size ||
+            !ascii_name_equal((const char *)bytes + key_position,
+                key_length, wanted)) continue;
+        while (value_length < data_length &&
+               bytes[data_position + value_length] != 0U) ++value_length;
+        if (value_length == 0U || value_length >= capacity) return 0;
+        memcpy(value, bytes + data_position, value_length);
+        value[value_length] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+static int psp_identity_valid(const char *value, int require_digit)
+{
+    size_t index, size;
+    int has_digit = 0;
+    if (value == NULL || (size = strlen(value)) < 4U || size > 64U)
+        return 0;
+    for (index = 0U; index < size; ++index) {
+        unsigned char byte = (unsigned char)value[index];
+        if (byte >= '0' && byte <= '9') has_digit = 1;
+        else if (!((byte >= 'A' && byte <= 'Z') ||
+                   (byte >= 'a' && byte <= 'z') || byte == '-' ||
+                   byte == '_')) return 0;
+    }
+    return !require_digit || has_digit;
+}
+
+static int normalized_identity_equal(const char *left, const char *right)
+{
+    size_t a = 0U, b = 0U;
+    for (;;) {
+        unsigned char x, y;
+        while (left[a] == '-' || left[a] == '_') ++a;
+        while (right[b] == '-' || right[b] == '_') ++b;
+        x = (unsigned char)left[a++];
+        y = (unsigned char)right[b++];
+        if (x >= 'a' && x <= 'z') x = (unsigned char)(x - 'a' + 'A');
+        if (y >= 'a' && y <= 'z') y = (unsigned char)(y - 'a' + 'A');
+        if (x != y) return 0;
+        if (x == 0U) return 1;
+    }
+}
+
+romx_result_t romx_mutable_psp_savedata_inspect_sfo(const void *sfo_bytes,
+    uint64_t sfo_size, const char *expected_directory_basename,
+    romx_mutable_psp_savedata_info_t *info, romx_error_t *error)
+{
+    const uint8_t *bytes = (const uint8_t *)sfo_bytes;
+    romx_mutable_psp_savedata_info_t parsed =
+        ROMX_MUTABLE_PSP_SAVEDATA_INFO_INIT;
+    size_t bad_offset = 0U;
+    int has_disc_id;
+    int has_savedata_directory;
+    if (bytes == NULL || info == NULL ||
+        info->struct_size < (uint32_t)sizeof(*info) ||
+        sfo_size == 0U || sfo_size > UINT64_C(4194304) ||
+        sfo_size > (uint64_t)SIZE_MAX)
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid PSP PARAM.SFO arguments");
+    has_disc_id = sfo_get_string(bytes, (size_t)sfo_size, "DISC_ID",
+        parsed.disc_id, sizeof(parsed.disc_id)) &&
+        psp_identity_valid(parsed.disc_id, 1);
+    has_savedata_directory = sfo_get_string(bytes, (size_t)sfo_size,
+        "SAVEDATA_DIRECTORY", parsed.savedata_directory,
+        sizeof(parsed.savedata_directory)) &&
+        psp_identity_valid(parsed.savedata_directory, 0);
+    if (has_savedata_directory && expected_directory_basename != NULL &&
+        (!*expected_directory_basename ||
+         !normalized_identity_equal(parsed.savedata_directory,
+            expected_directory_basename)))
+        has_savedata_directory = 0;
+    if (!has_disc_id) parsed.disc_id[0] = '\0';
+    if (!has_savedata_directory) parsed.savedata_directory[0] = '\0';
+    if (!has_disc_id && !has_savedata_directory)
+        return romx_error_set(error, ROMX_E_MUTABLE_BUNDLE, 0,
+            ROMX_OFFSET_UNKNOWN,
+            "PSP PARAM.SFO has no valid savedata identity");
+    if (has_disc_id)
+        parsed.flags |= ROMX_MUTABLE_PSP_SAVEDATA_HAS_DISC_ID;
+    if (has_savedata_directory)
+        parsed.flags |= ROMX_MUTABLE_PSP_SAVEDATA_HAS_DIRECTORY;
+    if (!sfo_get_string(bytes, (size_t)sfo_size, "SAVEDATA_TITLE",
+            parsed.title, sizeof(parsed.title)))
+        (void)sfo_get_string(bytes, (size_t)sfo_size, "TITLE",
+            parsed.title, sizeof(parsed.title));
+    if (parsed.title[0] != '\0' &&
+        romx_utf8_validate((const uint8_t *)parsed.title,
+            strlen(parsed.title), &bad_offset))
+        parsed.flags |= ROMX_MUTABLE_PSP_SAVEDATA_HAS_TITLE;
+    else
+        parsed.title[0] = '\0';
+    *info = parsed;
+    romx_error_clear(error);
+    return ROMX_OK;
+}
+
+static int path_is_member(const char *path, const char *root)
+{
+    size_t size = strlen(root);
+    return strncmp(path, root, size) == 0 &&
+        (path[size] == '/' || path[size] == '\0');
+}
+
+static const char *path_basename_pointer(const char *path)
+{
+    const char *separator = strrchr(path, '/');
+    return separator == NULL ? path : separator + 1U;
+}
+
+static char *path_parent_copy(const char *path)
+{
+    const char *separator = strrchr(path, '/');
+    size_t size;
+    char *copy;
+    if (separator == NULL || separator == path) return NULL;
+    size = (size_t)(separator - path);
+    copy = (char *)malloc(size + 1U);
+    if (copy == NULL) return NULL;
+    memcpy(copy, path, size);
+    copy[size] = '\0';
+    return copy;
+}
+
+static char *path_first_component_copy(const char *path)
+{
+    const char *separator = strchr(path, '/');
+    size_t size;
+    char *copy;
+    if (separator == NULL || separator == path) return NULL;
+    size = (size_t)(separator - path);
+    copy = (char *)malloc(size + 1U);
+    if (copy == NULL) return NULL;
+    memcpy(copy, path, size);
+    copy[size] = '\0';
+    return copy;
+}
+
+static romx_result_t bundle_read_exact(romx_mutable_file_t *file,
+    uint64_t offset, void *buffer, uint64_t size, romx_error_t *error);
+
+static romx_result_t add_save_slot(romx_mutable_bundle_t *bundle,
+    const char *key, const char *display_name, int is_directory,
     romx_error_t *error)
 {
-    bundle_save_slot_t *slots = NULL;
-    uint32_t slot_count = 0U;
+    bundle_save_slot_t *grown = (bundle_save_slot_t *)realloc(
+        bundle->save_slots,
+        (size_t)(bundle->save_slot_count + 1U) * sizeof(*grown));
+    bundle_save_slot_t *slot;
+    if (grown == NULL)
+        return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+            ROMX_OFFSET_UNKNOWN, "failed to grow SAVE slots");
+    bundle->save_slots = grown;
+    slot = &bundle->save_slots[bundle->save_slot_count];
+    memset(slot, 0, sizeof(*slot));
+    slot->key = duplicate_path(key);
+    slot->display_name = duplicate_path(
+        display_name && *display_name ? display_name : path_basename_pointer(key));
+    slot->entry_indices = (uint32_t *)calloc(
+        bundle->entry_count == 0U ? 1U : bundle->entry_count,
+        sizeof(*slot->entry_indices));
+    if (slot->key == NULL || slot->display_name == NULL ||
+        slot->entry_indices == NULL) {
+        free(slot->key);
+        free(slot->display_name);
+        free(slot->entry_indices);
+        memset(slot, 0, sizeof(*slot));
+        return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+            ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE slot");
+    }
+    slot->is_directory = is_directory;
+    ++bundle->save_slot_count;
+    return ROMX_OK;
+}
+
+static romx_result_t append_save_slot_entry(romx_mutable_bundle_t *bundle,
+    uint32_t slot_index, uint32_t entry_index, romx_error_t *error)
+{
+    bundle_save_slot_t *slot = &bundle->save_slots[slot_index];
+    if (slot->entry_count == UINT32_MAX ||
+        slot->data_size > UINT64_MAX - bundle->entries[entry_index].data_size)
+        return romx_error_set(error, ROMX_E_RANGE, 0,
+            ROMX_OFFSET_UNKNOWN, "SAVE slot entry data size overflows");
+    slot->entry_indices[slot->entry_count++] = entry_index;
+    slot->data_size += bundle->entries[entry_index].data_size;
+    return ROMX_OK;
+}
+
+static romx_result_t build_single_file_save_slots(
+    romx_mutable_bundle_t *bundle, romx_error_t *error)
+{
+    uint32_t index;
+    for (index = 0U; index < bundle->entry_count; ++index) {
+        romx_result_t result = add_save_slot(bundle,
+            bundle->entries[index].path,
+            path_basename_pointer(bundle->entries[index].path), 0, error);
+        if (result != ROMX_OK) return result;
+        result = append_save_slot_entry(bundle,
+            bundle->save_slot_count - 1U, index, error);
+        if (result != ROMX_OK) return result;
+    }
+    return ROMX_OK;
+}
+
+/* 3DS save roots are directories.  The first path component is therefore the
+ * logical root of a save in an RMBL object.  Files kept directly at the bundle
+ * root remain independent, which also covers Gateway-style single-file saves.
+ */
+static romx_result_t build_directory_save_slots(
+    romx_mutable_bundle_t *bundle, romx_error_t *error)
+{
     uint32_t index;
 
     for (index = 0U; index < bundle->entry_count; ++index) {
         const char *path = bundle->entries[index].path;
-        char *candidate;
+        char *root = path_first_component_copy(path);
         uint32_t slot_index;
-        candidate = save_slot_uses_top_level_directory(bundle->platform_id) &&
-                strchr(path, '/') != NULL
-            ? duplicate_top_level_path(path) : duplicate_path(path);
-        if (candidate == NULL) {
-            destroy_save_slot_array(slots, slot_count);
-            return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
-                ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE slot key");
+        romx_result_t result;
+
+        if (root == NULL) {
+            result = add_save_slot(bundle, path, path_basename_pointer(path),
+                0, error);
+            if (result != ROMX_OK) return result;
+            continue;
         }
-        for (slot_index = 0U; slot_index < slot_count; ++slot_index) {
-            if (ascii_fold_equal(slots[slot_index].key, candidate)) break;
+        for (slot_index = 0U; slot_index < bundle->save_slot_count;
+             ++slot_index) {
+            if (ascii_fold_equal(bundle->save_slots[slot_index].key, root))
+                break;
         }
-        if (slot_index == slot_count) {
-            bundle_save_slot_t *grown = (bundle_save_slot_t *)realloc(slots,
-                (size_t)(slot_count + 1U) * sizeof(*grown));
-            if (grown == NULL) {
-                free(candidate);
-                destroy_save_slot_array(slots, slot_count);
-                return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
-                    ROMX_OFFSET_UNKNOWN, "failed to grow SAVE slots");
+        if (slot_index == bundle->save_slot_count) {
+            result = add_save_slot(bundle, root, root, 1, error);
+            if (result != ROMX_OK) {
+                free(root);
+                return result;
             }
-            slots = grown;
-            memset(&slots[slot_count], 0, sizeof(slots[slot_count]));
-            slots[slot_count].key = candidate;
-            slots[slot_count].entry_indices = (uint32_t *)calloc(
-                bundle->entry_count == UINT32_C(0) ? UINT32_C(1) :
-                    bundle->entry_count, sizeof(uint32_t));
-            if (slots[slot_count].entry_indices == NULL) {
-                destroy_save_slot_array(slots, slot_count + 1U);
-                return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
-                    ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE slot entries");
-            }
-            ++slot_count;
-        } else {
-            free(candidate);
         }
-        if (slots[slot_index].entry_count == UINT32_MAX ||
-            slots[slot_index].data_size > UINT64_MAX -
-                bundle->entries[index].data_size) {
-            destroy_save_slot_array(slots, slot_count);
-            return romx_error_set(error, ROMX_E_RANGE, 0,
-                ROMX_OFFSET_UNKNOWN, "SAVE slot entry data size overflows");
-        }
-        slots[slot_index].entry_indices[slots[slot_index].entry_count++] = index;
-        slots[slot_index].data_size += bundle->entries[index].data_size;
+        free(root);
     }
-    bundle->save_slots = slots;
-    bundle->save_slot_count = slot_count;
+
+    for (index = 0U; index < bundle->entry_count; ++index) {
+        const char *path = bundle->entries[index].path;
+        uint32_t selected = UINT32_MAX;
+        if (strchr(path, '/') == NULL) {
+            for (selected = 0U; selected < bundle->save_slot_count;
+                 ++selected) {
+                if (ascii_fold_equal(bundle->save_slots[selected].key, path))
+                    break;
+            }
+            if (selected == bundle->save_slot_count)
+                return romx_error_set(error, ROMX_E_MUTABLE_BUNDLE, 0,
+                    ROMX_OFFSET_UNKNOWN,
+                    "3DS SAVE file slot was not indexed");
+        } else {
+            char *root = path_first_component_copy(path);
+            uint32_t slot_index;
+            if (root == NULL)
+                return romx_error_set(error, ROMX_E_MUTABLE_BUNDLE, 0,
+                    ROMX_OFFSET_UNKNOWN,
+                    "3DS SAVE directory path is invalid");
+            for (slot_index = 0U; slot_index < bundle->save_slot_count;
+                 ++slot_index) {
+                if (ascii_fold_equal(bundle->save_slots[slot_index].key, root))
+                    break;
+            }
+            free(root);
+            if (slot_index == bundle->save_slot_count)
+                return romx_error_set(error, ROMX_E_MUTABLE_BUNDLE, 0,
+                    ROMX_OFFSET_UNKNOWN,
+                    "3DS SAVE directory slot was not indexed");
+            selected = slot_index;
+        }
+        {
+            romx_result_t result = append_save_slot_entry(bundle, selected,
+                index, error);
+            if (result != ROMX_OK) return result;
+        }
+    }
     return ROMX_OK;
+}
+
+static romx_result_t build_psp_save_slots(romx_mutable_bundle_t *bundle,
+    romx_error_t *error)
+{
+    const uint64_t maximum_sfo_size = UINT64_C(4194304);
+    uint32_t index;
+
+    for (index = 0U; index < bundle->entry_count; ++index) {
+        const bundle_entry_t *entry = &bundle->entries[index];
+        const char *name = path_basename_pointer(entry->path);
+        char *root;
+        uint8_t *sfo;
+        romx_mutable_psp_savedata_info_t savedata =
+            ROMX_MUTABLE_PSP_SAVEDATA_INFO_INIT;
+        const char *root_name;
+        romx_result_t result;
+        uint32_t existing;
+
+        if (!ascii_name_equal(name, strlen(name), "PARAM.SFO") ||
+            entry->data_size == 0U || entry->data_size > maximum_sfo_size)
+            continue;
+        root = path_parent_copy(entry->path);
+        if (root == NULL) continue;
+        sfo = (uint8_t *)malloc((size_t)entry->data_size);
+        if (sfo == NULL) {
+            free(root);
+            return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+                entry->data_offset, "failed to allocate PSP PARAM.SFO");
+        }
+        result = bundle_read_exact(bundle->file, entry->data_offset, sfo,
+            entry->data_size, error);
+        if (result != ROMX_OK) {
+            free(sfo);
+            free(root);
+            return result;
+        }
+        root_name = path_basename_pointer(root);
+        result = romx_mutable_psp_savedata_inspect_sfo(sfo,
+            entry->data_size, root_name, &savedata, error);
+        if (result != ROMX_OK) {
+            free(sfo);
+            free(root);
+            continue;
+        }
+        free(sfo);
+        for (existing = 0U; existing < bundle->save_slot_count; ++existing)
+            if (ascii_fold_equal(bundle->save_slots[existing].key, root)) break;
+        if (existing == bundle->save_slot_count) {
+            result = add_save_slot(bundle, root,
+                (savedata.flags & ROMX_MUTABLE_PSP_SAVEDATA_HAS_TITLE)
+                    ? savedata.title : root_name, 1, error);
+            if (result != ROMX_OK) {
+                free(root);
+                return result;
+            }
+        }
+        free(root);
+    }
+
+    for (index = 0U; index < bundle->entry_count; ++index) {
+        uint32_t slot_index, selected = UINT32_MAX;
+        size_t selected_size = 0U;
+        for (slot_index = 0U; slot_index < bundle->save_slot_count;
+             ++slot_index) {
+            const char *root = bundle->save_slots[slot_index].key;
+            size_t root_size = strlen(root);
+            if (root_size > selected_size &&
+                path_is_member(bundle->entries[index].path, root)) {
+                selected = slot_index;
+                selected_size = root_size;
+            }
+        }
+        if (selected != UINT32_MAX) {
+            romx_result_t result = append_save_slot_entry(bundle, selected,
+                index, error);
+            if (result != ROMX_OK) return result;
+        }
+    }
+    return ROMX_OK;
+}
+
+static romx_result_t build_save_slots(romx_mutable_bundle_t *bundle,
+    romx_error_t *error)
+{
+    mutable_save_profile_t profile = MUTABLE_SAVE_PROFILE_SINGLE_FILE;
+    size_t index;
+    romx_result_t result;
+    for (index = 0U;
+         index < sizeof(save_profile_rules) / sizeof(save_profile_rules[0]);
+         ++index) {
+        const mutable_save_profile_rule_t *rule = &save_profile_rules[index];
+        if (rule->platform_id == bundle->platform_id &&
+            (rule->launch_format_id == ROMX_LAUNCH_UNSPECIFIED ||
+             rule->launch_format_id == bundle->launch_format_id)) {
+            profile = rule->profile;
+            break;
+        }
+    }
+    if (profile == MUTABLE_SAVE_PROFILE_PSP_DIRECTORY)
+        result = build_psp_save_slots(bundle, error);
+    else if (profile == MUTABLE_SAVE_PROFILE_DIRECTORY_PER_SAVE)
+        result = build_directory_save_slots(bundle, error);
+    else
+        result = build_single_file_save_slots(bundle, error);
+    if (result != ROMX_OK) {
+        destroy_save_slot_array(bundle->save_slots, bundle->save_slot_count);
+        bundle->save_slots = NULL;
+        bundle->save_slot_count = 0U;
+    }
+    return result;
 }
 
 /* Returns 1 when unique, 0 for a collision, and -1 on allocation failure. */
@@ -861,6 +1326,7 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
             return result;
         }
         bundle->platform_id = info.platform_id;
+        bundle->launch_format_id = info.launch_format_id;
     }
     result = romx_mutable_file_open(reader, object_namespace, key,
         &bundle->file, error);
@@ -1000,7 +1466,7 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
             entry_paths[index] = bundle->entries[index].path;
         unique = paths_portable_unique(entry_paths, entry_count);
         free(entry_paths);
-    if (unique <= 0) {
+        if (unique <= 0) {
             result = romx_error_set(error,
                 unique < 0 ? ROMX_E_OUT_OF_MEMORY : ROMX_E_MUTABLE_BUNDLE,
                 0, ROMX_OFFSET_UNKNOWN,
@@ -1009,10 +1475,6 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
                     : "mutable bundle paths are not portable-unique");
             goto fail;
         }
-    }
-    if (object_namespace == ROMX_MUTABLE_NAMESPACE_SAVE) {
-        result = build_save_slots(bundle, error);
-        if (result != ROMX_OK) goto fail;
     }
     if (align64(path_cursor) != data_offset ||
         data_cursor != bundle_size) {
@@ -1032,6 +1494,10 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
         if (result != ROMX_OK) goto fail;
         result = validate_zero_range(bundle->file, end, aligned_end - end,
             options.io_chunk_size, error);
+        if (result != ROMX_OK) goto fail;
+    }
+    if (object_namespace == ROMX_MUTABLE_NAMESPACE_SAVE) {
+        result = build_save_slots(bundle, error);
         if (result != ROMX_OK) goto fail;
     }
     free(directory);
@@ -1099,7 +1565,7 @@ romx_result_t romx_mutable_bundle_get_save_slot(
     romx_mutable_save_slot_info_t *slot, romx_error_t *error)
 {
     const bundle_save_slot_t *stored;
-    size_t key_size;
+    size_t key_size, display_name_size;
     if (bundle == NULL || slot == NULL ||
         slot->struct_size < (uint32_t)sizeof(*slot) ||
         bundle->object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE ||
@@ -1108,13 +1574,18 @@ romx_result_t romx_mutable_bundle_get_save_slot(
             ROMX_OFFSET_UNKNOWN, "invalid SAVE slot arguments");
     stored = &bundle->save_slots[index];
     key_size = strlen(stored->key);
+    display_name_size = strlen(stored->display_name);
     memset(slot, 0, sizeof(*slot));
     slot->struct_size = (uint32_t)sizeof(*slot);
     slot->index = index;
     slot->entry_count = stored->entry_count;
     slot->key_size = (uint32_t)key_size;
     slot->data_size = stored->data_size;
+    slot->display_name_size = (uint32_t)display_name_size;
+    slot->is_directory = stored->is_directory ? UINT32_C(1) : UINT32_C(0);
     memcpy(slot->key, stored->key, key_size + 1U);
+    memcpy(slot->display_name, stored->display_name,
+        display_name_size + 1U);
     romx_error_clear(error);
     return ROMX_OK;
 }

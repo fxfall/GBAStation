@@ -1,5 +1,14 @@
 #include <romx/romx.h>
 
+static romx_registry_status_t registry_status(uint16_t value,
+    const char *(*name)(uint16_t), romx_registry_status_t zero_status)
+{
+    if (value == UINT16_C(0)) return zero_status;
+    if (value == UINT16_C(0xffff)) return ROMX_REGISTRY_PROHIBITED;
+    if (value >= UINT16_C(0x8000)) return ROMX_REGISTRY_PRIVATE;
+    return name(value) != NULL ? ROMX_REGISTRY_KNOWN : ROMX_REGISTRY_UNKNOWN;
+}
+
 const char *romx_platform_name(uint16_t value)
 {
     switch (value) {
@@ -110,6 +119,22 @@ const char *romx_file_format_name(uint16_t value)
     case 0x0080: return "MSU";
     case 0x0081: return "PCM";
     case 0x0090: return "ROMX_LAUNCH_DESCRIPTOR";
+    case 0x0091: return "ZIP";
     default: return NULL;
     }
+}
+
+romx_registry_status_t romx_platform_status(uint16_t value)
+{
+    return registry_status(value, romx_platform_name, ROMX_REGISTRY_UNSPECIFIED);
+}
+
+romx_registry_status_t romx_launch_format_status(uint16_t value)
+{
+    return registry_status(value, romx_launch_format_name, ROMX_REGISTRY_UNSPECIFIED);
+}
+
+romx_registry_status_t romx_file_format_status(uint16_t value)
+{
+    return registry_status(value, romx_file_format_name, ROMX_REGISTRY_UNKNOWN);
 }

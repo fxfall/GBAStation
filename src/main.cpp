@@ -8,6 +8,7 @@
 #include "core/Translation.hpp"
 #include "core/AppUpdater.hpp"
 #include "core/ThreadPool.hpp"
+#include "emulator/ExternalCorePolicy.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
 #include "core/rom/PspMeta.hpp"
@@ -55,7 +56,8 @@ bool isDirectLaunchRomType(beiklive::enums::FileType type)
 		   type == FileType::GB_ROM ||
 		   type == FileType::NES_ROM ||
 		   type == FileType::SNES_ROM ||
-		   type == FileType::GENESIS_ROM;
+		   type == FileType::GENESIS_ROM ||
+		   beiklive::external::runsInProcess(type);
 }
 
 bool isLibraryRomType(beiklive::enums::FileType type)
@@ -434,8 +436,8 @@ int main(int argc, char* argv[]) {
 		if (std::strcmp(argv[i], "-d") == 0) {
 			brls::Logger::setLogLevel(brls::LogLevel::LOG_DEBUG);
 		} else if (std::strcmp(argv[i], "-o") == 0) {
-			const char* path = (i + 1 < argc) ? argv[++i] : beiklive::path::logFilePath().c_str();
-			brls::Logger::setLogOutput(std::fopen(path, "w+"));
+			const std::string path = (i + 1 < argc) ? argv[++i] : beiklive::path::logFilePath();
+			brls::Logger::setLogOutput(std::fopen(path.c_str(), "w+"));
 		} else if (std::strcmp(argv[i], "-v") == 0) {
 			brls::Application::enableDebuggingView(true);
 		}

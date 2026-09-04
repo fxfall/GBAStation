@@ -1,6 +1,7 @@
 ﻿#include "Tools.hpp"
 #include "enums.h"
 #include "core/romx/RomxFrontend.hpp"
+#include "game/control/DesktopInputMapping.hpp"
 #include "miniz.h"
 
 #ifdef _WIN32
@@ -195,7 +196,8 @@ int detectGamePlatform(const fs::path& path)
 
 // 返回某扩展名可能支持的平台列表（顺序 = 推荐优先级）。
 // 空列表 = 单机种或无歧义，由 getFileType 的现有判定决定。
-// 压缩包（zip/7z）内容不定，列出全部可用机种供用户选择。
+// 压缩包（zip/7z）内容不定，列出可提取的内置机种；FBNeo 仅对 ZIP
+// 保留完整街机 ROM 集并直接交给核心处理。
 std::vector<int> candidatePlatformsForExtension(const std::string& ext)
 {
     std::string lower = ext;
@@ -229,12 +231,19 @@ std::vector<int> candidatePlatformsForExtension(const std::string& ext)
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuPSP)};
     if (lower == "zip" || lower == "7z")
     {
-        return {static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA),
+        std::vector<int> candidates{
+                static_cast<int>(beiklive::enums::EmuPlatform::EmuGBA),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuGBC),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuGB),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuNES),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuSNES),
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuGenesis)};
+        // FBNeo consumes the complete arcade ZIP as its ROM set.  It is not
+        // a single ROM member that can be extracted like a console archive.
+        if (lower == "zip")
+            candidates.push_back(
+                static_cast<int>(beiklive::enums::EmuPlatform::EmuArcade));
+        return candidates;
     }
     return {};
 }
@@ -596,12 +605,9 @@ std::vector<int> parseKbdCombo(const std::string& combo)
         while (e > s && part[e - 1] == ' ') --e;
         if (s >= e) continue;
         std::string name = part.substr(s, e - s);
-        for (const auto& entry : beiklive::k_kbdInputNames) {
-            if (entry.name == name) {
-                result.push_back(entry.id);
-                break;
-            }
-        }
+        const int inputId = beiklive::desktop_input::keyboardInputIdForName(name);
+        if (inputId >= 0)
+            result.push_back(inputId);
     }
     return result;
 }
@@ -613,6 +619,12 @@ std::vector<std::vector<int>> parseMultiCombo(const std::string& val)
 {
     if (val.empty()) return {};
 
+#if defined(__APPLE__) && !defined(__SWITCH__)
+    return beiklive::desktop_input::parseMixedInputCombos(val);
+#else
+    // Keep the original parser on Switch and non-macOS targets.  Mixed
+    // keyboard/controller combos are a macOS frontend extension; the legacy
+    // parser and token handling remain unchanged elsewhere.
     std::vector<std::vector<int>> result;
     std::istringstream iss(val);
     std::string comboStr;
@@ -625,6 +637,7 @@ std::vector<std::vector<int>> parseMultiCombo(const std::string& val)
             result.push_back(std::move(combo));
     }
     return result;
+#endif
 }
 
 // ── 平台工具 ──────────────────────────────────────────────────────────────

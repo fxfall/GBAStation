@@ -16,6 +16,10 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#if defined(__APPLE__) && !defined(__SWITCH__)
+#include <iterator>
+#endif
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -62,6 +66,57 @@ namespace beiklive
             }
             return (b << 16) | a;
         }
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        void migrateLegacyKeyboardMappingDefaults(
+            ConfigManager* manager,
+            const std::vector<std::string>& mappingPrefixes)
+        {
+            if (!manager)
+                return;
+
+            constexpr int kKeyboardMappingVersion = 1;
+            const auto version = manager->Get("input.keyboard_layout_version");
+            if (version && version->AsInt().value_or(0) >= kKeyboardMappingVersion)
+                return;
+
+            // Only replace values that exactly match the former built-in
+            // controller defaults.  Any mapping the user already changed is
+            // left untouched.
+            for (const auto& prefix : mappingPrefixes)
+            {
+                const unsigned platformMask = input_mapping::platformMaskForPrefix(prefix);
+                for (const auto& entry : input_mapping::kGameButtonDefaults)
+                {
+                    if ((entry.platformMask & platformMask) == 0)
+                        continue;
+
+                    const std::string key =
+                        input_mapping::makeHandleKey(prefix, entry.suffix);
+                    const auto current = manager->Get(key);
+                    if (!current)
+                        continue;
+                    const auto currentString = current->AsString();
+                    if (!currentString)
+                        continue;
+
+                    const std::string oldValue =
+                        input_mapping::defaultHandleValueForPrefix(
+                            prefix, entry.suffix, entry.defaultValue);
+                    if (*currentString != oldValue)
+                        continue;
+
+                    manager->Set(
+                        key,
+                        ConfigValue(input_mapping::defaultInputValueForPrefix(
+                            prefix, entry.suffix, entry.defaultValue)));
+                }
+            }
+
+            manager->Set("input.keyboard_layout_version",
+                         ConfigValue(kKeyboardMappingVersion));
+        }
+#endif
 
         void appendBe32(std::vector<uint8_t>& out, uint32_t value)
         {
@@ -761,7 +816,13 @@ namespace beiklive
         SettingManager->SetDefault("cheat.dir", ConfigValue(std::string("")));
 
         // 按键绑定默认值。GBA 保持无前缀；GBC/GB 独立前缀首次默认继承旧的无前缀配置。
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        const std::string mappingPrefixes[] = {"", "gbc.", "gb.", "nes.",
+            "nes.p1.", "nes.p2.",
+            "sfc.", "nds.", "3ds.", "md.", "arcade.", "dc.", "psp.", "ps1.", "saturn.", "dolphin."};
+#else
         const std::string mappingPrefixes[] = {"", "gbc.", "gb.", "nes.", "sfc.", "nds.", "3ds.", "md.", "arcade.", "dc.", "psp.", "ps1.", "saturn.", "dolphin."};
+#endif
         for (const auto& prefix : mappingPrefixes)
         {
             const unsigned platformMask = beiklive::input_mapping::platformMaskForPrefix(prefix);
@@ -770,7 +831,7 @@ namespace beiklive
                 if ((entry.platformMask & platformMask) == 0)
                     continue;
                 std::string defaultValue =
-                    beiklive::input_mapping::defaultHandleValueForPrefix(
+                    beiklive::input_mapping::defaultInputValueForPrefix(
                         prefix, entry.suffix, entry.defaultValue);
                 if (beiklive::input_mapping::usesLegacyGbFamilyFallback(prefix) &&
                     !beiklive::input_mapping::isRightStickMapping(entry.suffix))
@@ -838,6 +899,13 @@ namespace beiklive
                 beiklive::input_mapping::makeKey(prefix, beiklive::input_mapping::kTurboBKey),
                 ConfigValue(turboBDefault));
         }
+
+#if defined(__APPLE__) && !defined(__SWITCH__)
+        migrateLegacyKeyboardMappingDefaults(
+            SettingManager,
+            std::vector<std::string>(std::begin(mappingPrefixes),
+                                     std::end(mappingPrefixes)));
+#endif
 
         // Saturn hotkeys mirror the external-core layout from the migration
         // design. They are separate from the generic defaults above so old
