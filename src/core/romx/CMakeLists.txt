@@ -17,9 +17,11 @@ endif()
 add_library(gbastation_romx INTERFACE)
 add_library(GBAStation::ROMX ALIAS gbastation_romx)
 target_sources(gbastation_romx INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/RomxError.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxFrontend.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxGameEntryAdapter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxPlatformIdentity.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RomxSaveExport.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxSavePaths.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxSaveRestore.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxStatsAdapter.cpp"

@@ -1,7 +1,9 @@
 #include "RomxGameEntryAdapter.hpp"
 
 #include "RomxFrontend.hpp"
+#include "RomxError.hpp"
 #include "RomxPlatformIdentity.hpp"
+#include "RomxSaveExport.hpp"
 #include "RomxSavePaths.hpp"
 #include "RomxSaveRestore.hpp"
 #include "RomxStatsAdapter.hpp"
@@ -16,15 +18,10 @@
 #include <chrono>
 #include <cctype>
 #include <cstdint>
-#include <cstdio>
-#include <ctime>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
-#include <limits>
 #include <optional>
-#include <sstream>
 #include <utility>
 #include <vector>
 
@@ -34,30 +31,6 @@ namespace beiklive::romx
 {
 namespace
 {
-std::string errorText(const char* operation, const romx_error_t& error, romx_result_t result)
-{
-    std::ostringstream stream;
-    stream << operation << " failed (" << result << ")";
-    if (error.message[0] != '\0')
-        stream << ": " << error.message;
-    if (error.system_code != 0)
-    {
-        stream << " [system_code=" << error.system_code;
-        const char* systemMessage = std::strerror(error.system_code);
-        if (systemMessage != nullptr && *systemMessage != '\0')
-            stream << ": " << systemMessage;
-        stream << "]";
-    }
-    return stream.str();
-}
-
-void assignError(std::string* output, const std::string& message)
-{
-    if (output)
-        *output = message;
-}
-
-constexpr int kPspPlatform = static_cast<int>(enums::EmuPlatform::EmuPSP);
 constexpr int kThreeDsPlatform = static_cast<int>(enums::EmuPlatform::Emu3DS);
 constexpr uint64_t kPspSfoMaximumSize = 4U * 1024U * 1024U;
 constexpr uint64_t kPspDirectoryMaximumSize = 32U * 1024U * 1024U;
@@ -1344,295 +1317,6 @@ std::string pspTemporarySuffix()
     return std::to_string(ticks);
 }
 
-bool openThreeDsSaveCatalog(const fs::path& source,
-                            romx_save_catalog_t** catalog,
-                            uint32_t* candidateCount,
-                            std::string* error)
-{
-    if (catalog)
-        *catalog = nullptr;
-    if (candidateCount)
-        *candidateCount = 0;
-    if (source.empty()) {
-        assignError(error, "3DS save source path is empty");
-        return false;
-    }
-
-    romx_save_scan_options_t scanOptions = ROMX_SAVE_SCAN_OPTIONS_INIT;
-    scanOptions.platform_id = ROMX_PLATFORM_NINTENDO_3DS;
-    scanOptions.format_id = ROMX_FORMAT_N3DS;
-    scanOptions.launch_format_id = ROMX_LAUNCH_RAW_SINGLE_FILE;
-
-    romx_error_t err{};
-    const romx_result_t openResult = romx_save_catalog_open_path(
-        source.string().c_str(), &scanOptions, catalog, &err);
-    if (openResult != ROMX_OK) {
-        assignError(error, errorText("romx_save_catalog_open_path", err,
-                                     openResult));
-        return false;
-    }
-
-    uint32_t count = 0;
-    const romx_result_t countResult = romx_save_catalog_get_candidate_count(
-        *catalog, &count, &err);
-    if (countResult != ROMX_OK) {
-        romx_save_catalog_close(*catalog);
-        *catalog = nullptr;
-        assignError(error, errorText("romx_save_catalog_get_candidate_count",
-                                     err, countResult));
-        return false;
-    }
-    if (candidateCount)
-        *candidateCount = count;
-    return true;
-}
-
-std::string copyThreeDsCandidateSourcePath(const romx_save_catalog_t* catalog,
-                                            uint32_t candidateIndex,
-                                            std::string* error)
-{
-    romx_error_t err{};
-    uint64_t required = 0;
-    romx_result_t result = romx_save_catalog_copy_candidate_source_path(
-        catalog, candidateIndex, nullptr, 0, &required, &err);
-    if (result != ROMX_E_BUFFER_TOO_SMALL && result != ROMX_OK) {
-        assignError(error, errorText(
-            "romx_save_catalog_copy_candidate_source_path", err, result));
-        return {};
-    }
-    if (required == 0 || required > static_cast<uint64_t>(
-            std::numeric_limits<std::size_t>::max())) {
-        assignError(error, "3DS save source path size is invalid");
-        return {};
-    }
-    std::vector<char> buffer(static_cast<std::size_t>(required));
-    result = romx_save_catalog_copy_candidate_source_path(
-        catalog, candidateIndex, buffer.data(), required, &required, &err);
-    if (result != ROMX_OK) {
-        assignError(error, errorText(
-            "romx_save_catalog_copy_candidate_source_path", err, result));
-        return {};
-    }
-    return std::string(buffer.data());
-}
-
-std::string threeDsCandidateText(const char* value, std::size_t capacity,
-                                 uint32_t size)
-{
-    if (value == nullptr || capacity == 0)
-        return {};
-    const std::size_t bounded = std::min<std::size_t>(size, capacity - 1U);
-    return std::string(value, bounded);
-}
-
-std::vector<GameEntryAdapter::LocalSaveCandidate> listThreeDsSaveCandidates(
-    const GameEntry& entry, const fs::path& source, std::string* error)
-{
-    std::vector<GameEntryAdapter::LocalSaveCandidate> candidates;
-    if (!isThreeDs(entry)) {
-        assignError(error, "SAVE catalog is only available for 3DS entries");
-        return candidates;
-    }
-
-    romx_save_catalog_t* catalog = nullptr;
-    uint32_t count = 0;
-    if (!openThreeDsSaveCatalog(source, &catalog, &count, error))
-        return candidates;
-    if (count == 0U)
-    {
-        romx_save_catalog_close(catalog);
-        assignError(error, "未找到可识别的3DS本地存档: " + source.string());
-        return candidates;
-    }
-
-    candidates.reserve(count);
-    for (uint32_t index = 0; index < count; ++index) {
-        romx_save_candidate_info_t candidate = ROMX_SAVE_CANDIDATE_INFO_INIT;
-        romx_error_t err{};
-        const romx_result_t result = romx_save_catalog_get_candidate(
-            catalog, index, &candidate, &err);
-        if (result != ROMX_OK) {
-            assignError(error, errorText("romx_save_catalog_get_candidate",
-                                         err, result));
-            candidates.clear();
-            break;
-        }
-
-        GameEntryAdapter::LocalSaveCandidate item;
-        item.key = threeDsCandidateText(candidate.key, sizeof(candidate.key),
-                                        candidate.key_size);
-        item.displayName = threeDsCandidateText(
-            candidate.display_name, sizeof(candidate.display_name),
-            candidate.display_name_size);
-        if (item.displayName.empty())
-            item.displayName = item.key;
-        item.titleId = threeDsCandidateText(candidate.title_id,
-                                            sizeof(candidate.title_id),
-                                            candidate.title_id_size);
-        item.sourcePath = copyThreeDsCandidateSourcePath(catalog, index, error);
-        if (item.sourcePath.empty()) {
-            candidates.clear();
-            break;
-        }
-        item.sourceFormat = candidate.source_format;
-        item.grouping = candidate.grouping;
-        item.scope = candidate.scope;
-        item.extdataId = threeDsCandidateText(
-            candidate.extdata_id, sizeof(candidate.extdata_id),
-            candidate.extdata_id_size);
-        item.fileCount = candidate.file_count;
-        item.dataSize = candidate.data_size;
-        item.isDirectory = (candidate.flags & ROMX_SAVE_CANDIDATE_IS_DIRECTORY) != 0;
-        candidates.push_back(std::move(item));
-    }
-    romx_save_catalog_close(catalog);
-    return candidates;
-}
-
-bool hasThreeDsSaveObject(const fs::path& destination,
-                          const std::string& key)
-{
-    if (destination.empty() || key.empty())
-        return false;
-    romx_reader_t* reader = nullptr;
-    romx_error_t err{};
-    if (romx_reader_open_path(destination.string().c_str(), nullptr, &reader,
-                              &err) != ROMX_OK)
-        return false;
-    uint32_t count = 0;
-    const romx_result_t countResult =
-        romx_reader_get_mutable_object_count(reader, &count, &err);
-    bool found = false;
-    if (countResult == ROMX_OK) {
-        for (uint32_t index = 0; index < count; ++index) {
-            romx_mutable_object_info_t object = ROMX_MUTABLE_OBJECT_INFO_INIT;
-            if (romx_reader_get_mutable_object(reader, index, &object, &err) !=
-                    ROMX_OK ||
-                object.object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE)
-                continue;
-            if (std::string(object.key,
-                            std::min<std::size_t>(object.key_size,
-                                                  sizeof(object.key) - 1U)) == key) {
-                found = true;
-                break;
-            }
-        }
-    }
-    romx_reader_close(reader);
-    return found;
-}
-
-SyncResult writeThreeDsSaveCatalog(const fs::path& source,
-                                   const fs::path& destination,
-                                   const std::string& preferredKey,
-                                   uint32_t* writtenCount,
-                                   std::string* error)
-{
-    if (writtenCount)
-        *writtenCount = 0;
-    if (source.empty() || destination.empty()) {
-        assignError(error, "3DS SAVE source or ROMX destination is empty");
-        return SyncResult::Failed;
-    }
-    if (!preferredKey.empty() && !validateSaveSlotKeyImpl(preferredKey, error))
-        return SyncResult::Failed;
-
-    romx_save_catalog_t* catalog = nullptr;
-    uint32_t count = 0;
-    if (!openThreeDsSaveCatalog(source, &catalog, &count, error))
-        return SyncResult::Failed;
-    if (count == 0) {
-        romx_save_catalog_close(catalog);
-        assignError(error, "未找到可识别的3DS本地存档: " + source.string());
-        return SyncResult::Skipped;
-    }
-
-    uint32_t succeeded = 0;
-    std::string firstError;
-    for (uint32_t index = 0; index < count; ++index) {
-        romx_save_candidate_info_t candidate = ROMX_SAVE_CANDIDATE_INFO_INIT;
-        romx_error_t err{};
-        const romx_result_t candidateResult = romx_save_catalog_get_candidate(
-            catalog, index, &candidate, &err);
-        if (candidateResult != ROMX_OK) {
-            if (firstError.empty())
-                firstError = errorText("romx_save_catalog_get_candidate", err,
-                                       candidateResult);
-            continue;
-        }
-
-        const std::string candidateKey = threeDsCandidateText(
-            candidate.key, sizeof(candidate.key), candidate.key_size);
-        // Keep the historical `libretro` key when it already exists, but use
-        // the catalog's real folder/file key for a new single-save ROMX. This
-        // preserves old containers while making a newly imported folder
-        // visible as its own save name in the frontend.
-        const bool reusePreferred = preferredKey.empty() ||
-            preferredKey != "libretro" ||
-            hasThreeDsSaveObject(destination, preferredKey);
-        const std::string objectKey = count == 1 && reusePreferred &&
-                                      !preferredKey.empty()
-            ? preferredKey : candidateKey;
-        if (!validateSaveSlotKeyImpl(objectKey, nullptr)) {
-            if (firstError.empty())
-                firstError = "3DS SAVE candidate has an invalid object key";
-            continue;
-        }
-
-        uint64_t measuredSize = 0;
-        const romx_result_t measureResult = romx_save_catalog_measure_candidate(
-            catalog, index, nullptr, &measuredSize, &err);
-        if (measureResult != ROMX_OK)
-        {
-            if (firstError.empty())
-                firstError = errorText("romx_save_catalog_measure_candidate",
-                                       err, measureResult);
-            continue;
-        }
-
-        romx_mutable_write_options_t writeOptions =
-            ROMX_MUTABLE_WRITE_OPTIONS_INIT;
-        const bool existing = hasThreeDsSaveObject(destination, objectKey);
-        const bool allowGrowth = !existing && candidate.file_count > 1U;
-        writeOptions.data_capacity = existing ? 0U :
-            expandedMutableBundleCapacity(measuredSize, allowGrowth);
-        romx_mutable_object_info_t written = ROMX_MUTABLE_OBJECT_INFO_INIT;
-        romx_result_t result = romx_save_catalog_write_candidate(
-            catalog, index, destination.string().c_str(), objectKey.c_str(),
-            nullptr, &writeOptions, &written, &err);
-        if (result == ROMX_E_MUTABLE_NO_SPACE && !existing &&
-            writeOptions.data_capacity != measuredSize)
-        {
-            writeOptions.data_capacity = measuredSize;
-            err = romx_error_t{};
-            result = romx_save_catalog_write_candidate(
-                catalog, index, destination.string().c_str(), objectKey.c_str(),
-                nullptr, &writeOptions, &written, &err);
-        }
-        if (result != ROMX_OK) {
-            if (firstError.empty())
-                firstError = errorText("romx_save_catalog_write_candidate", err,
-                                       result);
-            continue;
-        }
-        ++succeeded;
-    }
-    romx_save_catalog_close(catalog);
-    if (writtenCount)
-        *writtenCount = succeeded;
-    if (succeeded == count)
-        return SyncResult::Success;
-    if (succeeded != 0) {
-        assignError(error, "仅写入 " + std::to_string(succeeded) + "/" +
-                            std::to_string(count) + " 个3DS存档" +
-                            (firstError.empty() ? std::string() :
-                                "：" + firstError));
-        return SyncResult::Failed;
-    }
-    assignError(error, firstError.empty() ? "没有3DS存档被写入 ROMX" : firstError);
-    return SyncResult::Failed;
-}
-
 SyncResult extractPspSaveBundle(const romx_reader_t* reader,
                                 const GameEntry& entry,
                                 const char* key,
@@ -1934,8 +1618,11 @@ SyncResult importBundleNamespace(GameEntry& entry,
                 : objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE
                     ? batterySaveOutputMapper(entry)
                     : BundleOutputMapper{};
+        // The path mapper and transaction helper return paths relative to the
+        // native SD root.  Compose the absolute transaction target here so
+        // extractBundle's containment check compares paths in one namespace.
         const fs::path transactionDirectory = threeDsSave
-            ? threeDsSaveTransactionDirectory(
+            ? root / threeDsSaveTransactionDirectory(
                 GameEntryAdapter::resolveThreeDsTitleId(entry), saveLayout)
             : fs::path{};
         if (isPsp(entry) && objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE)
@@ -1975,26 +1662,6 @@ std::string titleFallback(const std::string& path)
 {
     std::string stem = fs::path(path).stem().string();
     return stem.empty() ? std::string("ROMX") : stem;
-}
-
-bool isSaveStateArtifact(const fs::path& path)
-{
-    const std::string name = path.filename().string();
-    const std::size_t marker = name.rfind(".ss");
-    if (marker != std::string::npos && marker + 3U < name.size())
-    {
-        bool digits = true;
-        for (std::size_t i = marker + 3U; i < name.size(); ++i)
-            digits = digits && std::isdigit(static_cast<unsigned char>(name[i])) != 0;
-        if (digits)
-            return true;
-    }
-    const auto endsWith = [&name](const char* suffix) {
-        const std::string value(suffix);
-        return name.size() >= value.size() &&
-               name.compare(name.size() - value.size(), value.size(), value) == 0;
-    };
-    return endsWith(".playtime") || endsWith(".playtime.tmp");
 }
 
 // The generic cores persist their battery-backed RAM under the ROM stem.  A
@@ -2216,106 +1883,8 @@ bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
     return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
 }
 
-bool mutableObjectExists(const GameEntry& entry,
-                         romx_mutable_namespace_t objectNamespace,
-                         const char* key)
-{
-    if (entry.path.empty() || key == nullptr || *key == '\0')
-        return false;
-
-    romx_reader_t* reader = nullptr;
-    romx_error_t error{};
-    if (romx_reader_open_path(entry.path.c_str(), nullptr, &reader, &error) !=
-        ROMX_OK)
-        return false;
-
-    uint32_t count = 0;
-    bool found = false;
-    if (romx_reader_get_mutable_object_count(reader, &count, &error) == ROMX_OK)
-    {
-        for (uint32_t index = 0; index < count; ++index)
-        {
-            romx_mutable_object_info_t object = ROMX_MUTABLE_OBJECT_INFO_INIT;
-            if (romx_reader_get_mutable_object(reader, index, &object, &error) !=
-                    ROMX_OK ||
-                object.object_namespace != objectNamespace)
-                continue;
-            const std::size_t keySize = std::min<std::size_t>(
-                object.key_size, sizeof(object.key) - 1U);
-            if (std::strlen(key) == keySize &&
-                std::memcmp(object.key, key, keySize) == 0)
-            {
-                found = true;
-                break;
-            }
-        }
-    }
-    romx_reader_close(reader);
-    return found;
-}
-
-SyncResult writeBundlePathEntries(const GameEntry& entry,
-                                  romx_mutable_namespace_t ns,
-                                  const char* key,
-                                  const std::vector<std::string>& relativePaths,
-                                  const std::vector<std::string>& sourcePaths,
-                                  std::string* error)
-{
-    std::vector<romx_mutable_bundle_path_entry_t> files;
-    files.reserve(relativePaths.size());
-    for (std::size_t index = 0; index < relativePaths.size(); ++index)
-    {
-        romx_mutable_bundle_path_entry_t file = ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
-        file.relative_path = relativePaths[index].c_str();
-        file.source_path = sourcePaths[index].c_str();
-        files.push_back(file);
-    }
-
-    uint64_t measuredSize = 0;
-    romx_error_t err{};
-    const romx_result_t measureResult = romx_mutable_bundle_measure_path_entries(
-        ns, files.data(), static_cast<uint32_t>(files.size()), nullptr,
-        &measuredSize, &err);
-    if (measureResult != ROMX_OK)
-    {
-        assignError(error, errorText(
-            "romx_mutable_bundle_measure_path_entries", err, measureResult));
-        return SyncResult::Failed;
-    }
-
-    romx_mutable_write_options_t options = ROMX_MUTABLE_WRITE_OPTIONS_INIT;
-    const bool existing = mutableObjectExists(entry, ns, key);
-    const bool allowGrowth = !existing && isPsp(entry) &&
-        ns == ROMX_MUTABLE_NAMESPACE_SAVE && relativePaths.size() > 1U;
-    // Existing objects keep their original extent. New fixed-size objects use
-    // the measured RMBL size; PSP multi-file objects get a bounded growth
-    // reserve and fall back to the exact size if that reserve does not fit.
-    options.data_capacity = existing ? 0U :
-        expandedMutableBundleCapacity(measuredSize, allowGrowth);
-    romx_mutable_object_info_t written = ROMX_MUTABLE_OBJECT_INFO_INIT;
-    romx_result_t result = romx_mutable_bundle_write_path_entries(
-        entry.path.c_str(), ns, key, files.data(),
-        static_cast<uint32_t>(files.size()), nullptr, &options, &written, &err);
-    if (result == ROMX_E_MUTABLE_NO_SPACE && !existing &&
-        options.data_capacity != measuredSize)
-    {
-        options.data_capacity = measuredSize;
-        err = romx_error_t{};
-        result = romx_mutable_bundle_write_path_entries(
-            entry.path.c_str(), ns, key, files.data(),
-            static_cast<uint32_t>(files.size()), nullptr, &options, &written,
-            &err);
-    }
-    if (result != ROMX_OK)
-    {
-        assignError(error, errorText("romx_mutable_bundle_write_path_entries", err, result));
-        return SyncResult::Failed;
-    }
-    return SyncResult::Success;
-}
-
 SyncResult writeBundle(const GameEntry& entry, romx_mutable_namespace_t ns,
-                       const char* key, std::string* error)
+                      const char* key, std::string* error)
 {
     if (isThreeDs(entry) && ns == ROMX_MUTABLE_NAMESPACE_SAVE)
         return writeThreeDsSaveCatalog(
@@ -2333,49 +1902,8 @@ SyncResult writeBundle(const GameEntry& entry, romx_mutable_namespace_t ns,
     return writeBundlePathEntries(entry, ns, key, relativePaths, sourcePaths, error);
 }
 
-bool collectRegularBundleFiles(const fs::path& root,
-                               std::vector<std::string>& relativePaths,
-                               std::vector<std::string>& sourcePaths)
-{
-    std::error_code ec;
-    fs::recursive_directory_iterator iterator(
-        root, fs::directory_options::skip_permission_denied, ec);
-    const fs::recursive_directory_iterator end;
-    for (; iterator != end; iterator.increment(ec))
-    {
-        if (ec)
-        {
-            ec.clear();
-            continue;
-        }
-        const fs::directory_entry& item = *iterator;
-        if (item.is_symlink(ec))
-        {
-            iterator.disable_recursion_pending();
-            ec.clear();
-            continue;
-        }
-        if (!item.is_regular_file(ec))
-        {
-            ec.clear();
-            continue;
-        }
-        if (isSaveStateArtifact(item.path()))
-            continue;
-        const fs::path relative = fs::relative(item.path(), root, ec);
-        if (ec || relative.empty())
-        {
-            ec.clear();
-            continue;
-        }
-        relativePaths.push_back(relative.generic_string());
-        sourcePaths.push_back(item.path().string());
-    }
-    return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
-}
-
 SyncResult mergeSaveBundleSlot(const GameEntry& entry,
-                               const std::string& objectKey,
+                              const std::string& objectKey,
                                const std::string& selectedSlot,
                                std::string* error)
 {

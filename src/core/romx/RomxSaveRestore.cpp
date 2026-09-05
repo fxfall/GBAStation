@@ -1,6 +1,5 @@
 #include "RomxSaveRestore.hpp"
 
-#include <algorithm>
 #include <cctype>
 #include <system_error>
 
@@ -28,9 +27,16 @@ std::string safeToken(const std::string& token)
 
 bool existsWithoutError(const fs::path& path, std::error_code& error)
 {
-    error.clear();
-    const bool exists = fs::exists(path, error);
-    return !error && exists;
+    const fs::file_status status = fs::symlink_status(path, error);
+    if (error == std::make_error_code(std::errc::no_such_file_or_directory))
+    {
+        error.clear();
+        return false;
+    }
+    // exists(file_status) treats both not_found and none as absent while
+    // still considering a dangling symlink present because symlink_status()
+    // reports its type without following the target.
+    return !error && fs::exists(status);
 }
 
 void resetTransaction(beiklive::romx::DirectoryRestoreTransaction& transaction)

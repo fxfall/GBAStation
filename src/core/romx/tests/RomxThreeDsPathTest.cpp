@@ -99,5 +99,12 @@ int main()
     const fs::path canonical =
         fs::path("extdata/00000000/000016e1/user/save.sav");
     assert(canonicalMapper(canonical, 0U, 1U) == canonical);
+
+    // The public helper is intentionally relative to the native SD root; the
+    // adapter must compose it before performing absolute containment checks.
+    const fs::path nativeRoot = fs::path("/native-sd");
+    assert(nativeRoot / beiklive::romx::threeDsSaveTransactionDirectory(
+               "0100ABCD12345678", titleLayout()) ==
+           fs::path("/native-sd/title/0100abcd/12345678/data/00000001"));
     return 0;
 }
