@@ -322,6 +322,46 @@ static romx_result_t source_write(mutable_disk_t *disk, uint64_t target,
     free(buffer); *finished_crc = romx_crc32_finish(crc); return ROMX_OK;
 }
 
+/* A failed transaction deliberately leaves its directory entry in WRITING
+ * state.  Look up every structurally valid state before allocating a new
+ * slot, otherwise a retry would create a duplicate key and the reader would
+ * correctly quarantine both entries as degraded. */
+static romx_result_t find_mutable_slot(const romx_reader_t *reader,
+    romx_mutable_namespace_t object_namespace, const char *key,
+    const struct romx_mutable_slot **slot, uint32_t *slot_index,
+    romx_error_t *error)
+{
+    uint32_t index;
+    uint32_t matches = UINT32_C(0);
+    if (slot == NULL || slot_index == NULL) {
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "mutable slot output must not be null");
+    }
+    *slot = NULL;
+    *slot_index = UINT32_MAX;
+    if (reader->mutable_status == ROMX_MUTABLE_DEGRADED) {
+        return romx_error_set(error, ROMX_E_MUTABLE_ENTRY, 0,
+            ROMX_OFFSET_UNKNOWN,
+            "mutable directory is degraded and cannot resolve an object");
+    }
+    for (index = 0U; index < reader->mutable_slot_count; ++index) {
+        const struct romx_mutable_slot *candidate =
+            &reader->mutable_slots[index];
+        if (!candidate->usable ||
+            candidate->object.object_namespace != object_namespace ||
+            !romx_ascii_fold_equal(candidate->object.key, key)) continue;
+        if (matches != UINT32_C(0)) {
+            return romx_error_set(error, ROMX_E_MUTABLE_ENTRY, 0,
+                ROMX_OFFSET_UNKNOWN,
+                "multiple mutable objects share the requested key");
+        }
+        *slot = candidate;
+        *slot_index = index;
+        matches = UINT32_C(1);
+    }
+    return ROMX_OK;
+}
+
 romx_result_t romx_mutable_write_io_path(const char *path,
     romx_mutable_namespace_t object_namespace, const char *key,
     const romx_io_t *source, const romx_mutable_write_options_t *options,
@@ -363,24 +403,34 @@ romx_result_t romx_mutable_write_io_path(const char *path,
     if (result != ROMX_OK) goto done;
     if (reader->mutable_status == ROMX_MUTABLE_ABSENT) { result = ROMX_E_MUTABLE_ABSENT; goto done; }
     if (reader->mutable_status == ROMX_MUTABLE_INVALID) { result = ROMX_E_MUTABLE_HEADER; goto done; }
-    for (index = 0U; index < reader->mutable_slot_count; ++index) {
-        const struct romx_mutable_slot *slot = &reader->mutable_slots[index];
-        if (slot->usable && slot->state == MUTABLE_STATE_ACTIVE &&
-            slot->object.object_namespace == object_namespace &&
-            romx_ascii_fold_equal(slot->object.key, key)) { existing = slot; slot_index = index; break; }
-    }
+    result = find_mutable_slot(reader, object_namespace, key, &existing,
+        &slot_index, error);
+    if (result != ROMX_OK) goto done;
     if (existing != NULL) {
         data_offset = existing->object.data_offset;
         data_capacity = existing->object.data_capacity;
+        if (existing->state == MUTABLE_STATE_DELETING) {
+            result = romx_error_set(error, ROMX_E_MUTABLE_ENTRY, 0,
+                ROMX_OFFSET_UNKNOWN,
+                "mutable object has an incomplete delete transaction");
+            goto done;
+        }
         if (existing->object.generation == UINT64_MAX) {
             result = ROMX_E_RANGE; goto done;
         }
-        generation = existing->object.generation + UINT64_C(1);
+        generation = existing->state == MUTABLE_STATE_WRITING
+            ? existing->object.generation
+            : existing->object.generation + UINT64_C(1);
         if (source_size > data_capacity ||
             (options != NULL && options->data_capacity != 0U &&
                 options->data_capacity != data_capacity)) { result = ROMX_E_MUTABLE_NO_SPACE; goto done; }
     } else {
-        if (reader->mutable_status == ROMX_MUTABLE_DEGRADED) { result = ROMX_E_MUTABLE_NO_SPACE; goto done; }
+        if (reader->mutable_status == ROMX_MUTABLE_DEGRADED) {
+            result = romx_error_set(error, ROMX_E_MUTABLE_ENTRY, 0,
+                ROMX_OFFSET_UNKNOWN,
+                "mutable directory is degraded and cannot allocate an object");
+            goto done;
+        }
         for (index = 0U; index < reader->mutable_slot_count; ++index) {
             if (reader->mutable_slots[index].object.struct_size == 0U) { slot_index = index; break; }
         }
@@ -517,15 +567,23 @@ romx_result_t romx_mutable_delete_path(const char *path,
             reader->info.mutable_region.offset, "ROMX mutable header is invalid");
         goto done;
     }
-    for (index = 0U; index < reader->mutable_slot_count; ++index) {
-        const struct romx_mutable_slot *slot = &reader->mutable_slots[index];
-        if (slot->usable && slot->state == MUTABLE_STATE_ACTIVE &&
-            slot->object.object_namespace == object_namespace &&
-            romx_ascii_fold_equal(slot->object.key, key)) { target = slot; break; }
-    }
+    result = find_mutable_slot(reader, object_namespace, key, &target, &index,
+        error);
+    if (result != ROMX_OK) goto done;
     if (target == NULL) { result = ROMX_E_MUTABLE_ENTRY; goto done; }
     slot_offset = reader->info.mutable_region.offset + UINT64_C(4096) +
         (uint64_t)index * UINT64_C(512);
+    if (target->state == MUTABLE_STATE_DELETING) {
+        result = disk_write(&disk, slot_offset, zero, sizeof(zero), error);
+        if (result == ROMX_OK) result = disk_sync(&disk, error);
+        goto done;
+    }
+    if (target->state != MUTABLE_STATE_ACTIVE) {
+        result = romx_error_set(error, ROMX_E_MUTABLE_ENTRY, 0,
+            ROMX_OFFSET_UNKNOWN,
+            "mutable object has an incomplete write transaction");
+        goto done;
+    }
     build_entry(entry, MUTABLE_STATE_DELETING, object_namespace, key,
         target->object.data_offset, target->object.data_capacity,
         target->object.data_size, target->object.generation + UINT64_C(1),

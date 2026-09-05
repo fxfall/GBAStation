@@ -1,6 +1,7 @@
 #include "RomxGameEntryAdapter.hpp"
 
 #include "RomxFrontend.hpp"
+#include "RomxSavePaths.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
 #include "core/constexpr.h"
@@ -1073,8 +1074,7 @@ bool installMutableFile(const fs::path& temporary, const fs::path& output,
 // battery-save filename is derived from GameEntry.path.  Keep that mapping
 // separate from the generic path traversal code below so PSP's native
 // savedata tree can continue to use its own validator unchanged.
-using BundleOutputMapper = std::function<std::optional<fs::path>(
-    const fs::path& relative, uint32_t index, uint32_t count)>;
+using BundleOutputMapper = SavePathMapper;
 
 fs::path gameBatterySavePath(const GameEntry& entry);
 BundleOutputMapper batterySaveOutputMapper(const GameEntry& entry);
@@ -1400,28 +1400,7 @@ BundleOutputMapper pspSaveOutputMapper(const fs::path& localRoot,
     else if (!requestedDirectory.empty())
         targetDirectory = requestedDirectory;
 
-    std::string selectedSourceDirectory = requestedDirectory;
-    return [&targetDirectory, &selectedSourceDirectory](const fs::path& relative,
-                                                         uint32_t /*index*/,
-                                                         uint32_t /*count*/)
-        -> std::optional<fs::path> {
-        auto component = relative.begin();
-        if (component == relative.end())
-            return std::nullopt;
-        const std::string sourceDirectory = component->string();
-        if (selectedSourceDirectory.empty())
-            selectedSourceDirectory = sourceDirectory;
-        if (sourceDirectory != selectedSourceDirectory)
-            return std::nullopt;
-        if (targetDirectory.empty())
-            targetDirectory = sourceDirectory;
-
-        fs::path mapped = targetDirectory;
-        ++component;
-        for (; component != relative.end(); ++component)
-            mapped /= *component;
-        return mapped;
-    };
+    return makePspSaveOutputMapper(targetDirectory, requestedDirectory);
 }
 
 std::string pspTemporarySuffix()

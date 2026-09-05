@@ -1225,6 +1225,18 @@ ROMX_API romx_result_t romx_mutable_write_path(
     romx_mutable_object_info_t *written_object,
     romx_error_t *error);
 
+/* Measures the complete serialized RMBL bundle produced from path entries.
+ * The result includes the bundle header, entry table, path table, alignment,
+ * and file data. Source files are opened and read for validation, but the
+ * ROMX container is not modified. */
+ROMX_API romx_result_t romx_mutable_bundle_measure_path_entries(
+    romx_mutable_namespace_t object_namespace,
+    const romx_mutable_bundle_path_entry_t *entries,
+    uint32_t entry_count,
+    const romx_mutable_bundle_options_t *bundle_options,
+    uint64_t *serialized_size,
+    romx_error_t *error);
+
 ROMX_API romx_result_t romx_mutable_delete_path(
     const char *utf8_romx_path,
     romx_mutable_namespace_t object_namespace,
@@ -1295,6 +1307,15 @@ ROMX_API romx_result_t romx_save_catalog_copy_candidate_source_path(
     void *buffer,
     uint64_t capacity,
     uint64_t *required_size,
+    romx_error_t *error);
+
+/* Measures the complete RMBL bundle that would be written for one SAVE
+ * candidate, including any PSP or 3DS ExtData path normalization. */
+ROMX_API romx_result_t romx_save_catalog_measure_candidate(
+    const romx_save_catalog_t *catalog,
+    uint32_t candidate_index,
+    const romx_mutable_bundle_options_t *bundle_options,
+    uint64_t *serialized_size,
     romx_error_t *error);
 
 /* Converts one catalog candidate into an RMBL object in the SAVE namespace.

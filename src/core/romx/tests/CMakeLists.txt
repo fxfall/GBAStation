@@ -27,3 +27,11 @@ target_include_directories(romx_frontend_tests PRIVATE
     "${BOREALIS_DIR}/lib/extern/glfw/include")
 target_link_libraries(romx_frontend_tests PRIVATE ROMX::romx)
 add_test(NAME romx.frontend-session COMMAND romx_frontend_tests "${CMAKE_CURRENT_BINARY_DIR}")
+
+add_executable(romx_save_path_tests
+    RomxSavePathTest.cpp
+    ../RomxSavePaths.cpp)
+target_compile_features(romx_save_path_tests PRIVATE cxx_std_17)
+target_include_directories(romx_save_path_tests PRIVATE
+    "${GBASTATION_SOURCE_DIR}/src")
+add_test(NAME romx.save-paths COMMAND romx_save_path_tests)

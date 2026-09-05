@@ -1649,45 +1649,47 @@ romx_result_t romx_save_catalog_copy_candidate_source_path(
     return ROMX_OK;
 }
 
-romx_result_t romx_save_catalog_write_candidate(
-    const romx_save_catalog_t *catalog, uint32_t candidate_index,
-    const char *utf8_romx_path, const char *object_key,
-    const romx_mutable_bundle_options_t *bundle_options,
-    const romx_mutable_write_options_t *write_options,
-    romx_mutable_object_info_t *written_object, romx_error_t *error)
+static void save_candidate_free_bundle_entries(
+    romx_mutable_bundle_path_entry_t *entries, char **relative_paths,
+    uint32_t entry_count)
 {
-    const save_candidate_record_t *candidate;
+    uint32_t index;
+    if (relative_paths != NULL) {
+        for (index = 0U; index < entry_count; ++index)
+            free(relative_paths[index]);
+        free(relative_paths);
+    }
+    free(entries);
+}
+
+static romx_result_t save_candidate_build_bundle_entries(
+    const save_candidate_record_t *candidate,
+    romx_mutable_bundle_path_entry_t **entries_out,
+    char ***relative_paths_out, romx_error_t *error)
+{
     romx_mutable_bundle_path_entry_t *entries;
     char **relative_paths = NULL;
-    const char *key;
-    int wrap_psp;
-    int canonical_extdata;
+    const int wrap_psp = candidate->grouping == ROMX_SAVE_GROUP_MARKER_DIRECTORY;
+    const int canonical_extdata = candidate->scope == ROMX_SAVE_SCOPE_3DS_EXTDATA &&
+        candidate->source_format != ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER;
     uint32_t index;
-    romx_result_t result;
-    if (catalog == NULL || utf8_romx_path == NULL || utf8_romx_path[0] == '\0' ||
-        candidate_index >= catalog->candidate_count)
+    if (candidate == NULL || entries_out == NULL || relative_paths_out == NULL)
         return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
-            ROMX_OFFSET_UNKNOWN, "invalid SAVE candidate write arguments");
-    candidate = &catalog->candidates[candidate_index];
+            ROMX_OFFSET_UNKNOWN, "invalid SAVE bundle entry outputs");
+    *entries_out = NULL;
+    *relative_paths_out = NULL;
     if (candidate->file_count == 0U)
         return romx_error_set(error, ROMX_E_MUTABLE_BUNDLE, 0,
             ROMX_OFFSET_UNKNOWN, "SAVE candidate contains no files");
-    key = object_key != NULL && object_key[0] != '\0'
-        ? object_key : candidate->key;
-    if (!save_path_valid(key))
-        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
-            ROMX_OFFSET_UNKNOWN, "SAVE object key is not portable");
     entries = (romx_mutable_bundle_path_entry_t *)calloc(candidate->file_count,
         sizeof(*entries));
     if (entries == NULL)
         return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
             ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE bundle entries");
-    wrap_psp = candidate->grouping == ROMX_SAVE_GROUP_MARKER_DIRECTORY;
-    canonical_extdata = candidate->scope == ROMX_SAVE_SCOPE_3DS_EXTDATA &&
-        candidate->source_format != ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER;
     if (wrap_psp || canonical_extdata) {
         if (canonical_extdata && !save_is_hex_title_id(candidate->extdata_id)) {
-            free(entries);
+            save_candidate_free_bundle_entries(entries, NULL,
+                candidate->file_count);
             return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
                 ROMX_OFFSET_UNKNOWN,
                 "3DS ExtData candidate has no valid 16-digit ExtData ID");
@@ -1695,10 +1697,10 @@ romx_result_t romx_save_catalog_write_candidate(
         relative_paths = (char **)calloc(candidate->file_count,
             sizeof(*relative_paths));
         if (relative_paths == NULL) {
-            free(entries);
+            save_candidate_free_bundle_entries(entries, NULL,
+                candidate->file_count);
             return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
-                ROMX_OFFSET_UNKNOWN,
-                "failed to allocate SAVE bundle paths");
+                ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE bundle paths");
         }
     }
     for (index = 0U; index < candidate->file_count; ++index) {
@@ -1710,12 +1712,8 @@ romx_result_t romx_save_catalog_write_candidate(
                     candidate->files[index].path)
                 : save_extdata_bundle_path(candidate, candidate->files[index].path);
             if (relative_paths[index] == NULL) {
-                uint32_t cleanup_index;
-                for (cleanup_index = 0U; cleanup_index <= index;
-                     ++cleanup_index)
-                    free(relative_paths[cleanup_index]);
-                free(relative_paths);
-                free(entries);
+                save_candidate_free_bundle_entries(entries, relative_paths,
+                    candidate->file_count);
                 return romx_error_set(error, ROMX_E_RANGE, 0,
                     ROMX_OFFSET_UNKNOWN,
                     "SAVE bundle path is invalid or too long");
@@ -1726,15 +1724,67 @@ romx_result_t romx_save_catalog_write_candidate(
         }
         entries[index].source_path = candidate->files[index].source_path;
     }
+    *entries_out = entries;
+    *relative_paths_out = relative_paths;
+    return ROMX_OK;
+}
+
+romx_result_t romx_save_catalog_measure_candidate(
+    const romx_save_catalog_t *catalog, uint32_t candidate_index,
+    const romx_mutable_bundle_options_t *bundle_options,
+    uint64_t *serialized_size, romx_error_t *error)
+{
+    const save_candidate_record_t *candidate;
+    romx_mutable_bundle_path_entry_t *entries = NULL;
+    char **relative_paths = NULL;
+    romx_result_t result;
+    if (serialized_size != NULL) *serialized_size = UINT64_C(0);
+    if (catalog == NULL || serialized_size == NULL ||
+        candidate_index >= catalog->candidate_count)
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid SAVE candidate measure arguments");
+    candidate = &catalog->candidates[candidate_index];
+    result = save_candidate_build_bundle_entries(candidate, &entries,
+        &relative_paths, error);
+    if (result != ROMX_OK) return result;
+    result = romx_mutable_bundle_measure_path_entries(
+        ROMX_MUTABLE_NAMESPACE_SAVE, entries, candidate->file_count,
+        bundle_options, serialized_size, error);
+    save_candidate_free_bundle_entries(entries, relative_paths,
+        candidate->file_count);
+    return result;
+}
+
+romx_result_t romx_save_catalog_write_candidate(
+    const romx_save_catalog_t *catalog, uint32_t candidate_index,
+    const char *utf8_romx_path, const char *object_key,
+    const romx_mutable_bundle_options_t *bundle_options,
+    const romx_mutable_write_options_t *write_options,
+    romx_mutable_object_info_t *written_object, romx_error_t *error)
+{
+    const save_candidate_record_t *candidate;
+    romx_mutable_bundle_path_entry_t *entries = NULL;
+    char **relative_paths = NULL;
+    const char *key;
+    romx_result_t result;
+    if (catalog == NULL || utf8_romx_path == NULL || utf8_romx_path[0] == '\0' ||
+        candidate_index >= catalog->candidate_count)
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid SAVE candidate write arguments");
+    candidate = &catalog->candidates[candidate_index];
+    key = object_key != NULL && object_key[0] != '\0'
+        ? object_key : candidate->key;
+    if (!save_path_valid(key))
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "SAVE object key is not portable");
+    result = save_candidate_build_bundle_entries(candidate, &entries,
+        &relative_paths, error);
+    if (result != ROMX_OK) return result;
     result = romx_mutable_bundle_write_path_entries(utf8_romx_path,
         ROMX_MUTABLE_NAMESPACE_SAVE, key, entries, candidate->file_count,
         bundle_options, write_options, written_object, error);
-    if (relative_paths != NULL) {
-        for (index = 0U; index < candidate->file_count; ++index)
-            free(relative_paths[index]);
-        free(relative_paths);
-    }
-    free(entries);
+    save_candidate_free_bundle_entries(entries, relative_paths,
+        candidate->file_count);
     return result;
 }
 

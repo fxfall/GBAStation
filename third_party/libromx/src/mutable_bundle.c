@@ -97,6 +97,7 @@ typedef struct bundle_save_slot {
 
 struct romx_mutable_bundle {
     romx_mutable_file_t *file;
+    char *object_key;
     bundle_entry_t *entries;
     uint32_t entry_count;
     uint32_t io_chunk_size;
@@ -622,9 +623,9 @@ static romx_result_t build_single_file_save_slots(
 static romx_result_t build_strict_extdata_save_slots(
     romx_mutable_bundle_t *bundle, romx_error_t *error)
 {
-    const char *id = bundle->save_layout.extdata_id + 8U;
     uint32_t index;
-    romx_result_t result = add_save_slot(bundle, id, id, 1, error);
+    romx_result_t result = add_save_slot(bundle, bundle->object_key,
+        bundle->object_key, 1, error);
     if (result != ROMX_OK) return result;
     for (index = 0U; index < bundle->entry_count; ++index) {
         result = append_save_slot_entry(bundle,
@@ -634,14 +635,82 @@ static romx_result_t build_strict_extdata_save_slots(
     return ROMX_OK;
 }
 
-/* 3DS save roots are directories.  The first path component is therefore the
- * logical root of a save in an RMBL object.  Files kept directly at the bundle
- * root remain independent, which also covers Gateway-style single-file saves.
- */
-static romx_result_t build_directory_save_slots(
+static romx_result_t count_3ds_directory_roots(
+    const romx_mutable_bundle_t *bundle, uint32_t *directory_root_count,
+    int *has_root_file, romx_error_t *error)
+{
+    uint32_t index;
+    *directory_root_count = UINT32_C(0);
+    *has_root_file = 0;
+    for (index = 0U; index < bundle->entry_count; ++index) {
+        char root[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+        uint32_t previous;
+        int seen = 0;
+        if (strchr(bundle->entries[index].path, '/') == NULL) {
+            *has_root_file = 1;
+            continue;
+        }
+        if (!path_component_copy(bundle->entries[index].path, 0U,
+                root, sizeof(root))) {
+            return romx_error_set(error, ROMX_E_MUTABLE_BUNDLE, 0,
+                ROMX_OFFSET_UNKNOWN,
+                "3DS SAVE entry has no valid top-level directory");
+        }
+        for (previous = 0U; previous < index; ++previous) {
+            char previous_root[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
+            if (strchr(bundle->entries[previous].path, '/') == NULL ||
+                !path_component_copy(bundle->entries[previous].path, 0U,
+                    previous_root, sizeof(previous_root))) continue;
+            if (romx_ascii_fold_equal(root, previous_root)) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen) {
+            if (*directory_root_count == UINT32_MAX) {
+                return romx_error_set(error, ROMX_E_RANGE, 0,
+                    ROMX_OFFSET_UNKNOWN,
+                    "3DS SAVE directory root count overflows");
+            }
+            ++*directory_root_count;
+        }
+    }
+    return ROMX_OK;
+}
+
+static romx_result_t build_single_object_save_slot(
     romx_mutable_bundle_t *bundle, romx_error_t *error)
 {
     uint32_t index;
+    const int is_directory = bundle->entry_count > UINT32_C(1) ||
+        (bundle->entry_count != UINT32_C(0) &&
+            strchr(bundle->entries[0].path, '/') != NULL);
+    romx_result_t result = add_save_slot(bundle, bundle->object_key,
+        bundle->object_key, is_directory, error);
+    if (result != ROMX_OK) return result;
+    for (index = 0U; index < bundle->entry_count; ++index) {
+        result = append_save_slot_entry(bundle,
+            bundle->save_slot_count - 1U, index, error);
+        if (result != ROMX_OK) return result;
+    }
+    return ROMX_OK;
+}
+
+/* A 3DS mutable SAVE object is normally one logical save.  The split by
+ * top-level directory is retained only for old containers that clearly carry
+ * several directory roots and no root-level files. */
+static romx_result_t build_directory_save_slots(
+    romx_mutable_bundle_t *bundle, romx_error_t *error)
+{
+    uint32_t directory_root_count;
+    int has_root_file;
+    uint32_t index;
+    romx_result_t result = count_3ds_directory_roots(bundle,
+        &directory_root_count, &has_root_file, error);
+    if (result != ROMX_OK) return result;
+    if (bundle->entry_count == UINT32_C(0)) return ROMX_OK;
+    if (has_root_file || directory_root_count <= UINT32_C(1))
+        return build_single_object_save_slot(bundle, error);
     for (index = 0U; index < bundle->entry_count; ++index) {
         const char *path = bundle->entries[index].path;
         const char *separator = strchr(path, '/');
@@ -649,7 +718,6 @@ static romx_result_t build_directory_save_slots(
         size_t size = separator == NULL ? strlen(path) :
             (size_t)(separator - path);
         uint32_t slot_index;
-        romx_result_t result;
         memcpy(root, path, size);
         root[size] = '\0';
         for (slot_index = 0U; slot_index < bundle->save_slot_count; ++slot_index)
@@ -1111,6 +1179,33 @@ static romx_result_t build_source(
     return ROMX_OK;
 }
 
+romx_result_t romx_mutable_bundle_measure_path_entries(
+    romx_mutable_namespace_t object_namespace,
+    const romx_mutable_bundle_path_entry_t *entries, uint32_t entry_count,
+    const romx_mutable_bundle_options_t *bundle_options,
+    uint64_t *serialized_size, romx_error_t *error)
+{
+    romx_mutable_bundle_options_t options;
+    bundle_source_t source;
+    romx_result_t result;
+    if (serialized_size != NULL) *serialized_size = UINT64_C(0);
+    if (serialized_size == NULL || !effective_options(bundle_options, &options) ||
+        (entries == NULL && entry_count != UINT32_C(0)) ||
+        entry_count > options.max_entry_count ||
+        (object_namespace != ROMX_MUTABLE_NAMESPACE_SAVE &&
+         object_namespace != ROMX_MUTABLE_NAMESPACE_CHEAT)) {
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid mutable bundle measure arguments");
+    }
+    result = build_source(entries, entry_count, object_namespace, &options,
+        &source, error);
+    if (result != ROMX_OK) return result;
+    *serialized_size = source.bundle_size;
+    source_destroy(&source);
+    romx_error_clear(error);
+    return ROMX_OK;
+}
+
 romx_result_t romx_mutable_bundle_write_path_entries(const char *romx_path,
     romx_mutable_namespace_t object_namespace, const char *key,
     const romx_mutable_bundle_path_entry_t *entries, uint32_t entry_count,
@@ -1217,6 +1312,7 @@ void romx_mutable_bundle_close(romx_mutable_bundle_t *bundle)
         free(bundle->entries[index].path);
     free(bundle->entries);
     destroy_save_slot_array(bundle->save_slots, bundle->save_slot_count);
+    free(bundle->object_key);
     romx_mutable_file_close(bundle->file);
     free(bundle);
 }
@@ -1255,6 +1351,12 @@ romx_result_t romx_mutable_bundle_open(const romx_reader_t *reader,
     if (bundle == NULL) return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
         ROMX_OFFSET_UNKNOWN, "failed to allocate mutable bundle");
     bundle->object_namespace = object_namespace;
+    bundle->object_key = duplicate_path(key);
+    if (bundle->object_key == NULL) {
+        free(bundle);
+        return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+            ROMX_OFFSET_UNKNOWN, "failed to allocate mutable bundle key");
+    }
     {
         romx_info_t info = ROMX_INFO_INIT;
         result = romx_reader_get_info(reader, &info, error);
