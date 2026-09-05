@@ -187,7 +187,7 @@ static romx_result_t write_region_temp(const romx_reader_t *reader,
 }
 
 static romx_result_t publish_temp(const char *temporary, const char *destination,
-    int replace, romx_error_t *error)
+    int replace, int durable, romx_error_t *error)
 {
 #if defined(_WIN32)
     wchar_t *source = to_wide(temporary), *target = to_wide(destination);
@@ -210,6 +210,10 @@ static romx_result_t publish_temp(const char *temporary, const char *destination
         (void)unlink(temporary);
     }
 #endif
+    if (durable) {
+        romx_result_t result = romx_sync_parent_directory(destination, error);
+        if (result != ROMX_OK) return result;
+    }
     return ROMX_OK;
 }
 
@@ -236,7 +240,8 @@ romx_result_t romx_extract_payload_path(const romx_reader_t *reader,
         destination, flags, &temporary, error);
     if (result != ROMX_OK) return result;
     result = publish_temp(temporary, destination,
-        (flags & ROMX_EXTRACT_REPLACE_EXISTING) != 0U, error);
+        (flags & ROMX_EXTRACT_REPLACE_EXISTING) != 0U,
+        (flags & ROMX_EXTRACT_DURABLE) != 0U, error);
     free(temporary);
     if (result == ROMX_OK) romx_error_clear(error);
     return result;
@@ -258,7 +263,8 @@ romx_result_t romx_extract_region_verified_path(const romx_reader_t *reader,
         flags, &temporary, error);
     if (result != ROMX_OK) return result;
     result = publish_temp(temporary, destination,
-        (flags & ROMX_EXTRACT_REPLACE_EXISTING) != 0U, error);
+        (flags & ROMX_EXTRACT_REPLACE_EXISTING) != 0U,
+        (flags & ROMX_EXTRACT_DURABLE) != 0U, error);
     free(temporary);
     if (result == ROMX_OK) romx_error_clear(error);
     return result;

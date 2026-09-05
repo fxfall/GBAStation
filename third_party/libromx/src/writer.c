@@ -52,28 +52,6 @@ typedef struct memory_input {
     uint64_t size;
 } memory_input_t;
 
-static void write_le16(uint8_t *bytes, uint16_t value)
-{
-    bytes[0] = (uint8_t)value;
-    bytes[1] = (uint8_t)(value >> 8);
-}
-
-static void write_le32(uint8_t *bytes, uint32_t value)
-{
-    unsigned int index;
-    for (index = 0U; index < 4U; ++index) {
-        bytes[index] = (uint8_t)(value >> (index * 8U));
-    }
-}
-
-static void write_le64(uint8_t *bytes, uint64_t value)
-{
-    unsigned int index;
-    for (index = 0U; index < 8U; ++index) {
-        bytes[index] = (uint8_t)(value >> (index * 8U));
-    }
-}
-
 static int valid_io(const romx_io_t *io)
 {
     return io != NULL && io->struct_size >= sizeof(*io) &&
@@ -82,40 +60,7 @@ static int valid_io(const romx_io_t *io)
 
 static int valid_virtual_path(const char *path)
 {
-    const uint8_t *bytes = (const uint8_t *)path;
-    size_t size;
-    size_t index;
-    size_t component = 0U;
-    size_t bad_offset = 0U;
-    if (path == NULL) return 0;
-    size = strlen(path);
-    if (size == 0U || size > ROMX_RIDX_PATH_CAPACITY ||
-        bytes[0] == (uint8_t)'/' || bytes[size - 1U] == (uint8_t)'/' ||
-        !romx_utf8_validate(bytes, size, &bad_offset)) return 0;
-    for (index = 0U; index <= size; ++index) {
-        if (index < size && bytes[index] != (uint8_t)'/') {
-            if (bytes[index] == (uint8_t)'\\') return 0;
-            continue;
-        }
-        if (index == component ||
-            (index - component == 1U && bytes[component] == (uint8_t)'.') ||
-            (index - component == 2U && bytes[component] == (uint8_t)'.' &&
-                bytes[component + 1U] == (uint8_t)'.')) return 0;
-        component = index + 1U;
-    }
-    return 1;
-}
-
-static int ascii_fold_equal(const char *first, const char *second)
-{
-    for (;;) {
-        unsigned char a = (unsigned char)*first++;
-        unsigned char b = (unsigned char)*second++;
-        if (a >= (unsigned char)'A' && a <= (unsigned char)'Z') a = (unsigned char)(a + 32U);
-        if (b >= (unsigned char)'A' && b <= (unsigned char)'Z') b = (unsigned char)(b + 32U);
-        if (a != b) return 0;
-        if (a == 0U) return 1;
-    }
+    return romx_path_valid(path, ROMX_RIDX_PATH_CAPACITY);
 }
 
 static int load_settings(const romx_writer_options_t *options,
@@ -319,6 +264,7 @@ static romx_result_t create_temporary(const char *destination,
 static romx_result_t close_output(int descriptor, int durable,
     romx_error_t *error)
 {
+    romx_result_t result = ROMX_OK;
     if (durable) {
 #if defined(_WIN32)
         if (_commit(descriptor) != 0) {
@@ -326,22 +272,22 @@ static romx_result_t close_output(int descriptor, int durable,
         if (fsync(descriptor) != 0) {
 #endif
             int code = errno;
-            return romx_error_set(error, ROMX_E_WRITE, code,
+            result = romx_error_set(error, ROMX_E_WRITE, code,
                 ROMX_OFFSET_UNKNOWN, "failed to sync ROMX output");
         }
     }
 #if defined(_WIN32)
-    if (_close(descriptor) != 0)
+    if (_close(descriptor) != 0 && result == ROMX_OK)
 #else
-    if (close(descriptor) != 0)
+    if (close(descriptor) != 0 && result == ROMX_OK)
 #endif
-        return romx_error_set(error, ROMX_E_WRITE, errno,
+        result = romx_error_set(error, ROMX_E_WRITE, errno,
             ROMX_OFFSET_UNKNOWN, "failed to close ROMX output");
-    return ROMX_OK;
+    return result;
 }
 
 static romx_result_t publish_temporary(const char *temporary,
-    const char *destination, int replace, romx_error_t *error)
+    const char *destination, int replace, int durable, romx_error_t *error)
 {
 #if defined(_WIN32)
     wchar_t *source = to_wide(temporary);
@@ -370,6 +316,10 @@ static romx_result_t publish_temporary(const char *temporary,
         unlink(temporary);
     }
 #endif
+    if (durable) {
+        romx_result_t result = romx_sync_parent_directory(destination, error);
+        if (result != ROMX_OK) return result;
+    }
     return ROMX_OK;
 }
 
@@ -420,18 +370,18 @@ static romx_result_t build_mutable_header(uint8_t header[4096],
     uint32_t crc;
     memset(header, 0, 4096U);
     memcpy(header, "RMUT", 4U);
-    write_le16(header + 0x04U, UINT16_C(1));
-    write_le16(header + 0x06U, UINT16_C(4096));
-    write_le32(header + 0x08U, UINT32_C(512));
-    write_le32(header + 0x0CU, settings->mutable_entry_capacity);
-    write_le64(header + 0x10U, UINT64_C(4096));
-    write_le64(header + 0x18U, directory_size);
-    write_le64(header + 0x20U, data_offset);
-    write_le64(header + 0x28U, settings->mutable_capacity - data_offset);
+    romx_write_le16(header + 0x04U, UINT16_C(1));
+    romx_write_le16(header + 0x06U, UINT16_C(4096));
+    romx_write_le32(header + 0x08U, UINT32_C(512));
+    romx_write_le32(header + 0x0CU, settings->mutable_entry_capacity);
+    romx_write_le64(header + 0x10U, UINT64_C(4096));
+    romx_write_le64(header + 0x18U, directory_size);
+    romx_write_le64(header + 0x20U, data_offset);
+    romx_write_le64(header + 0x28U, settings->mutable_capacity - data_offset);
     crc = romx_crc32_begin();
     crc = romx_crc32_update(crc, header, 4096U);
     crc = romx_crc32_finish(crc);
-    write_le32(header + 0x34U, crc);
+    romx_write_le32(header + 0x34U, crc);
     return ROMX_OK;
 }
 
@@ -504,7 +454,7 @@ romx_result_t romx_writer_write_io_entries(const char *destination,
             entrypoint = index;
         }
         for (other = 0U; other < index; ++other) {
-            if (ascii_fold_equal(entries[index].virtual_path,
+            if (romx_ascii_fold_equal(entries[index].virtual_path,
                 entries[other].virtual_path)) {
                 result = romx_error_set(error, ROMX_E_VIRTUAL_PATH, 0,
                     ROMX_OFFSET_UNKNOWN, "writer virtual paths collide"); goto fail;
@@ -603,28 +553,28 @@ romx_result_t romx_writer_write_io_entries(const char *destination,
     payload_size = offset;
 
     memcpy(ridx, "RIDX", 4U);
-    write_le16(ridx + 0x04U, UINT16_C(1));
-    write_le16(ridx + 0x06U, UINT16_C(64));
-    write_le32(ridx + 0x08U, entry_count);
-    write_le32(ridx + 0x0CU, UINT32_C(512));
+    romx_write_le16(ridx + 0x04U, UINT16_C(1));
+    romx_write_le16(ridx + 0x06U, UINT16_C(64));
+    romx_write_le32(ridx + 0x08U, entry_count);
+    romx_write_le32(ridx + 0x0CU, UINT32_C(512));
     for (index = 0U; index < entry_count; ++index) {
         uint8_t *stored = ridx + ROMX_RIDX_HEADER_SIZE +
             (size_t)index * ROMX_RIDX_ENTRY_SIZE;
         size_t path_size = strlen(entries[index].virtual_path);
-        write_le32(stored + 0x00U, entries[index].flags);
-        write_le16(stored + 0x04U, entries[index].format_id);
-        write_le16(stored + 0x06U, (uint16_t)path_size);
-        write_le64(stored + 0x08U, states[index].offset);
-        write_le64(stored + 0x10U, states[index].size);
+        romx_write_le32(stored + 0x00U, entries[index].flags);
+        romx_write_le16(stored + 0x04U, entries[index].format_id);
+        romx_write_le16(stored + 0x06U, (uint16_t)path_size);
+        romx_write_le64(stored + 0x08U, states[index].offset);
+        romx_write_le64(stored + 0x10U, states[index].size);
         if ((entries[index].flags & ROMX_RIDX_HAS_CRC32) != 0U)
-            write_le32(stored + 0x18U, states[index].crc32);
+            romx_write_le32(stored + 0x18U, states[index].crc32);
         memcpy(stored + 0x20U, entries[index].virtual_path, path_size);
     }
     {
         uint32_t crc = romx_crc32_begin();
         crc = romx_crc32_update(crc, ridx, (size_t)ridx_size);
         crc = romx_crc32_finish(crc);
-        write_le32(ridx + 0x14U, crc);
+        romx_write_le32(ridx + 0x14U, crc);
     }
     result = write_immutable(descriptor, ridx, (size_t)ridx_size,
         offset, (settings.flags & ROMX_WRITER_IMMUTABLE_SHA256) != 0U
@@ -672,22 +622,22 @@ romx_result_t romx_writer_write_io_entries(const char *destination,
     offset += settings.mutable_capacity;
     memset(footer, 0, sizeof(footer));
     memcpy(footer, "ROMX", 4U);
-    write_le32(footer + 0x04U, ROMX_FORMAT_VERSION);
-    write_le64(footer + 0x08U, payload_size);
-    write_le64(footer + 0x10U, effective_metadata_size);
-    write_le64(footer + 0x18U, cover_size);
-    write_le64(footer + 0x20U, settings.mutable_capacity);
-    write_le16(footer + 0x28U, settings.platform_id);
-    write_le16(footer + 0x2AU, settings.launch_format_id);
+    romx_write_le32(footer + 0x04U, ROMX_FORMAT_VERSION);
+    romx_write_le64(footer + 0x08U, payload_size);
+    romx_write_le64(footer + 0x10U, effective_metadata_size);
+    romx_write_le64(footer + 0x18U, cover_size);
+    romx_write_le64(footer + 0x20U, settings.mutable_capacity);
+    romx_write_le16(footer + 0x28U, settings.platform_id);
+    romx_write_le16(footer + 0x2AU, settings.launch_format_id);
     if ((settings.flags & ROMX_WRITER_IMMUTABLE_SHA256) != 0U) {
-        write_le32(footer + 0x2CU, ROMX_IMMUTABLE_HASH_SHA256);
+        romx_write_le32(footer + 0x2CU, ROMX_IMMUTABLE_HASH_SHA256);
         memcpy(footer + 0x30U, immutable_hash, 32U);
     }
     {
         uint32_t crc = romx_crc32_begin();
         crc = romx_crc32_update(crc, footer, sizeof(footer));
         crc = romx_crc32_finish(crc);
-        write_le32(footer + 0x50U, crc);
+        romx_write_le32(footer + 0x50U, crc);
     }
     result = write_all(descriptor, footer, sizeof(footer), offset, error);
     if (result != ROMX_OK) goto fail;
@@ -697,7 +647,8 @@ romx_result_t romx_writer_write_io_entries(const char *destination,
     descriptor = -1;
     if (result != ROMX_OK) goto fail;
     result = publish_temporary(temporary, destination,
-        (settings.flags & ROMX_WRITER_REPLACE_EXISTING) != 0U, error);
+        (settings.flags & ROMX_WRITER_REPLACE_EXISTING) != 0U,
+        (settings.flags & ROMX_WRITER_DURABLE) != 0U, error);
     if (result != ROMX_OK) goto fail;
     if (report != NULL) {
         report->file_size = file_size;

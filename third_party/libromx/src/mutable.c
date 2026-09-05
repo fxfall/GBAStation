@@ -16,36 +16,6 @@ struct romx_mutable_file {
     uint64_t position;
 };
 
-static uint16_t read_le16(const uint8_t *bytes)
-{
-    return (uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
-}
-
-static uint32_t read_le32(const uint8_t *bytes)
-{
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
-        ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
-}
-
-static uint64_t read_le64(const uint8_t *bytes)
-{
-    uint64_t value = UINT64_C(0);
-    unsigned int index;
-    for (index = 0U; index < 8U; ++index) {
-        value |= (uint64_t)bytes[index] << (index * 8U);
-    }
-    return value;
-}
-
-static int bytes_are_zero(const uint8_t *bytes, size_t size)
-{
-    size_t index;
-    for (index = 0U; index < size; ++index) {
-        if (bytes[index] != 0U) return 0;
-    }
-    return 1;
-}
-
 static uint32_t crc32_with_zero_field(uint8_t *bytes, size_t size,
     size_t field_offset)
 {
@@ -63,45 +33,9 @@ static uint32_t crc32_with_zero_field(uint8_t *bytes, size_t size,
 static int key_is_valid(const uint8_t *key, size_t size,
     romx_mutable_namespace_t object_namespace)
 {
-    size_t component = 0U;
-    size_t index;
-    size_t bad_offset = 0U;
-    int has_private_separator = 0;
-
-    if (size == 0U || key[0] == (uint8_t)'/' ||
-        key[size - 1U] == (uint8_t)'/' ||
-        !romx_utf8_validate(key, size, &bad_offset)) return 0;
-    for (index = 0U; index <= size; ++index) {
-        if (index < size && key[index] != (uint8_t)'/') {
-            if (key[index] == UINT8_C(0) || key[index] == (uint8_t)'\\') return 0;
-            continue;
-        }
-        if (index == component ||
-            (index - component == 1U && key[component] == (uint8_t)'.') ||
-            (index - component == 2U && key[component] == (uint8_t)'.' &&
-                key[component + 1U] == (uint8_t)'.')) return 0;
-        if (object_namespace == ROMX_MUTABLE_NAMESPACE_PRIVATE &&
-            component == 0U && index > 0U && index < size) {
-            has_private_separator = 1;
-        }
-        component = index + 1U;
-    }
-    return object_namespace != ROMX_MUTABLE_NAMESPACE_PRIVATE ||
-        has_private_separator;
-}
-
-static int ascii_fold_equal(const char *first, const char *second)
-{
-    size_t index = 0U;
-    for (;;) {
-        unsigned char a = (unsigned char)first[index];
-        unsigned char b = (unsigned char)second[index];
-        if (a >= (unsigned char)'A' && a <= (unsigned char)'Z') a = (unsigned char)(a + 32U);
-        if (b >= (unsigned char)'A' && b <= (unsigned char)'Z') b = (unsigned char)(b + 32U);
-        if (a != b) return 0;
-        if (a == 0U) return 1;
-        ++index;
-    }
+    return romx_path_bytes_valid(key, size) &&
+        (object_namespace != ROMX_MUTABLE_NAMESPACE_PRIVATE ||
+            memchr(key, '/', size) != NULL);
 }
 
 static int extents_overlap(const romx_mutable_object_info_t *first,
@@ -145,25 +79,25 @@ romx_result_t romx_parse_mutable(romx_reader_t *reader, romx_error_t *error)
         romx_error_clear(error);
         return ROMX_OK;
     }
-    expected_crc = read_le32(header + 0x34U);
+    expected_crc = romx_read_le32(header + 0x34U);
     actual_crc = crc32_with_zero_field(header, sizeof(header), 0x34U);
-    entry_capacity = read_le32(header + 0x0CU);
-    directory_size = read_le64(header + 0x18U);
-    data_area_offset = read_le64(header + 0x20U);
-    data_area_size = read_le64(header + 0x28U);
+    entry_capacity = romx_read_le32(header + 0x0CU);
+    directory_size = romx_read_le64(header + 0x18U);
+    data_area_offset = romx_read_le64(header + 0x20U);
+    data_area_size = romx_read_le64(header + 0x28U);
     if (memcmp(header, "RMUT", 4U) != 0 ||
-        read_le16(header + 0x04U) != UINT16_C(1) ||
-        read_le16(header + 0x06U) != UINT16_C(4096) ||
-        read_le32(header + 0x08U) != UINT32_C(512) ||
+        romx_read_le16(header + 0x04U) != UINT16_C(1) ||
+        romx_read_le16(header + 0x06U) != UINT16_C(4096) ||
+        romx_read_le32(header + 0x08U) != UINT32_C(512) ||
         entry_capacity < UINT32_C(8) || entry_capacity % UINT32_C(8) != 0U ||
-        read_le64(header + 0x10U) != ROMX_MUTABLE_HEADER_SIZE ||
+        romx_read_le64(header + 0x10U) != ROMX_MUTABLE_HEADER_SIZE ||
         directory_size != (uint64_t)entry_capacity * ROMX_MUTABLE_ENTRY_SIZE ||
         data_area_offset != ROMX_MUTABLE_HEADER_SIZE + directory_size ||
         data_area_offset % UINT64_C(4096) != UINT64_C(0) ||
         data_area_offset >= reader->info.mutable_region.size ||
         data_area_size != reader->info.mutable_region.size - data_area_offset ||
-        read_le32(header + 0x30U) != UINT32_C(0) ||
-        expected_crc != actual_crc || !bytes_are_zero(header + 0x38U, 4040U)) {
+        romx_read_le32(header + 0x30U) != UINT32_C(0) ||
+        expected_crc != actual_crc || !romx_bytes_zero(header + 0x38U, 4040U)) {
         mutable_mark_invalid(reader);
         romx_error_clear(error);
         return ROMX_OK;
@@ -193,18 +127,18 @@ romx_result_t romx_parse_mutable(romx_reader_t *reader, romx_error_t *error)
             romx_error_clear(error);
             return ROMX_OK;
         }
-        if (bytes_are_zero(stored, sizeof(stored))) continue;
+        if (romx_bytes_zero(stored, sizeof(stored))) continue;
         object->struct_size = (uint32_t)sizeof(*object);
         object->slot_index = slot_index;
-        slot->state = read_le16(stored + 0x04U);
-        object->object_namespace = read_le16(stored + 0x06U);
-        key_size = read_le32(stored + 0x0CU);
-        object->data_offset = read_le64(stored + 0x10U);
-        object->data_capacity = read_le64(stored + 0x18U);
-        object->data_size = read_le64(stored + 0x20U);
-        object->generation = read_le64(stored + 0x28U);
-        object->modified_unix_seconds = read_le64(stored + 0x30U);
-        object->data_crc32 = read_le32(stored + 0x38U);
+        slot->state = romx_read_le16(stored + 0x04U);
+        object->object_namespace = romx_read_le16(stored + 0x06U);
+        key_size = romx_read_le32(stored + 0x0CU);
+        object->data_offset = romx_read_le64(stored + 0x10U);
+        object->data_capacity = romx_read_le64(stored + 0x18U);
+        object->data_size = romx_read_le64(stored + 0x20U);
+        object->generation = romx_read_le64(stored + 0x28U);
+        object->modified_unix_seconds = romx_read_le64(stored + 0x30U);
+        object->data_crc32 = romx_read_le32(stored + 0x38U);
         object->key_size = key_size;
 
         if (memcmp(stored, "MENT", 4U) != 0 ||
@@ -212,7 +146,7 @@ romx_result_t romx_parse_mutable(romx_reader_t *reader, romx_error_t *error)
             slot->state > ROMX_MUTABLE_STATE_DELETING ||
             object->object_namespace < ROMX_MUTABLE_NAMESPACE_SAVE ||
             object->object_namespace > ROMX_MUTABLE_NAMESPACE_PRIVATE ||
-            read_le32(stored + 0x08U) != UINT32_C(0) ||
+            romx_read_le32(stored + 0x08U) != UINT32_C(0) ||
             key_size == UINT32_C(0) || key_size > ROMX_MUTABLE_KEY_CAPACITY ||
             object->data_offset < data_area_offset ||
             object->data_offset % UINT64_C(64) != UINT64_C(0) ||
@@ -224,11 +158,11 @@ romx_result_t romx_parse_mutable(romx_reader_t *reader, romx_error_t *error)
             (object->data_size == UINT64_C(0) &&
                 object->data_crc32 != UINT32_C(0)) ||
             object->generation == UINT64_C(0) ||
-            !bytes_are_zero(stored + 0x40U + key_size,
+            !romx_bytes_zero(stored + 0x40U + key_size,
                 ROMX_MUTABLE_KEY_CAPACITY - key_size) ||
             !key_is_valid(stored + 0x40U, key_size,
                 object->object_namespace) ||
-            read_le32(stored + 0x3CU) !=
+            romx_read_le32(stored + 0x3CU) !=
                 crc32_with_zero_field(stored, sizeof(stored), 0x3CU)) {
             reader->mutable_status = ROMX_MUTABLE_DEGRADED;
             continue;
@@ -246,7 +180,7 @@ romx_result_t romx_parse_mutable(romx_reader_t *reader, romx_error_t *error)
             struct romx_mutable_slot *second = &reader->mutable_slots[other];
             if (!second->usable) continue;
             if ((first->object.object_namespace == second->object.object_namespace &&
-                    ascii_fold_equal(first->object.key, second->object.key)) ||
+                    romx_ascii_fold_equal(first->object.key, second->object.key)) ||
                 extents_overlap(&first->object, &second->object)) {
                 first->usable = 0;
                 second->usable = 0;
@@ -401,7 +335,7 @@ romx_result_t romx_reader_find_mutable_object(const romx_reader_t *reader,
         const struct romx_mutable_slot *slot = &reader->mutable_slots[index];
         if (!slot->usable || slot->state != ROMX_MUTABLE_STATE_ACTIVE ||
             slot->object.object_namespace != object_namespace ||
-            !ascii_fold_equal(slot->object.key, key)) continue;
+            !romx_ascii_fold_equal(slot->object.key, key)) continue;
         result = validate_slot_data(reader, slot, error);
         if (result != ROMX_OK) return result;
         return copy_object(slot, object, error);
@@ -462,35 +396,12 @@ romx_result_t romx_mutable_file_tell(const romx_mutable_file_t *file,
     return ROMX_OK;
 }
 
-static romx_result_t add_seek_offset(uint64_t base, int64_t offset,
-    uint64_t *target, romx_error_t *error)
-{
-    uint64_t magnitude;
-    if (offset >= 0) {
-        magnitude = (uint64_t)offset;
-        if (base > UINT64_MAX - magnitude) {
-            return romx_error_set(error, ROMX_E_RANGE, 0,
-                ROMX_OFFSET_UNKNOWN, "mutable file seek overflows");
-        }
-        *target = base + magnitude;
-        return ROMX_OK;
-    }
-    magnitude = (uint64_t)(-(offset + INT64_C(1))) + UINT64_C(1);
-    if (magnitude > base) {
-        return romx_error_set(error, ROMX_E_RANGE, 0,
-            ROMX_OFFSET_UNKNOWN, "mutable file seek precedes its start");
-    }
-    *target = base - magnitude;
-    return ROMX_OK;
-}
-
 romx_result_t romx_mutable_file_seek(romx_mutable_file_t *file,
     int64_t offset, romx_payload_seek_position_t origin,
     uint64_t *new_position, romx_error_t *error)
 {
     uint64_t base;
     uint64_t target;
-    romx_result_t result;
     romx_error_clear(error);
     if (file == NULL) {
         return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
@@ -504,8 +415,9 @@ romx_result_t romx_mutable_file_seek(romx_mutable_file_t *file,
         return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
             ROMX_OFFSET_UNKNOWN, "unknown mutable file seek origin");
     }
-    result = add_seek_offset(base, offset, &target, error);
-    if (result != ROMX_OK) return result;
+    if (!romx_add_seek_offset(base, offset, &target))
+        return romx_error_set(error, ROMX_E_RANGE, 0,
+            ROMX_OFFSET_UNKNOWN, "file seek exceeds its valid range");
     file->position = target;
     if (new_position != NULL) *new_position = target;
     return ROMX_OK;

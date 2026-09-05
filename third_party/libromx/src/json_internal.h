@@ -48,5 +48,7 @@ int romx_json_integer(const romx_json_document_t *document,
     int token_index, int64_t *value);
 int romx_json_next_direct_child(const romx_json_document_t *document,
     int parent, int after);
+int romx_json_object_has_unique_keys(const romx_json_document_t *document,
+    int object);
 
 #endif

@@ -1,0 +1,401 @@
+{
+  "nodes": [
+    {
+      "id": "romx-center",
+      "type": "text",
+      "text": "# ROMX 0.2.0\n技术规格图\n\n证据边界：libromx 源码/头文件/测试 + /Volumes/Repositories/romx 规范与 fixtures\n\n[规范] wire=2 · RIDX=1 · metadata schema=0.2.0\n[代码实现] reader / writer / mutable / bundle / SAVE slot projection / STATS / C ABI\n[测试证据] test_v2 + test_writer_mutable + reference manifests\n[已决] 来源已固定；ASCII fold profile；registry 状态；unknown-platform fallback；salvage 排除；断电协议",
+      "x": 1700,
+      "y": 0,
+      "width": 1100,
+      "height": 320,
+      "color": "#7f1d1d"
+    },
+    {
+      "id": "scope",
+      "type": "text",
+      "text": "## 1 范围 / 目标 / 非目标\n\n[规范] 容器保存原始 payload、RIDX、可选 metadata/PNG、可选 fixed mutable、128B footer。\n[规范] 不负责模拟器启动、前端目录、LPL、云同步、压缩/加密/补丁/自动扩容。\n[代码实现] C99 核心；C++ 仅 wrapper；probe 是可选识别辅助。\n[已决][规范][测试证据] 相邻规范/schema/fixtures 仍是外部输入；来源 commit 与 SHA-256 已写入随发布安装的来源冻结记录。",
+      "x": 0,
+      "y": 600,
+      "width": 1000,
+      "height": 760,
+      "color": "#1e3a8a"
+    },
+    {
+      "id": "layout",
+      "type": "text",
+      "text": "## 2 顶层物理布局\n\n[规范] offset 0: payload → RIDX → metadata? → cover? → zero immutable padding? → mutable? → footer。\n[代码实现] RIDX 从 payload_size 推导；mutable 起点=footer_offset−capacity；无 mutable 时 immutable end=footer offset。\n\n区域：\n- payload：offset 0，>0\n- RIDX：64 + entry_count×512\n- metadata/cover：连续可选区\n- padding：仅零字节，mutable 前 4096 对齐\n- mutable：固定容量，≥12288，4096 倍\n- footer：文件最后 128B",
+      "x": 1200,
+      "y": 600,
+      "width": 1000,
+      "height": 900,
+      "color": "#1e3a8a"
+    },
+    {
+      "id": "footer",
+      "type": "text",
+      "text": "## 3 Footer · 128 字节\n\n[规范][代码实现] 所有整数 LE；CRC 计算时 0x50..53 视为 0。\n\n0x00/4 magic ROMX；0x04/4 wire_version=2；0x08/8 payload_size；0x10/8 metadata_size；0x18/8 cover_size；0x20/8 mutable_capacity；0x28/2 platform_id；0x2A/2 launch_format_id；0x2C/4 hash_algorithm (0/1)；0x30/32 immutable_sha256；0x50/4 footer_crc32；0x54/44 reserved=0。\n\n[规范] SHA 覆盖 immutable [0, mutable_offset) 或 [0, footer_offset)。\n[代码实现] magic/version/range/hash/reserved/CRC 检查；0xFFFF 拒绝。\n[已决][代码实现] registry 状态 API 区分 KNOWN、UNSPECIFIED、UNKNOWN、PRIVATE、PROHIBITED；未知非零 ID 可按数值读取但不受内置策略支持。",
+      "x": 2400,
+      "y": 600,
+      "width": 1000,
+      "height": 1080,
+      "color": "#1e3a8a"
+    },
+    {
+      "id": "ridx",
+      "type": "text",
+      "text": "## 4 Payload / RIDX\n\n[规范] payload 不压缩、不加密、不重写；entry ranges 在 payload 内；未索引 gap 必须为零。\n\nRIDX header 64B：\nmagic RIDX | version=1 | header_size=64 | entry_count≥1 | entry_size=512 | flags=0 | index_crc32(字段置零计算) | reserved=0。\n\nEntry 512B：flags(bit0 entrypoint, bit1 CRC)；format_id；path_size 1..480；data_offset/data_size；crc32；reserved；path bytes。\n[规范] 恰好一个 entrypoint，offset=0，size>0；单文件=1 entry 覆盖 payload，多文件由 count>1。\n[代码实现] header/CRC/path/range/overlap/gap/边界校验。\n[已决][规范][代码实现] 有效 UTF-8 原样保留非 ASCII 字节；冲突折叠仅 ASCII A–Z。完整 Unicode normalization/folding 留待未来 profile。",
+      "x": 3600,
+      "y": 600,
+      "width": 1000,
+      "height": 1240,
+      "color": "#1e3a8a"
+    },
+    {
+      "id": "metadata",
+      "type": "text",
+      "text": "## 5 Metadata\n\n[规范] 严格 UTF-8、无 BOM、RFC8259 JSON、所有深度 key 唯一；schema_version=0.2.0，name 必填。\n[规范][代码实现] schema 可选字段：serial/origin/category≤128；developer/publisher/franchise/language/enhancement_hw≤256；media≤64；description≤32768；genre/region 数量≤32；users 1..255；coop/rumble/analog bool；release_date；dump_status；crc32/origin_crc32 8 hex；cover image/png + 1..8192 dimensions。\n[规范] 禁止保存 offset、主机路径、启动路径、外部 cover path、platform/launch 声明；footer/RIDX 是物理/启动权威。\n[代码实现] metadata open/get/copy，默认上限 1MiB；缺失/过大/UTF8/JSON/schema 分层错误。\n[已决][规范][测试证据] schema 来源 commit 与 SHA-256 已固定在来源冻结记录，发布文档指向该外部输入。",
+      "x": 0,
+      "y": 2100,
+      "width": 1000,
+      "height": 1120,
+      "color": "#065f46"
+    },
+    {
+      "id": "cover",
+      "type": "text",
+      "text": "## 6 Cover\n\n[规范] 单个 PNG：IHDR 首个且唯一；IDAT 连续；IEND 零长度且最后；chunk 边界/CRC、合法 color/depth、PLTE、未知 critical chunk 均检查。\n[代码实现] src/png.c 流式验证；默认 max size=32MiB、max dimension=8192；输出 width/height。\n[规范] cover invalid 可报告/忽略，payload/RIDX 仍可访问。\n[测试证据] single-complete 70B 单像素 PNG；reader validation 与 writer/probe 测试。\n[已决][规范][代码实现] wire/API 仅冻结 PNG 验证与提取；转换、颜色管理、缩放和显示由可选 adapter 负责。",
+      "x": 1200,
+      "y": 2100,
+      "width": 1000,
+      "height": 900,
+      "color": "#065f46"
+    },
+    {
+      "id": "mutable",
+      "type": "text",
+      "text": "## 7 Mutable region\n\n[规范][代码实现] RMUT header 4096B：magic/version=1/header=4096/entry=512/capacity(≥8 且 8 倍)/directory 4096+N×512/data_area 4096 对齐/flags=0/header CRC/reserved=0。\n\nMENT entry 512B：magic、state ACTIVE=1/WRITING=2/DELETING=3、namespace SAVE=1/CHEAT=2/STATS=3/PRIVATE=4、key_size≤448、data_offset 64 对齐、capacity/size、generation、modified UTC、data_crc32、entry_crc32、key。\n\n[规范] identity=(namespace,key) 唯一；extent 不重叠；PRIVATE key 带 producer/；无空间不修改 immutable。\n[代码实现] header 坏=INVALID，坏 slot=DEGRADED；ACTIVE 暴露前验 data CRC；无 relocation/growth/compaction。\n[已决][规范][代码实现] key/path 冲突折叠为 ASCII A–Z，非 ASCII 保留；公共生命周期明确并发 positional read 与独占 cursor 规则。",
+      "x": 2400,
+      "y": 2100,
+      "width": 1000,
+      "height": 1240,
+      "color": "#065f46"
+    },
+    {
+      "id": "commit",
+      "type": "text",
+      "text": "## 8 Mutable 提交协议\n\n[规范][代码实现] 写入：WRITING entry durable → data 写入 + data CRC durable → ACTIVE entry durable（commit point）。\n\n[规范][代码实现] 删除：DELETING durable → slot 全零 durable。WRITING/DELETING 不暴露；受影响 object 可失效，immutable payload/RIDX/footer 不变。\n\n[代码实现] POSIX fcntl 锁 + pwrite/fsync；Windows LockFileEx + FlushFileBuffers。关闭 reader 不自动恢复/同步/写回。\n[测试证据] generation 1→2、capacity 复用、delete、篡改 data/header 与中间状态可见性。\n[已决][测试证据] 真实断电恢复属于平台发布验收，不增加新的 wire 状态。",
+      "x": 3600,
+      "y": 2100,
+      "width": 1000,
+      "height": 900,
+      "color": "#065f46"
+    },
+    {
+      "id": "bundle",
+      "type": "text",
+      "text": "## 9.2 RMBL SAVE / CHEAT bundle\n\nRMBL header 64B：magic/version=1/header=64/namespace/flags=0/entry_size=64/count/directory=64/path_table=64+N×64/data_offset 64 对齐/bundle_size/header CRC/reserved。\n\nEntry 64B：path_offset/path_size 1..1024/flags=0/data_offset 64 对齐/data_size/data_crc32/reserved。\n\n[规范] paths packed、unsigned UTF-8 排序、ASCII-fold 唯一；padding=0；禁止 symlink、绝对路径、`.`/`..`、冲突。\n[代码实现] regular-file 检查、CRC、全量验证后暴露，外层 object 走 mutable commit；SAVE bundle 另由 slot projection 节点解释。\n[规范] staging/restore/原子替换以列出的目标路径为事务边界，不能替换共享 host root。\n[代码实现] C API 不扫描目录或执行 host restore，adapter 负责 staging/目标选择。",
+      "x": 0,
+      "y": 3600,
+      "width": 1000,
+      "height": 1120,
+      "color": "#7c2d12"
+    },
+    {
+      "id": "stats",
+      "type": "text",
+      "text": "## 10 STATS JSON profile\n\n[规范][代码实现] ≤16384B、strict UTF-8、无 BOM/重复/未知字段/浮点/trailing；schema=romx.stats、version=1。\n\n字段：play_time_seconds、launch_count、first/last_played_unix_seconds、favorite、completed、completion_percent 0..100、achievements(unlocked,total,hardcore_unlocked)。安全整数≤9007199254740991，unlocked≤total，first≤last。\n\n[代码实现] parse/serialize/read/write；紧凑固定顺序写入，读取允许顺序/空白差异。\n[已决][规范][代码实现][测试证据] romx_mutable_stats_merge_session_delta() 检查计数溢出，first 取最早、last 取最晚，并把 session 的用户状态/成就摘要应用到最新 generation。",
+      "x": 1200,
+      "y": 3600,
+      "width": 1000,
+      "height": 1040,
+      "color": "#7c2d12"
+    },
+    {
+      "id": "save-slots",
+      "type": "text",
+      "text": "## 9.1 SAVE slot model\n\n[规范] SAVE 是零个或多个逻辑槽；每个 ACTIVE SAVE object 独立提交，一个 RMBL object 可投影多个槽；槽顺序不由容器编码。\n[代码实现] src/mutable_bundle.c 读取 footer platform_id/launch_format_id，调用 romx_mutable_bundle_get_save_slot*。\n[规范][代码实现] PSP：只有带有效 PARAM.SFO identity 的目录成槽；DISC_ID 有效，或 SAVEDATA_DIRECTORY 与目录 basename 匹配；目录下所有文件归槽。\n[规范][代码实现] 其他已注册平台（含 UNSPECIFIED）：每文件一个槽，完整规范化 relative path 为 key；目录不会隐式分组。\n[代码实现] romx_mutable_psp_savedata_inspect_sfo 仅解析 caller bytes；检查有界 PSF v1.01 table/record 与 identity 规则。\n[测试证据] test_writer_mutable 覆盖普通 projection slots、PSP 目录 slots、slot entry lookup。\n[已决][规范][代码实现] unknown platform 采用保守的每文件 projection；嵌套有效 PSP root 由最长匹配的有效 root 负责。",
+      "x": 4800,
+      "y": 5000,
+      "width": 1000,
+      "height": 1080,
+      "color": "#7c2d12"
+    },
+    {
+      "id": "reader",
+      "type": "text",
+      "text": "## 11 Reader 访问模型\n\n[代码实现] open：get_size → 读取末尾 footer → parse footer/RIDX/mutable；结构校验在 open，hash/metadata/cover/entry CRC 按 validate flags opt-in。\n[代码实现] get_info、entry lookup、positional read、payload IO view、map、materialize/extract、VFS、payload_file。\n[代码实现] metadata/VFS/payload IO/mapping/mutable cursor 借用 reader；reader 必须最后关闭。\n[规范] metadata/cover/mutable 可降级而不影响 immutable payload。\n[已决][代码实现] read_at 线程安全时 metadata/positional read 可并发；seek/payload cursor 与 bundle 为有状态对象，不得并发共享；custom IO 同步由调用方负责。",
+      "x": 2400,
+      "y": 3600,
+      "width": 1000,
+      "height": 1000,
+      "color": "#7c2d12"
+    },
+    {
+      "id": "writer",
+      "type": "text",
+      "text": "## 12 Writer 行为\n\n[代码实现] 校验 entry/path/IO、恰好一个非空 entrypoint；entrypoint 先写 offset 0；流式写 payload、RIDX、metadata、cover、padding、RMUT、footer。\n[代码实现] 可选 entry CRC32、immutable SHA256、probe、durable；temporary + exclusive create + atomic publish；replace 显式控制。\n[规范] payload 原字节；mutable capacity 固定不自动增长。\n[测试证据] multi-entry CUE、metadata、cover/probe、CRC、SHA、mutable writer。\n[已决][代码实现][测试证据] durable 发布在 POSIX rename/link 后 fsync 临时文件和父目录；Windows 使用 FlushFileBuffers 与 write-through replace。保证边界为文件级，主机文件系统验收按平台执行。",
+      "x": 3600,
+      "y": 3600,
+      "width": 1000,
+      "height": 980,
+      "color": "#7c2d12"
+    },
+    {
+      "id": "errors",
+      "type": "text",
+      "text": "## 13 错误码与降级\n\n[代码实现] INVALID_ARGUMENT/OOM/IO/TRUNCATED/RANGE/WRITE/ATOMIC_RENAME/EXISTS/BUFFER_TOO_SMALL；INVALID_FOOTER/FLAGS/INDEX/OVERLAP/UNSUPPORTED；IMMUTABLE_HASH/ENTRY_CRC/EXTRACT_HASH；METADATA_*；COVER_*；VIRTUAL_PATH/ENTRY_NOT_FOUND；MUTABLE_*。\n\n[规范] 结构错误 fail-closed；metadata/cover 独立降级；mutable layout 错误仅使 mutable unavailable；单 object CRC 不影响 immutable。\n[代码实现] romx_error={code,system_code,byte_offset,message[256]}；所有 API 返回错误，不进程退出。\n[已决][规范][代码实现] salvage 不属于 libromx 0.2.0；无公共 salvage handle、mutable write-back 或自动启动路径。",
+      "x": 0,
+      "y": 5000,
+      "width": 1000,
+      "height": 980,
+      "color": "#581c87"
+    },
+    {
+      "id": "security",
+      "type": "text",
+      "text": "## 14 安全与健壮性\n\n[规范][代码实现] offset/count 乘加溢出检查；越过 footer、重叠、非零 reserved/padding 拒绝。\n[规范][代码实现] 路径拒绝绝对、.、..、空组件、反斜杠、NUL；bundle source 拒绝 symlink/reparse。\n[代码实现] 默认 metadata 1MiB、cover 32MiB/8192px、STATS 16KiB、bundle 128MiB/4096 entries；可配置上限。\n[代码实现] temp exclusive + atomic publish；CRC/Hash 分层验证。\n[已决][代码实现] 并发契约已写入公共生命周期：positional read 需线程安全 IO；mutable cursor 与 bundle handle 独占。",
+      "x": 1200,
+      "y": 5000,
+      "width": 1000,
+      "height": 920,
+      "color": "#581c87"
+    },
+    {
+      "id": "compat",
+      "type": "text",
+      "text": "## 15 版本与兼容性\n\n[规范] ROMX 0.2.0 / footer wire 2 / RIDX 1 / metadata 0.2.0 / RMUT 1 / RMBL 1 / STATS 1。reserved=0。\n[规范] platform/format 未知非零可读但 unsupported；0xFFFF 禁止；0x8000..0xFFFE 私有注册。\n[已决][规范][代码实现] future wire/component version fail-closed；registry API 区分 KNOWN/UNSPECIFIED/UNKNOWN/PRIVATE/PROHIBITED；UNSPECIFIED/unknown SAVE projection 为每个完整 bundle-relative path 一个槽。",
+      "x": 2400,
+      "y": 5000,
+      "width": 1000,
+      "height": 880,
+      "color": "#581c87"
+    },
+    {
+      "id": "tests",
+      "type": "text",
+      "text": "## 16 Conformance matrix\n\n[测试证据] minimal-single：单文件/无可选区；single-complete：metadata+PNG+12KiB mutable+SHA；multi-cue：CUE/BIN/3 entries/CRC。\n[测试证据] test_v2：VFS、payload IO/map、entry CRC、metadata、mutable CRC/hash boundary。\n[测试证据] test_writer_mutable：writer、generation/delete、bundle、普通 per-file SAVE slots、PSP PARAM.SFO 目录 slots、slot member lookup、STATS、probe、collision。\n[测试证据] 冻结 fixture 来源已固定；错误 magic/截断/CRC/重叠/traversal 由相邻标准 fixture 覆盖。\n[已决][测试证据] WRITING/DELETING 中间状态、unknown fallback、严格 SFO、STATS merge/overflow、registry status 均有当前测试；真实断电属于平台验收。",
+      "x": 3600,
+      "y": 5000,
+      "width": 1000,
+      "height": 980,
+      "color": "#581c87"
+    },
+    {
+      "id": "api",
+      "type": "text",
+      "text": "## API 族与生命周期\n\n[代码实现] reader open/get/validate/read；VFS/payload_file cursor；metadata copy/get；mapping；extract；mutable object/file；RMBL bundle；SAVE slot projection；PSP SFO inspect；STATS；probe；writer；registry。\n\n[代码实现] 输入错误/IO/截断/CRC/结构错误都返回 romx_result_t + romx_error_t；输出 struct 需先填 struct_size；borrowed object 在 reader 前关闭；close 释放 opaque handle。\n[已决][代码实现] registry status 查询与 romx_mutable_stats_merge_session_delta() 已公开；C++ 是可选 move-only RAII 常用封装，不替代完整 C ABI。\n\n详见本文件第 11 节接口表。",
+      "x": 0,
+      "y": 6300,
+      "width": 1000,
+      "height": 820,
+      "color": "#0f766e"
+    },
+    {
+      "id": "diff",
+      "type": "text",
+      "text": "## 17 当前实现与冻结规范一致性\n\n[已决] 来源：规范/schema/fixtures commit 与 SHA-256 已固定并随发布记录安装。\n[已决] 文本身份：有效 UTF-8、非 ASCII 保留、ASCII A–Z 折叠；完整 Unicode profile 留待未来。\n[已决] Registry：KNOWN/UNSPECIFIED/UNKNOWN/PRIVATE/PROHIBITED 状态 API；未知非零值可读但不支持。\n[已决] Salvage：排除在正常 reader 与 fail-closed API 之外。\n[已决] SAVE projection：UNSPECIFIED/unknown 按文件；嵌套 PSP 使用最长有效 SFO root。\n[已决] PSP SFO：有界 PSF v1.01 grammar、table/record 检查与 malformed 拒绝。\n[已决] Slot ABI：struct_size 只控制内存结构扩展，不是 wire 字段。\n[已决] STATS：公开 session-delta merge，计数溢出检查，时间 min/max，摘要覆盖。\n[已决] Mutable：WRITING/DELETING durable 协议，中间状态隐藏。\n[已决] Durable publish：POSIX 父目录 fsync，Windows 文件级 write-through。\n[已决] Payload SHA：仅 extraction 派生自校验。\n[已决] Threading：positional read 需 thread-safe IO；cursor/bundle 独占。\n[已决] C++：可选 move-only RAII 常用封装，不是完整 C ABI。\n[已决] 编译器：GCC/Clang/MSVC warning 与严格转换问题已修复。",
+      "x": 1200,
+      "y": 6300,
+      "width": 1000,
+      "height": 900,
+      "color": "#0f766e"
+    },
+    {
+      "id": "fixtures",
+      "type": "text",
+      "text": "## 冻结夹具证据\n\n[测试证据] /Volumes/Repositories/romx/tests/fixtures/README_CN.md：reference generator 生成确定性 ROMX 0.2.0。\n\nminimal-single：file_size 25296，payload 24592，RIDX 576，footer 128。\nsingle-complete：metadata 68，cover 70，mutable 12288，immutable SHA。\nmulti-cue：payload 4231，RIDX 1600，CUE entrypoint 135B + 2 BIN。\n\n[已决][测试证据] fixture manifest 来源 commit、generator inputs 与 SHA-256 已固定在 ROMX-0.2.0-来源冻结.md。",
+      "x": 2400,
+      "y": 6300,
+      "width": 1000,
+      "height": 860,
+      "color": "#0f766e"
+    },
+    {
+      "id": "pending",
+      "type": "text",
+      "text": "## 已决发布门禁事项\n\n1. [已决] 标准/schema/fixture 来源由 commit 与 SHA-256 固定。\n2. [已决] UTF-8 原样保留；冲突折叠为 ASCII A–Z；完整 Unicode 留待未来 profile。\n3. [已决] registry 状态与未知 ID“可读但不支持”行为已公开。\n4. [已决] UNSPECIFIED/unknown SAVE projection 为每个路径一个槽。\n5. [已决] 嵌套 PSP 由最长有效 SFO root 负责；PSF v1.01 grammar 有界。\n6. [已决] salvage 排除在正常 0.2.0 API 外。\n7. [已决] STATS session-delta merge 已实现并测试。\n8. [已决] bundle host restore 属于 adapter 责任。\n9. [已决] WRITING/DELETING durable 协议冻结，中间状态有测试。\n10. [已决] POSIX 父目录 fsync 与 Windows 文件级 durability 已规定。\n11. [已决] payload SHA 仅为 extraction 派生自校验。\n12. [已决] 并发 positional read 需 thread-safe IO；cursor/bundle 独占。\n13. [已决] C++ wrapper 为可选 move-only RAII 常用封装。\n14. [已决] unknown platform 使用保守的每文件 projection。\n15. [已决] 编译器 warning 与严格 portability 问题已修复。",
+      "x": 3600,
+      "y": 6300,
+      "width": 1000,
+      "height": 980,
+      "color": "#0f766e"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-center-scope",
+      "fromNode": "romx-center",
+      "toNode": "scope",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-center-layout",
+      "fromNode": "romx-center",
+      "toNode": "layout",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-center-footer",
+      "fromNode": "romx-center",
+      "toNode": "footer",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-center-ridx",
+      "fromNode": "romx-center",
+      "toNode": "ridx",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-layout-metadata",
+      "fromNode": "layout",
+      "toNode": "metadata",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-layout-cover",
+      "fromNode": "layout",
+      "toNode": "cover",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-footer-mutable",
+      "fromNode": "footer",
+      "toNode": "mutable",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-bundle-tests",
+      "fromNode": "bundle",
+      "toNode": "tests",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-metadata-cover",
+      "fromNode": "metadata",
+      "toNode": "cover",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-cover-mutable",
+      "fromNode": "cover",
+      "toNode": "mutable",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-mutable-commit",
+      "fromNode": "mutable",
+      "toNode": "commit",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-bundle-save-slots",
+      "fromNode": "bundle",
+      "toNode": "save-slots",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-save-slots-tests",
+      "fromNode": "save-slots",
+      "toNode": "tests",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "e-writer-tests",
+      "fromNode": "writer",
+      "toNode": "tests",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-bundle-stats",
+      "fromNode": "bundle",
+      "toNode": "stats",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-stats-reader",
+      "fromNode": "stats",
+      "toNode": "reader",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-reader-writer",
+      "fromNode": "reader",
+      "toNode": "writer",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-writer-security",
+      "fromNode": "writer",
+      "toNode": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-errors-security",
+      "fromNode": "errors",
+      "toNode": "security",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-security-compat",
+      "fromNode": "security",
+      "toNode": "compat",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-compat-tests",
+      "fromNode": "compat",
+      "toNode": "tests",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-tests-fixtures",
+      "fromNode": "tests",
+      "toNode": "fixtures",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-tests-diff",
+      "fromNode": "tests",
+      "toNode": "diff",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-api-diff",
+      "fromNode": "api",
+      "toNode": "diff",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-fixtures-pending",
+      "fromNode": "fixtures",
+      "toNode": "pending",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ]
+}

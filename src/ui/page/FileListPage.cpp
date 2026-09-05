@@ -1,7 +1,6 @@
 #include "FileListPage.hpp"
 #include "core/Translation.hpp"
 #include "core/romx/RomxFrontend.hpp"
-#include <romx/romx.h>
 #include "ui/utils/AnimationHelper.hpp"
 #include "ui/utils/MaterialIcons.hpp"
 #include <algorithm>
@@ -491,11 +490,7 @@ namespace beiklive
                     displayTitle = info.title;
                 if (!info.hasCover || !beiklive::romx::extractCover(data.fullPath, coverPath))
                     coverPath.clear();
-                if (info.platformId != 0)
-                {
-                    if (const char* platformName = romx_platform_name(info.platformId))
-                        romxPlatform = platformName;
-                }
+                romxPlatform = info.platformName;
             }
         }
         m_detailTitle->setText(displayTitle);

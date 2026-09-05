@@ -51,6 +51,8 @@ public:
         std::string sourcePath;
         uint16_t sourceFormat = 0;
         uint16_t grouping = 0;
+        uint16_t scope = 0;
+        std::string extdataId;
         uint32_t fileCount = 0;
         uint64_t dataSize = 0;
         bool isDirectory = false;
@@ -116,6 +118,7 @@ public:
     /// capacity (not a character count).
     static bool validateSaveSlotKey(const std::string& key,
                                     std::string* error = nullptr);
+    static uint32_t saveSlotKeyCapacity();
 
     /// Explicit batch-management operations.  The restore variants replace
     /// local frontend data with the corresponding ROMX mutable object.  PSP

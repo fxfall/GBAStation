@@ -23,7 +23,7 @@ std::string makeVirtualPath(const std::string& sourcePath,
 
 /**
  * Bind one ROMX launch session to the Libretro VFS bridge.  The session must
- * outlive all VFS handles and remains owned by the caller.
+ * outlive all VFS handles and remains owned by the frontend launch module.
  */
 bool activate(const void* owner, const std::string& virtualPath,
               beiklive::romx::LaunchSession* session);
@@ -35,4 +35,3 @@ void deactivate(const void* owner);
 retro_vfs_interface* interfacePtr();
 
 } // namespace beiklive::romx_vfs
-

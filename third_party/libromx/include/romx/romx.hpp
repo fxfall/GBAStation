@@ -10,6 +10,11 @@
 
 namespace romx {
 
+/* This header is an optional convenience layer, not a second ABI.  It keeps
+ * the commonly used reader/writer/mutable/STATS operations RAII-safe; callers
+ * needing the complete API (VFS, mappings, bundles, probing, and detailed
+ * validation reports) should use the C ABI directly. */
+
 class error : public std::runtime_error {
 public:
     error(romx_result_t result, const romx_error_t &detail)
@@ -153,6 +158,17 @@ inline void delete_mutable(const std::string &container,
     romx_error_t detail = {};
     check(romx_mutable_delete_path(container.c_str(), object_namespace,
         key.c_str(), &detail), detail);
+}
+
+inline romx_mutable_stats_t merge_session_delta(
+    const romx_mutable_stats_t &baseline,
+    const romx_mutable_stats_t &session_delta)
+{
+    romx_mutable_stats_t merged = ROMX_MUTABLE_STATS_INIT;
+    romx_error_t detail = {};
+    check(romx_mutable_stats_merge_session_delta(&baseline, &session_delta,
+        &merged, &detail), detail);
+    return merged;
 }
 
 } /* namespace romx */

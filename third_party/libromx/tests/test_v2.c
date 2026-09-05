@@ -188,10 +188,15 @@ static int test_multi_file_vfs(const char *directory)
         sizeof(cue_prefix), &bytes_read, &error) == ROMX_OK);
     CHECK(bytes_read == sizeof(cue_prefix));
     CHECK(memcmp(cue_prefix, "FILE", sizeof(cue_prefix)) == 0);
+#if defined(_WIN32) || defined(__SWITCH__) || defined(ROMX_NO_MMAP) || \
+    defined(ROMX_DISABLE_MMAP)
+    CHECK(romx_reader_map_payload(reader, &mapping, &error) == ROMX_E_UNSUPPORTED);
+#else
     CHECK(romx_reader_map_payload(reader, &mapping, &error) == ROMX_OK);
     CHECK(romx_payload_mapping_size(mapping) == UINT64_C(135));
     CHECK(memcmp(romx_payload_mapping_data(mapping), "FILE", 4U) == 0);
     romx_payload_mapping_close(mapping);
+#endif
     CHECK(romx_reader_validate(reader, ROMX_VALIDATE_ENTRY_CRC32,
         &report, &error) == ROMX_OK);
     CHECK(report.entry_crc32 == ROMX_STATUS_VALID);
@@ -291,6 +296,35 @@ static int test_complete_and_mutable_hash_boundary(const char *directory)
     CHECK(memcmp(saved, "SAVE", sizeof(saved)) == 0);
     romx_mutable_file_close(mutable_file);
     romx_reader_close(reader);
+
+    /* Simulate a durable intermediate commit state.  WRITING is structurally
+     * valid but must remain hidden until the final ACTIVE entry is published;
+     * immutable payload access must continue to work. */
+    {
+        uint8_t *entry_bytes = source.bytes +
+            (size_t)info.mutable_region.offset + 4096U;
+        uint32_t entry_crc;
+        write_le16(entry_bytes + 0x04U, UINT16_C(2));
+        memset(entry_bytes + 0x3cU, 0, 4U);
+        entry_crc = test_crc32(entry_bytes, 512U);
+        write_le32(entry_bytes + 0x3cU, entry_crc);
+    }
+    CHECK(romx_reader_open_io(&io, NULL, &reader, &error) == ROMX_OK);
+    CHECK(romx_reader_get_mutable_object_count(reader, &object_count,
+        &error) == ROMX_OK && object_count == UINT32_C(0));
+    CHECK(romx_reader_find_mutable_object(reader,
+        ROMX_MUTABLE_NAMESPACE_SAVE, "slot.sav", &object, &error) ==
+        ROMX_E_MUTABLE_ENTRY);
+    romx_reader_close(reader);
+    {
+        uint8_t *entry_bytes = source.bytes +
+            (size_t)info.mutable_region.offset + 4096U;
+        uint32_t entry_crc;
+        write_le16(entry_bytes + 0x04U, UINT16_C(1));
+        memset(entry_bytes + 0x3cU, 0, 4U);
+        entry_crc = test_crc32(entry_bytes, 512U);
+        write_le32(entry_bytes + 0x3cU, entry_crc);
+    }
 
     source.bytes[(size_t)info.mutable_region.offset + 8192U] ^= UINT8_C(0x01);
     object = (romx_mutable_object_info_t)ROMX_MUTABLE_OBJECT_INFO_INIT;

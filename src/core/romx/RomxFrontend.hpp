@@ -27,6 +27,7 @@ struct Info
     std::string serial;
     std::string entrypointPath;
     std::string entrypointFormat;
+    std::string platformName;
 
     int platform = static_cast<int>(enums::EmuPlatform::NONE);
     uint16_t platformId = 0;

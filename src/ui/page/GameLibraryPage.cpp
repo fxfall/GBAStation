@@ -8,7 +8,6 @@
 #include "core/forwarder/ForwarderInstaller.hpp"
 #include "core/romx/RomxFrontend.hpp"
 #include "core/romx/RomxGameEntryAdapter.hpp"
-#include <romx/romx.h>
 #include "core/PinyinTools.hpp"
 #include "ui/utils/MaterialIcons.hpp"
 #include "ui/utils/NdsEnvironment.hpp"
@@ -2240,7 +2239,7 @@ namespace beiklive
                         },
                         L("新增 ROMX 存档"),
                         L("请输入存档名称（支持中文；同名请从列表中选择覆盖）"),
-                        static_cast<int>(ROMX_MUTABLE_KEY_CAPACITY), "");
+                        static_cast<int>(beiklive::romx::GameEntryAdapter::saveSlotKeyCapacity()), "");
                 });
             },
             0,

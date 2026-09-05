@@ -34,31 +34,6 @@ static romx_result_t stats_memory_read(void *user_data, uint64_t offset,
     return ROMX_OK;
 }
 
-static int object_has_unique_keys(const romx_json_document_t *json,
-    int object)
-{
-    int first = -1;
-    for (;;) {
-        int first_value;
-        int second = -1;
-        first = romx_json_next_direct_child(json, object, first);
-        if (first < 0) return 1;
-        first_value = romx_json_next_direct_child(json, object, first);
-        if (first_value < 0) return 0;
-        for (;;) {
-            int second_value;
-            second = romx_json_next_direct_child(json, object, second);
-            if (second < 0) break;
-            second_value = romx_json_next_direct_child(json, object, second);
-            if (second_value < 0) return 0;
-            if (second != first && romx_json_strings_equal(json, first, second))
-                return 0;
-            second = second_value;
-        }
-        first = first_value;
-    }
-}
-
 static int json_uint53(const romx_json_document_t *json, int token,
     uint64_t *value)
 {
@@ -92,7 +67,7 @@ static int parse_achievements(const romx_json_document_t *json, int object,
     int have_total = 0;
     if (object < 0 || (size_t)object >= json->token_count ||
         json->tokens[object].type != ROMX_JSON_OBJECT ||
-        !object_has_unique_keys(json, object)) return 0;
+        !romx_json_object_has_unique_keys(json, object)) return 0;
     for (;;) {
         int value;
         item = romx_json_next_direct_child(json, object, item);
@@ -145,7 +120,7 @@ romx_result_t romx_mutable_stats_parse_json(const void *json_bytes,
         !romx_json_parse(&json, (const uint8_t *)json_bytes,
             (size_t)json_size, &bad_offset) ||
         json.token_count == 0U || json.tokens[0].type != ROMX_JSON_OBJECT ||
-        !object_has_unique_keys(&json, 0)) {
+        !romx_json_object_has_unique_keys(&json, 0)) {
         romx_json_destroy(&json);
         return romx_error_set(error, ROMX_E_MUTABLE_STATS, 0,
             (uint64_t)bad_offset, "mutable STATS is not strict JSON");
@@ -274,6 +249,141 @@ static int stats_values_valid(const romx_mutable_stats_t *stats)
         stats->achievements_hardcore_unlocked > stats->achievements_unlocked)
         return 0;
     return 1;
+}
+
+static int add_stats_counter(uint64_t baseline, uint64_t delta,
+    uint64_t *merged)
+{
+    if (baseline > ROMX_MUTABLE_STATS_MAX_SAFE_INTEGER - delta)
+        return 0;
+    *merged = baseline + delta;
+    return 1;
+}
+
+romx_result_t romx_mutable_stats_merge_session_delta(
+    const romx_mutable_stats_t *baseline,
+    const romx_mutable_stats_t *session_delta,
+    romx_mutable_stats_t *merged,
+    romx_error_t *error)
+{
+    romx_mutable_stats_t result = ROMX_MUTABLE_STATS_INIT;
+    uint32_t supplied_size;
+
+    if (baseline == NULL || session_delta == NULL || merged == NULL ||
+        baseline->struct_size < (uint32_t)sizeof(*baseline) ||
+        session_delta->struct_size < (uint32_t)sizeof(*session_delta) ||
+        merged->struct_size < (uint32_t)sizeof(*merged) ||
+        !stats_values_valid(baseline) || !stats_values_valid(session_delta)) {
+        return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+            ROMX_OFFSET_UNKNOWN, "invalid mutable STATS merge arguments");
+    }
+
+    supplied_size = merged->struct_size;
+    result.struct_size = supplied_size;
+
+    if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_PLAY_TIME) != 0U ||
+        (session_delta->flags & ROMX_MUTABLE_STATS_HAS_PLAY_TIME) != 0U) {
+        result.flags |= ROMX_MUTABLE_STATS_HAS_PLAY_TIME;
+        if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_PLAY_TIME) != 0U &&
+            (session_delta->flags & ROMX_MUTABLE_STATS_HAS_PLAY_TIME) != 0U) {
+            if (!add_stats_counter(baseline->play_time_seconds,
+                    session_delta->play_time_seconds,
+                    &result.play_time_seconds)) {
+                return romx_error_set(error, ROMX_E_MUTABLE_STATS, 0,
+                    ROMX_OFFSET_UNKNOWN,
+                    "mutable STATS play time exceeds the safe integer limit");
+            }
+        } else if ((session_delta->flags & ROMX_MUTABLE_STATS_HAS_PLAY_TIME) != 0U) {
+            result.play_time_seconds = session_delta->play_time_seconds;
+        } else {
+            result.play_time_seconds = baseline->play_time_seconds;
+        }
+    }
+    if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_LAUNCH_COUNT) != 0U ||
+        (session_delta->flags & ROMX_MUTABLE_STATS_HAS_LAUNCH_COUNT) != 0U) {
+        result.flags |= ROMX_MUTABLE_STATS_HAS_LAUNCH_COUNT;
+        if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_LAUNCH_COUNT) != 0U &&
+            (session_delta->flags & ROMX_MUTABLE_STATS_HAS_LAUNCH_COUNT) != 0U) {
+            if (!add_stats_counter(baseline->launch_count,
+                    session_delta->launch_count,
+                    &result.launch_count)) {
+                return romx_error_set(error, ROMX_E_MUTABLE_STATS, 0,
+                    ROMX_OFFSET_UNKNOWN,
+                    "mutable STATS launch count exceeds the safe integer limit");
+            }
+        } else if ((session_delta->flags & ROMX_MUTABLE_STATS_HAS_LAUNCH_COUNT) != 0U) {
+            result.launch_count = session_delta->launch_count;
+        } else {
+            result.launch_count = baseline->launch_count;
+        }
+    }
+
+    if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_FIRST_PLAYED) != 0U ||
+        (session_delta->flags & ROMX_MUTABLE_STATS_HAS_FIRST_PLAYED) != 0U) {
+        result.flags |= ROMX_MUTABLE_STATS_HAS_FIRST_PLAYED;
+        if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_FIRST_PLAYED) != 0U &&
+            (session_delta->flags & ROMX_MUTABLE_STATS_HAS_FIRST_PLAYED) != 0U)
+            result.first_played_unix_seconds = baseline->first_played_unix_seconds <
+                session_delta->first_played_unix_seconds
+                ? baseline->first_played_unix_seconds
+                : session_delta->first_played_unix_seconds;
+        else if ((session_delta->flags & ROMX_MUTABLE_STATS_HAS_FIRST_PLAYED) != 0U)
+            result.first_played_unix_seconds = session_delta->first_played_unix_seconds;
+        else
+            result.first_played_unix_seconds = baseline->first_played_unix_seconds;
+    }
+    if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_LAST_PLAYED) != 0U ||
+        (session_delta->flags & ROMX_MUTABLE_STATS_HAS_LAST_PLAYED) != 0U) {
+        result.flags |= ROMX_MUTABLE_STATS_HAS_LAST_PLAYED;
+        if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_LAST_PLAYED) != 0U &&
+            (session_delta->flags & ROMX_MUTABLE_STATS_HAS_LAST_PLAYED) != 0U)
+            result.last_played_unix_seconds = baseline->last_played_unix_seconds >
+                session_delta->last_played_unix_seconds
+                ? baseline->last_played_unix_seconds
+                : session_delta->last_played_unix_seconds;
+        else if ((session_delta->flags & ROMX_MUTABLE_STATS_HAS_LAST_PLAYED) != 0U)
+            result.last_played_unix_seconds = session_delta->last_played_unix_seconds;
+        else
+            result.last_played_unix_seconds = baseline->last_played_unix_seconds;
+    }
+
+    /* The latest session owns user-facing state. */
+#define MERGE_UINT32_FLAG(flag, field) do { \
+    if ((baseline->flags & (flag)) != 0U || \
+        (session_delta->flags & (flag)) != 0U) { \
+        result.flags |= (flag); \
+        result.field = (session_delta->flags & (flag)) != 0U \
+            ? session_delta->field : baseline->field; \
+    } \
+} while (0)
+    MERGE_UINT32_FLAG(ROMX_MUTABLE_STATS_HAS_FAVORITE, favorite);
+    MERGE_UINT32_FLAG(ROMX_MUTABLE_STATS_HAS_COMPLETED, completed);
+    MERGE_UINT32_FLAG(ROMX_MUTABLE_STATS_HAS_COMPLETION_PERCENT,
+        completion_percent);
+#undef MERGE_UINT32_FLAG
+
+    if ((baseline->flags & ROMX_MUTABLE_STATS_HAS_ACHIEVEMENTS) != 0U ||
+        (session_delta->flags & ROMX_MUTABLE_STATS_HAS_ACHIEVEMENTS) != 0U) {
+        const romx_mutable_stats_t *source =
+            (session_delta->flags & ROMX_MUTABLE_STATS_HAS_ACHIEVEMENTS) != 0U
+                ? session_delta : baseline;
+        result.flags |= ROMX_MUTABLE_STATS_HAS_ACHIEVEMENTS;
+        result.achievements_unlocked = source->achievements_unlocked;
+        result.achievements_total = source->achievements_total;
+        if ((source->flags & ROMX_MUTABLE_STATS_HAS_HARDCORE_UNLOCKED) != 0U) {
+            result.flags |= ROMX_MUTABLE_STATS_HAS_HARDCORE_UNLOCKED;
+            result.achievements_hardcore_unlocked =
+                source->achievements_hardcore_unlocked;
+        }
+    }
+
+    if (!stats_values_valid(&result)) {
+        return romx_error_set(error, ROMX_E_MUTABLE_STATS, 0,
+            ROMX_OFFSET_UNKNOWN, "merged mutable STATS values are invalid");
+    }
+    *merged = result;
+    romx_error_clear(error);
+    return ROMX_OK;
 }
 
 romx_result_t romx_mutable_stats_serialize_json(

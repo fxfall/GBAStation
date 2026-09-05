@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include "io_posix_internal.h"
 #endif
 
 #define MUTABLE_STATE_ACTIVE UINT16_C(1)
@@ -43,61 +44,14 @@ typedef struct source_path {
     uint64_t size;
 } source_path_t;
 
-static void write_le16(uint8_t *bytes, uint16_t value)
-{
-    bytes[0] = (uint8_t)value; bytes[1] = (uint8_t)(value >> 8);
-}
-
-static void write_le32(uint8_t *bytes, uint32_t value)
-{
-    unsigned int index;
-    for (index = 0U; index < 4U; ++index) bytes[index] = (uint8_t)(value >> (index * 8U));
-}
-
-static void write_le64(uint8_t *bytes, uint64_t value)
-{
-    unsigned int index;
-    for (index = 0U; index < 8U; ++index) bytes[index] = (uint8_t)(value >> (index * 8U));
-}
-
 static int key_valid(romx_mutable_namespace_t object_namespace,
     const char *key)
 {
-    const uint8_t *bytes = (const uint8_t *)key;
-    size_t size, index, component = 0U, bad = 0U;
-    int private_separator = 0;
-    if (key == NULL) return 0;
-    size = strlen(key);
-    if (size == 0U || size > ROMX_MUTABLE_KEY_CAPACITY ||
-        bytes[0] == '/' || bytes[size - 1U] == '/' ||
-        object_namespace < ROMX_MUTABLE_NAMESPACE_SAVE ||
-        object_namespace > ROMX_MUTABLE_NAMESPACE_PRIVATE ||
-        !romx_utf8_validate(bytes, size, &bad)) return 0;
-    for (index = 0U; index <= size; ++index) {
-        if (index < size && bytes[index] != '/') {
-            if (bytes[index] == '\\') return 0;
-            continue;
-        }
-        if (index == component ||
-            (index - component == 1U && bytes[component] == '.') ||
-            (index - component == 2U && bytes[component] == '.' && bytes[component + 1U] == '.')) return 0;
-        if (object_namespace == ROMX_MUTABLE_NAMESPACE_PRIVATE &&
-            component == 0U && index > 0U && index < size) private_separator = 1;
-        component = index + 1U;
-    }
-    return object_namespace != ROMX_MUTABLE_NAMESPACE_PRIVATE || private_separator;
-}
-
-static int ascii_fold_equal(const char *first, const char *second)
-{
-    for (;;) {
-        unsigned char a = (unsigned char)*first++;
-        unsigned char b = (unsigned char)*second++;
-        if (a >= (unsigned char)'A' && a <= (unsigned char)'Z') a = (unsigned char)(a + 32U);
-        if (b >= (unsigned char)'A' && b <= (unsigned char)'Z') b = (unsigned char)(b + 32U);
-        if (a != b) return 0;
-        if (a == 0U) return 1;
-    }
+    return object_namespace >= ROMX_MUTABLE_NAMESPACE_SAVE &&
+        object_namespace <= ROMX_MUTABLE_NAMESPACE_PRIVATE &&
+        romx_path_valid(key, ROMX_MUTABLE_KEY_CAPACITY) &&
+        (object_namespace != ROMX_MUTABLE_NAMESPACE_PRIVATE ||
+            strchr(key, '/') != NULL);
 }
 
 #if defined(_WIN32)
@@ -139,36 +93,32 @@ static romx_result_t disk_open_locked(const char *path, mutable_disk_t *disk,
     disk->size = (uint64_t)size.QuadPart;
 #else
     struct stat status;
-    struct flock lock;
     disk->descriptor = open(path, O_RDWR);
-    if (disk->descriptor < 0) {
-        int code = errno;
-        return romx_error_set(error, ROMX_E_IO, code,
-            ROMX_OFFSET_UNKNOWN, "failed to open or lock mutable ROMX file");
-    }
-    memset(&lock, 0, sizeof(lock)); lock.l_type = F_WRLCK; lock.l_whence = SEEK_SET;
+    if (disk->descriptor < 0)
+        return romx_error_set(error, ROMX_E_IO, errno,
+            ROMX_OFFSET_UNKNOWN, "failed to open mutable ROMX file");
 #if !defined(ROMX_NO_FCNTL_LOCK)
-    if (fcntl(disk->descriptor, F_SETLKW, &lock) != 0) {
-        int code = errno;
-        close(disk->descriptor);
-        return romx_error_set(error, ROMX_E_IO, code,
-            ROMX_OFFSET_UNKNOWN, "failed to open or lock mutable ROMX file");
+    {
+        struct flock lock;
+        int result;
+        memset(&lock, 0, sizeof(lock));
+        lock.l_type = F_WRLCK;
+        lock.l_whence = SEEK_SET;
+        do { result = fcntl(disk->descriptor, F_SETLKW, &lock); }
+        while (result != 0 && errno == EINTR);
+        if (result != 0) {
+            int code = errno;
+            close(disk->descriptor);
+            return romx_error_set(error, ROMX_E_IO, code,
+                ROMX_OFFSET_UNKNOWN, "failed to lock mutable ROMX file");
+        }
     }
-#else
-    /*
-     * libnx's sdmc devoptab supports read/write file descriptors but does
-     * not implement POSIX byte-range locks.  The caller only exposes this
-     * path for an explicit, serialized frontend operation, so retain the
-     * O_RDWR/fstat checks and let the durable ROMX transaction proceed
-     * without an unavailable advisory lock.
-    */
-    (void)lock;
 #endif
     if (fstat(disk->descriptor, &status) != 0 || status.st_size < 0) {
         int code = errno;
         close(disk->descriptor);
         return romx_error_set(error, ROMX_E_IO, code,
-            ROMX_OFFSET_UNKNOWN, "failed to open or lock mutable ROMX file");
+            ROMX_OFFSET_UNKNOWN, "failed to inspect mutable ROMX file");
     }
     disk->size = (uint64_t)status.st_size;
 #endif
@@ -206,20 +156,9 @@ static romx_result_t disk_read(void *user, uint64_t offset, void *buffer,
     }
 #else
     while (*bytes_read < size) {
-#if defined(ROMX_NO_PREAD)
-        if (offset + *bytes_read > (uint64_t)INT64_MAX ||
-            lseek(disk->descriptor, (off_t)(offset + *bytes_read), SEEK_SET) == (off_t)-1) {
-            return romx_error_set(error, ROMX_E_IO, errno,
-                offset + *bytes_read, "mutable seek failed");
-        }
-        ssize_t count = read(disk->descriptor,
+        ssize_t count = romx_posix_pread(disk->descriptor,
             (uint8_t *)buffer + (size_t)*bytes_read,
-            (size_t)(size - *bytes_read));
-#else
-        ssize_t count = pread(disk->descriptor,
-            (uint8_t *)buffer + (size_t)*bytes_read,
-            (size_t)(size - *bytes_read), (off_t)(offset + *bytes_read));
-#endif
+            romx_posix_io_count(size - *bytes_read), (off_t)(offset + *bytes_read));
         if (count < 0) { if (errno == EINTR) continue; return romx_error_set(error,
             ROMX_E_IO, errno, offset + *bytes_read, "mutable read failed"); }
         if (count == 0) break; *bytes_read += (uint64_t)count;
@@ -257,20 +196,9 @@ static romx_result_t disk_write(mutable_disk_t *disk, uint64_t offset,
     }
 #else
     while (written < size) {
-#if defined(ROMX_NO_PREAD)
-        if (offset + written > (uint64_t)INT64_MAX ||
-            lseek(disk->descriptor, (off_t)(offset + written), SEEK_SET) == (off_t)-1) {
-            return romx_error_set(error, ROMX_E_WRITE, errno,
-                offset + written, "mutable seek failed");
-        }
-        ssize_t count = write(disk->descriptor,
+        ssize_t count = romx_posix_pwrite(disk->descriptor,
             (const uint8_t *)buffer + (size_t)written,
-            (size_t)(size - written));
-#else
-        ssize_t count = pwrite(disk->descriptor,
-            (const uint8_t *)buffer + (size_t)written,
-            (size_t)(size - written), (off_t)(offset + written));
-#endif
+            romx_posix_io_count(size - written), (off_t)(offset + written));
         if (count < 0) { if (errno == EINTR) continue; return romx_error_set(error,
             ROMX_E_WRITE, errno, offset + written, "mutable write failed"); }
         if (count == 0) return ROMX_E_WRITE; written += (uint64_t)count;
@@ -341,14 +269,14 @@ static void build_entry(uint8_t stored[512], uint16_t state,
     size_t key_size = strlen(key);
     uint32_t crc;
     memset(stored, 0, 512U); memcpy(stored, "MENT", 4U);
-    write_le16(stored + 0x04U, state); write_le16(stored + 0x06U, object_namespace);
-    write_le32(stored + 0x0CU, (uint32_t)key_size);
-    write_le64(stored + 0x10U, data_offset); write_le64(stored + 0x18U, data_capacity);
-    write_le64(stored + 0x20U, data_size); write_le64(stored + 0x28U, generation);
-    write_le64(stored + 0x30U, modified); write_le32(stored + 0x38U, data_crc);
+    romx_write_le16(stored + 0x04U, state); romx_write_le16(stored + 0x06U, object_namespace);
+    romx_write_le32(stored + 0x0CU, (uint32_t)key_size);
+    romx_write_le64(stored + 0x10U, data_offset); romx_write_le64(stored + 0x18U, data_capacity);
+    romx_write_le64(stored + 0x20U, data_size); romx_write_le64(stored + 0x28U, generation);
+    romx_write_le64(stored + 0x30U, modified); romx_write_le32(stored + 0x38U, data_crc);
     memcpy(stored + 0x40U, key, key_size);
     crc = romx_crc32_begin(); crc = romx_crc32_update(crc, stored, 512U);
-    crc = romx_crc32_finish(crc); write_le32(stored + 0x3CU, crc);
+    crc = romx_crc32_finish(crc); romx_write_le32(stored + 0x3CU, crc);
 }
 
 static romx_result_t source_crc(const romx_io_t *source, uint64_t size,
@@ -437,7 +365,7 @@ romx_result_t romx_mutable_write_io_path(const char *path,
         const struct romx_mutable_slot *slot = &reader->mutable_slots[index];
         if (slot->usable && slot->state == MUTABLE_STATE_ACTIVE &&
             slot->object.object_namespace == object_namespace &&
-            ascii_fold_equal(slot->object.key, key)) { existing = slot; slot_index = index; break; }
+            romx_ascii_fold_equal(slot->object.key, key)) { existing = slot; slot_index = index; break; }
     }
     if (existing != NULL) {
         data_offset = existing->object.data_offset;
@@ -590,7 +518,7 @@ romx_result_t romx_mutable_delete_path(const char *path,
         const struct romx_mutable_slot *slot = &reader->mutable_slots[index];
         if (slot->usable && slot->state == MUTABLE_STATE_ACTIVE &&
             slot->object.object_namespace == object_namespace &&
-            ascii_fold_equal(slot->object.key, key)) { target = slot; break; }
+            romx_ascii_fold_equal(slot->object.key, key)) { target = slot; break; }
     }
     if (target == NULL) { result = ROMX_E_MUTABLE_ENTRY; goto done; }
     slot_offset = reader->info.mutable_region.offset + UINT64_C(4096) +

@@ -1,5 +1,9 @@
 # ROMX 0.2.0 writer and mutable commit API
 
+The field-level and lifecycle decisions summarized here are cross-referenced
+by the bilingual technical specification drafts and Canvas maps; the frozen
+wire provenance is recorded in `ROMX-0.2.0-PROVENANCE.md`.
+
 ## Immutable container writer
 
 `romx_writer_write_io_entries` and `romx_writer_write_path_entries` create
@@ -11,7 +15,17 @@ The writer streams entry bytes without compression. It physically writes the
 entrypoint first at payload offset zero, writes the remaining entries, builds
 RIDX, then writes optional metadata, optional PNG cover, immutable alignment
 padding, optional mutable capacity, and the 128-byte footer. The completed
-temporary file is published atomically.
+temporary file is published atomically. With `ROMX_WRITER_DURABLE`, POSIX
+builds also flush the containing directory after the rename/link; Windows uses
+file-handle flush plus write-through move and has no portable directory-handle
+durability guarantee.
+
+For an Arcade single-archive container, set the entrypoint format to
+`ROMX_FORMAT_ZIP` and the launch format to `ROMX_LAUNCH_RAW_SINGLE_FILE`.
+Pass the original ZIP as the source entry. The writer copies those bytes
+unchanged; it does not inspect, inflate, recompress, or split ZIP members.
+The existing reader payload I/O, mapping, and extraction APIs are sufficient,
+so this profile does not require a ZIP-specific libromx handle or ABI.
 
 Initialize `romx_writer_options_t` with `ROMX_WRITER_OPTIONS_INIT` and set a
 registered `platform_id` and `launch_format_id`.
@@ -66,19 +80,30 @@ affected slot, but immutable game content remains readable.
 ## SAVE/CHEAT bundles and STATS
 
 `romx_mutable_bundle_write_path_entries` accepts an explicit list of regular
-source files and normalized relative paths. For `SAVE`, the mutable object key
-is one stable logical save-slot label; multiple keys such as `slot-1` and
-`slot-2` can coexist in the same container, and each key gets an independent
-transaction and fixed extent. The explicit paths under one call form the
-multi-file contents of that one slot. The key is not a host path. The function
+source files and ROMX 0.2.0 canonical relative paths (well-formed UTF-8 with
+ASCII-only collision folding). For `SAVE`, multiple object keys
+can coexist in the same container, and each key gets an independent
+transaction and fixed extent. The explicit paths under one call form one
+bundle; the platform profile may project one or more logical save slots from
+it. The key is not a host path. The function
 sorts paths canonically, rejects traversal, case-folding collisions, symlinks
 and non-regular files, and streams an uncompressed `RMBL` object through the
 existing durable mutable transaction. It does not create a tar file or scan a
 directory.
 
+For host imports, `romx_save_catalog_open_path` is the library-owned scan and
+grouping layer. Its 3DS profile treats each direct child directory as one
+candidate and keeps all regular files below that directory together; direct
+files remain separate candidates. `romx_save_catalog_write_candidate` feeds
+the selected candidate to the same durable RMBL writer, so a GUI does not
+need a second directory walker or a second grouping implementation. Source
+format labels are descriptive; wrapping a Gateway file does not decrypt it.
+
 `romx_mutable_bundle_open` validates the selected outer object CRC32, bundle
 header, directory, path table, zero padding, and every file CRC32 before
-exposing entries. The bundle borrows its reader. The bundle `entry_count` is
+exposing entries. The bundle borrows its reader, and its entry reads are
+cursor-backed; serialize `romx_mutable_bundle_read_entry` calls or open one
+bundle handle per consumer thread. The bundle `entry_count` is
 the number of files in the whole bundle, not the number of SAVE slots;
 `romx_mutable_save_slot_info_t.entry_count` is the number of files in one
 selected slot. Enumerate
@@ -87,11 +112,21 @@ selected slot. Enumerate
 `ROMX_MUTABLE_NAMESPACE_SAVE`. For each bundle, call
 `romx_mutable_bundle_get_save_slot_count`, `romx_mutable_bundle_get_save_slot`,
 and `romx_mutable_bundle_get_save_slot_entry` to expose the platform-aware slot
-projection defined by the ROMX specification: PSP groups files by top-level
-directory, while other ROMX 0.2.0 platforms expose one slot per bundle file.
+projection defined by the ROMX specification: PSP groups only directories
+whose `PARAM.SFO` contains a valid `DISC_ID` or matching
+`SAVEDATA_DIRECTORY`, 3DS groups entries below each first-level directory,
+and other ROMX 0.2.0 platforms expose one slot per bundle file.
+
+`romx_mutable_psp_savedata_inspect_sfo` applies the same PSP identity check to
+caller-provided SFO bytes before an adapter imports a local directory. It does
+not choose frontend paths; the host-side directory scan is provided by the
+SAVE catalog above.
 
 `romx_mutable_stats_serialize_json` and `romx_mutable_stats_parse_json`
 implement the strict `romx.stats` version 1 schema.
 `romx_mutable_stats_write_path` serializes and commits it in one operation.
+`romx_mutable_stats_merge_session_delta` combines a freshly read baseline with
+the current frontend session delta without allowing stale absolute counters to
+overwrite newer data.
 SAVE, CHEAT, STATS, and PRIVATE remain separate mutable objects with independent
 fixed extents; one namespace cannot borrow another object's capacity.

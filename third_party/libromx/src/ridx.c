@@ -8,78 +8,6 @@ typedef struct romx_range {
     uint64_t end;
 } romx_range_t;
 
-static uint16_t read_le16(const uint8_t *bytes)
-{
-    return (uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
-}
-
-static uint32_t read_le32(const uint8_t *bytes)
-{
-    return (uint32_t)bytes[0]
-        | ((uint32_t)bytes[1] << 8)
-        | ((uint32_t)bytes[2] << 16)
-        | ((uint32_t)bytes[3] << 24);
-}
-
-static uint64_t read_le64(const uint8_t *bytes)
-{
-    uint64_t value = UINT64_C(0);
-    unsigned int index;
-    for (index = 0U; index < 8U; ++index) {
-        value |= (uint64_t)bytes[index] << (index * 8U);
-    }
-    return value;
-}
-
-static int bytes_are_zero(const uint8_t *bytes, size_t size)
-{
-    size_t index;
-    for (index = 0U; index < size; ++index) {
-        if (bytes[index] != 0U) return 0;
-    }
-    return 1;
-}
-
-static int path_is_valid(const uint8_t *path, size_t size)
-{
-    size_t index;
-    size_t component_start = 0U;
-    size_t bad_offset = 0U;
-
-    if (size == 0U || path[0] == (uint8_t)'/' || path[size - 1U] == (uint8_t)'/' ||
-        !romx_utf8_validate(path, size, &bad_offset)) {
-        return 0;
-    }
-    for (index = 0U; index <= size; ++index) {
-        if (index < size && path[index] != (uint8_t)'/') {
-            if (path[index] == UINT8_C(0) || path[index] == (uint8_t)'\\') return 0;
-            continue;
-        }
-        if (index == component_start ||
-            (index - component_start == 1U && path[component_start] == (uint8_t)'.') ||
-            (index - component_start == 2U && path[component_start] == (uint8_t)'.' &&
-             path[component_start + 1U] == (uint8_t)'.')) {
-            return 0;
-        }
-        component_start = index + 1U;
-    }
-    return 1;
-}
-
-static int ascii_fold_equal(const char *first, const char *second)
-{
-    size_t index = 0U;
-    for (;;) {
-        unsigned char a = (unsigned char)first[index];
-        unsigned char b = (unsigned char)second[index];
-        if (a >= (unsigned char)'A' && a <= (unsigned char)'Z') a = (unsigned char)(a + 32U);
-        if (b >= (unsigned char)'A' && b <= (unsigned char)'Z') b = (unsigned char)(b + 32U);
-        if (a != b) return 0;
-        if (a == 0U) return 1;
-        ++index;
-    }
-}
-
 static int range_compare(const void *left, const void *right)
 {
     const romx_range_t *a = (const romx_range_t *)left;
@@ -104,7 +32,7 @@ static romx_result_t region_is_zero(const romx_reader_t *reader,
                 buffer, count, error);
             if (result != ROMX_OK) return result;
         }
-        if (!bytes_are_zero(buffer, (size_t)count)) {
+        if (!romx_bytes_zero(buffer, (size_t)count)) {
             return romx_error_set(error, ROMX_E_INDEX, 0, offset + position,
                 "unindexed payload or alignment bytes must be zero");
         }
@@ -136,15 +64,15 @@ romx_result_t romx_parse_ridx(romx_reader_t *reader, romx_error_t *error)
     result = romx_read_exact(reader, reader->info.payload.size,
         header, sizeof(header), error);
     if (result != ROMX_OK) return result;
-    if (memcmp(header, "RIDX", 4U) != 0 || read_le16(header + 0x04U) != UINT16_C(1) ||
-        read_le16(header + 0x06U) != ROMX_RIDX_HEADER_SIZE ||
-        read_le32(header + 0x0CU) != ROMX_RIDX_ENTRY_SIZE ||
-        read_le32(header + 0x10U) != UINT32_C(0) ||
-        !bytes_are_zero(header + 0x18U, 40U)) {
+    if (memcmp(header, "RIDX", 4U) != 0 || romx_read_le16(header + 0x04U) != UINT16_C(1) ||
+        romx_read_le16(header + 0x06U) != ROMX_RIDX_HEADER_SIZE ||
+        romx_read_le32(header + 0x0CU) != ROMX_RIDX_ENTRY_SIZE ||
+        romx_read_le32(header + 0x10U) != UINT32_C(0) ||
+        !romx_bytes_zero(header + 0x18U, 40U)) {
         return romx_error_set(error, ROMX_E_INDEX, 0, reader->info.payload.size,
             "RIDX header fields are invalid");
     }
-    entry_count = read_le32(header + 0x08U);
+    entry_count = romx_read_le32(header + 0x08U);
     if (entry_count == UINT32_C(0)) {
         return romx_error_set(error, ROMX_E_INDEX, 0,
             reader->info.payload.size + 0x08U, "RIDX must contain at least one entry");
@@ -173,7 +101,7 @@ romx_result_t romx_parse_ridx(romx_reader_t *reader, romx_error_t *error)
     result = romx_read_exact(reader, reader->info.payload.size,
         index_bytes, index_size, error);
     if (result != ROMX_OK) goto done;
-    expected_crc = read_le32(index_bytes + 0x14U);
+    expected_crc = romx_read_le32(index_bytes + 0x14U);
     memset(index_bytes + 0x14U, 0, 4U);
     actual_crc = romx_crc32_begin();
     actual_crc = romx_crc32_update(actual_crc, index_bytes, (size_t)index_size);
@@ -191,19 +119,19 @@ romx_result_t romx_parse_ridx(romx_reader_t *reader, romx_error_t *error)
         uint32_t other;
         entry->struct_size = (uint32_t)sizeof(*entry);
         entry->index = position;
-        entry->flags = read_le32(stored + 0x00U);
-        entry->format_id = read_le16(stored + 0x04U);
-        entry->path_size = read_le16(stored + 0x06U);
-        entry->data_offset = read_le64(stored + 0x08U);
-        entry->data_size = read_le64(stored + 0x10U);
-        entry->crc32 = read_le32(stored + 0x18U);
+        entry->flags = romx_read_le32(stored + 0x00U);
+        entry->format_id = romx_read_le16(stored + 0x04U);
+        entry->path_size = romx_read_le16(stored + 0x06U);
+        entry->data_offset = romx_read_le64(stored + 0x08U);
+        entry->data_size = romx_read_le64(stored + 0x10U);
+        entry->crc32 = romx_read_le32(stored + 0x18U);
         if ((entry->flags & ~ROMX_RIDX_FLAGS_MASK) != UINT32_C(0) ||
-            read_le32(stored + 0x1CU) != UINT32_C(0) ||
+            romx_read_le32(stored + 0x1CU) != UINT32_C(0) ||
             entry->path_size == UINT32_C(0) ||
             entry->path_size > ROMX_RIDX_PATH_CAPACITY ||
-            !bytes_are_zero(stored + 0x20U + entry->path_size,
+            !romx_bytes_zero(stored + 0x20U + entry->path_size,
                 ROMX_RIDX_PATH_CAPACITY - entry->path_size) ||
-            !path_is_valid(stored + 0x20U, entry->path_size)) {
+            !romx_path_bytes_valid(stored + 0x20U, entry->path_size)) {
             result = romx_error_set(error, ROMX_E_VIRTUAL_PATH, 0,
                 reader->info.payload.size + ROMX_RIDX_HEADER_SIZE +
                 (uint64_t)position * ROMX_RIDX_ENTRY_SIZE,
@@ -248,7 +176,7 @@ romx_result_t romx_parse_ridx(romx_reader_t *reader, romx_error_t *error)
             goto done;
         }
         for (other = 0U; other < position; ++other) {
-            if (ascii_fold_equal(entry->path, reader->entries[other].path)) {
+            if (romx_ascii_fold_equal(entry->path, reader->entries[other].path)) {
                 result = romx_error_set(error, ROMX_E_VIRTUAL_PATH, 0,
                     reader->info.payload.size + ROMX_RIDX_HEADER_SIZE +
                     (uint64_t)position * ROMX_RIDX_ENTRY_SIZE + 0x20U,

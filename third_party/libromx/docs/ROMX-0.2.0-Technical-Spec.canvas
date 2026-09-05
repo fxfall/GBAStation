@@ -1,0 +1,379 @@
+{
+  "nodes": [
+    {
+      "id": "romx-center",
+      "type": "text",
+      "x": 1700,
+      "y": 0,
+      "width": 1100,
+      "height": 320,
+      "text": "# ROMX 0.2.0\nTechnical specification map\n\nEvidence boundary: libromx source/headers/tests + /Volumes/Repositories/romx specification and fixtures\n\n[SPEC] wire=2 · RIDX=1 · metadata schema=0.2.0\n[IMPLEMENTATION] reader / writer / mutable / bundle / SAVE slot projection / STATS / C ABI\n[TEST EVIDENCE] test_v2 + test_writer_mutable + reference manifests\n[RESOLVED] provenance pinned; ASCII fold profile; registry status; unknown-platform fallback; salvage out of scope; power-loss protocol"
+    },
+    {
+      "id": "scope",
+      "type": "text",
+      "x": 0,
+      "y": 600,
+      "width": 1000,
+      "height": 760,
+      "text": "## 1 Scope, goals, non-goals\n\n[SPEC] Container stores the original payload, RIDX, optional metadata/PNG, optional fixed-capacity mutable region, and a 128-byte footer.\n[SPEC] It does not start emulators or define frontend directories, LPL, cloud sync, compression, encryption, patching, or automatic growth.\n[IMPLEMENTATION] C99 core; C++ is an optional wrapper; probe is optional identification assistance.\n[RESOLVED][SPEC][TEST EVIDENCE] Adjacent specification/schema/fixtures remain external; source commit and SHA-256 hashes are pinned in the provenance record installed with the release."
+    },
+    {
+      "id": "layout",
+      "type": "text",
+      "x": 1200,
+      "y": 600,
+      "width": 1000,
+      "height": 900,
+      "text": "## 2 Top-level physical layout\n\n[SPEC] offset 0: payload → RIDX → metadata? → cover? → zero immutable padding? → mutable? → footer.\n[IMPLEMENTATION] RIDX is derived from payload_size; mutable starts at footer_offset−capacity; without mutable, immutable end is the footer offset.\n\nRegions:\n- payload: offset 0, >0\n- RIDX: 64 + entry_count×512\n- metadata/cover: contiguous optional regions\n- padding: zero bytes only, 4096-aligned before mutable\n- mutable: fixed capacity, ≥12288, multiple of 4096\n- footer: final 128 bytes"
+    },
+    {
+      "id": "footer",
+      "type": "text",
+      "x": 2400,
+      "y": 600,
+      "width": 1000,
+      "height": 1080,
+      "text": "## 3 Footer · 128 bytes\n\n[SPEC][IMPLEMENTATION] All integers are little-endian; CRC calculation treats 0x50..53 as zero.\n\n0x00/4 magic ROMX; 0x04/4 wire_version=2; 0x08/8 payload_size; 0x10/8 metadata_size; 0x18/8 cover_size; 0x20/8 mutable_capacity; 0x28/2 platform_id; 0x2A/2 launch_format_id; 0x2C/4 hash_algorithm (0/1); 0x30/32 immutable_sha256; 0x50/4 footer_crc32; 0x54/44 reserved=0.\n\n[SPEC] SHA covers immutable [0, mutable_offset) or [0, footer_offset).\n[IMPLEMENTATION] Checks magic/version/ranges/hash/reserved/CRC; rejects 0xFFFF.\n[RESOLVED][IMPLEMENTATION] Registry status APIs classify KNOWN, UNSPECIFIED, UNKNOWN, PRIVATE and PROHIBITED; unknown nonzero IDs are numerically readable but unsupported."
+    },
+    {
+      "id": "ridx",
+      "type": "text",
+      "x": 3600,
+      "y": 600,
+      "width": 1000,
+      "height": 1240,
+      "text": "## 4 Payload / RIDX\n\n[SPEC] Payload is not compressed, encrypted, or rewritten; entry ranges stay inside the payload; unindexed gaps must be zero.\n\nRIDX header 64B:\nmagic RIDX | version=1 | header_size=64 | entry_count≥1 | entry_size=512 | flags=0 | index_crc32 (field zeroed while calculating) | reserved=0.\n\nEntry 512B: flags (bit0 entrypoint, bit1 CRC); format_id; path_size 1..480; data_offset/data_size; crc32; reserved; path bytes.\n[SPEC] Exactly one entrypoint, offset=0, size>0; single-file=1 entry covering payload, multi-file=count>1.\n[IMPLEMENTATION] Validates header/CRC/path/range/overlap/gap/bounds.\n[RESOLVED][SPEC][IMPLEMENTATION] Valid UTF-8 is preserved byte-for-byte for non-ASCII; collision folding is ASCII A–Z only. Full Unicode normalization/folding is a future profile."
+    },
+    {
+      "id": "metadata",
+      "type": "text",
+      "x": 0,
+      "y": 2100,
+      "width": 1000,
+      "height": 1120,
+      "text": "## 5 Metadata\n\n[SPEC] Strict UTF-8, no BOM, RFC 8259 JSON, unique keys at every depth; schema_version=0.2.0 and name are required.\n[SPEC][IMPLEMENTATION] Optional schema fields: serial/origin/category≤128; developer/publisher/franchise/language/enhancement_hw≤256; media≤64; description≤32768; genre/region≤32 items; users 1..255; coop/rumble/analog booleans; release_date; dump_status; crc32/origin_crc32 as 8 hex; cover image/png with 1..8192 dimensions.\n[SPEC] Do not store offsets, host paths, launch paths, external cover paths, or platform/launch declarations; footer/RIDX are physical/launch authority.\n[IMPLEMENTATION] metadata open/get/copy, default limit 1MiB; missing/oversize/UTF-8/JSON/schema failures are layered.\n[RESOLVED][SPEC][TEST EVIDENCE] Schema source commit and SHA-256 are pinned in the provenance record; release documentation identifies the exact external schema input."
+    },
+    {
+      "id": "cover",
+      "type": "text",
+      "x": 1200,
+      "y": 2100,
+      "width": 1000,
+      "height": 900,
+      "text": "## 6 Cover\n\n[SPEC] One PNG: IHDR first and unique; IDAT contiguous; IEND zero-length and last; validate chunk bounds/CRC, legal color/depth, PLTE, and unknown critical chunks.\n[IMPLEMENTATION] src/png.c performs streaming validation; default max size=32MiB and max dimension=8192; returns width/height.\n[SPEC] Invalid cover may be reported/ignored while payload/RIDX remain accessible.\n[TEST EVIDENCE] single-complete has a 70-byte one-pixel PNG; reader validation and writer/probe tests cover it.\n[RESOLVED][SPEC][IMPLEMENTATION] Wire/API scope ends at PNG validation and extraction. Conversion, color management, resizing and display policy belong to an optional caller adapter."
+    },
+    {
+      "id": "mutable",
+      "type": "text",
+      "x": 2400,
+      "y": 2100,
+      "width": 1000,
+      "height": 1240,
+      "text": "## 7 Mutable region\n\n[SPEC][IMPLEMENTATION] RMUT header 4096B: magic/version=1/header=4096/entry=512/capacity (≥8 and multiple of 8)/directory 4096+N×512/data area 4096-aligned/flags=0/header CRC/reserved=0.\n\nMENT entry 512B: magic, state ACTIVE=1/WRITING=2/DELETING=3, namespace SAVE=1/CHEAT=2/STATS=3/PRIVATE=4, key_size≤448, data_offset 64-aligned, capacity/size, generation, modified UTC, data_crc32, entry_crc32, key.\n\n[SPEC] identity=(namespace,key) is unique; extents do not overlap; PRIVATE key carries producer/; no-space never modifies immutable data.\n[IMPLEMENTATION] Bad header=INVALID, bad slot=DEGRADED; ACTIVE is exposed only after data CRC; no relocation/growth/compaction.\n[RESOLVED][SPEC][IMPLEMENTATION] Key collision folding is ASCII A–Z; non-ASCII bytes are preserved. Public lifecycle rules define concurrent reads versus exclusive cursors."
+    },
+    {
+      "id": "commit",
+      "type": "text",
+      "x": 3600,
+      "y": 2100,
+      "width": 1000,
+      "height": 900,
+      "text": "## 8 Mutable commit protocol\n\n[SPEC][IMPLEMENTATION] Write: durable WRITING entry → write data + durable data CRC → durable ACTIVE entry (commit point).\n\n[SPEC][IMPLEMENTATION] Delete: durable DELETING → zero the slot durably. WRITING/DELETING are hidden; the affected object may become invalid, while immutable payload/RIDX/footer stay unchanged.\n\n[IMPLEMENTATION] POSIX fcntl locks + pwrite/fsync; Windows LockFileEx + FlushFileBuffers. Closing a reader does not auto-recover, sync, or write back.\n[TEST EVIDENCE] Generation 1→2, capacity reuse, delete, tampered data/header and intermediate-state visibility are covered.\n[RESOLVED][TEST EVIDENCE] Real power-cut recovery is a platform release-acceptance test; it does not introduce a new wire state."
+    },
+    {
+      "id": "bundle",
+      "type": "text",
+      "x": 0,
+      "y": 3600,
+      "width": 1000,
+      "height": 1120,
+      "text": "## 9.2 RMBL SAVE / CHEAT bundle\n\nRMBL header 64B: magic/version=1/header=64/namespace/flags=0/entry_size=64/count/directory=64/path_table=64+N×64/data_offset 64-aligned/bundle_size/header CRC/reserved.\n\nEntry 64B: path_offset/path_size 1..1024/flags=0/data_offset 64-aligned/data_size/data_crc32/reserved.\n\n[SPEC] Paths are packed, sorted by unsigned UTF-8, and unique under ASCII fold; padding=0; reject symlinks, absolute paths, `.`, `..`, and conflicts.\n[IMPLEMENTATION] Checks regular files and CRC, exposes only after full validation, and commits the outer object through mutable protocol; SAVE projection is described by the adjacent slot-model node.\n[SPEC] Staging/restore/atomic replacement uses listed target paths as transaction boundary and cannot replace a shared host root.\n[IMPLEMENTATION] C API does not scan directories or perform host restore; an adapter owns staging and target selection."
+    },
+    {
+      "id": "stats",
+      "type": "text",
+      "x": 1200,
+      "y": 3600,
+      "width": 1000,
+      "height": 1040,
+      "text": "## 10 STATS JSON profile\n\n[SPEC][IMPLEMENTATION] ≤16384B, strict UTF-8, no BOM/duplicates/unknown fields/floats/trailing data; schema=romx.stats, version=1.\n\nFields: play_time_seconds, launch_count, first/last_played_unix_seconds, favorite, completed, completion_percent 0..100, achievements (unlocked,total,hardcore_unlocked). Safe integers≤9007199254740991, unlocked≤total, first≤last.\n\n[IMPLEMENTATION] Parse/serialize/read/write; compact fixed-order output, while reads allow order/whitespace variation.\n[RESOLVED][SPEC][IMPLEMENTATION][TEST EVIDENCE] romx_mutable_stats_merge_session_delta() checks counter overflow, takes minimum first and maximum last timestamps, and applies session user-state/achievement summaries to the latest generation."
+    },
+    {
+      "id": "save-slots",
+      "type": "text",
+      "x": 4800,
+      "y": 5000,
+      "width": 1000,
+      "height": 1080,
+      "text": "## 9.1 SAVE slot model\n\n[SPEC] SAVE has zero or more logical slots; each ACTIVE SAVE object commits independently; one RMBL object may project multiple slots; slot order is not encoded by the container.\n[IMPLEMENTATION] src/mutable_bundle.c reads footer platform_id/launch_format_id and exposes romx_mutable_bundle_get_save_slot*.\n[SPEC][IMPLEMENTATION] PSP: only a directory with valid PARAM.SFO identity is a slot; valid DISC_ID, or SAVEDATA_DIRECTORY matching the directory basename, is sufficient; all files below that directory belong to the slot.\n[SPEC][IMPLEMENTATION] Registered, UNSPECIFIED and unknown platforms use one slot per complete normalized relative path; directories do not imply grouping.\n[IMPLEMENTATION] romx_mutable_psp_savedata_inspect_sfo parses caller bytes only; bounded PSF v1.01 tables/records and identity rules are checked.\n[TEST EVIDENCE] test_writer_mutable covers ordinary projection slots, PSP directory slots and slot-entry lookup.\n[RESOLVED][SPEC][IMPLEMENTATION] Nested valid PSP roots use the longest matching valid root; unknown-platform fallback is conservative per-file projection."
+    },
+    {
+      "id": "reader",
+      "type": "text",
+      "x": 2400,
+      "y": 3600,
+      "width": 1000,
+      "height": 1000,
+      "text": "## 11 Reader access model\n\n[IMPLEMENTATION] open: get_size → read final footer → parse footer/RIDX/mutable; structural checks run at open, while hash/metadata/cover/entry CRC are opt-in validation flags.\n[IMPLEMENTATION] get_info, entry lookup, positional read, payload IO view, map, materialize/extract, VFS, payload_file.\n[IMPLEMENTATION] metadata/VFS/payload IO/mapping/mutable cursor borrow the reader; reader must close last.\n[SPEC] Metadata/cover/mutable may degrade without affecting immutable payload.\n[RESOLVED][IMPLEMENTATION] Metadata and positional reads may be concurrent when the caller's read_at is thread-safe. Seek cursors, payload IO cursors and bundles are stateful and must not be shared concurrently; custom IO synchronization is caller-owned."
+    },
+    {
+      "id": "writer",
+      "type": "text",
+      "x": 3600,
+      "y": 3600,
+      "width": 1000,
+      "height": 980,
+      "text": "## 12 Writer behavior\n\n[IMPLEMENTATION] Validates entries/paths/IO and exactly one nonempty entrypoint; writes the entrypoint first at offset 0; streams payload, RIDX, metadata, cover, padding, RMUT, and footer.\n[IMPLEMENTATION] Optional entry CRC32, immutable SHA-256, probe, and durable mode; temporary + exclusive create + atomic publish; replacement is explicit.\n[SPEC] Payload bytes are preserved; mutable capacity is fixed and never grows automatically.\n[TEST EVIDENCE] Multi-entry CUE, metadata, cover/probe, CRC, SHA, and mutable writer tests.\n[RESOLVED][IMPLEMENTATION][TEST EVIDENCE] Durable publish fsyncs the temporary file and parent directory after POSIX rename/link; Windows uses FlushFileBuffers and write-through replacement. The contract is file-level durability; host filesystem acceptance remains platform-specific."
+    },
+    {
+      "id": "errors",
+      "type": "text",
+      "x": 0,
+      "y": 5000,
+      "width": 1000,
+      "height": 980,
+      "text": "## 13 Error codes and degradation\n\n[IMPLEMENTATION] INVALID_ARGUMENT/OOM/IO/TRUNCATED/RANGE/WRITE/ATOMIC_RENAME/EXISTS/BUFFER_TOO_SMALL; INVALID_FOOTER/FLAGS/INDEX/OVERLAP/UNSUPPORTED; IMMUTABLE_HASH/ENTRY_CRC/EXTRACT_HASH; METADATA_*; COVER_*; VIRTUAL_PATH/ENTRY_NOT_FOUND; MUTABLE_*.\n\n[SPEC] Structural errors fail closed; metadata/cover degrade independently; mutable-layout errors make mutable unavailable only; one object CRC does not affect immutable data.\n[IMPLEMENTATION] romx_error={code,system_code,byte_offset,message[256]}; every API returns an error and never exits the process.\n[RESOLVED][SPEC][IMPLEMENTATION] Salvage is outside libromx 0.2.0; no public salvage handle, mutable write-back or auto-launch path exists."
+    },
+    {
+      "id": "security",
+      "type": "text",
+      "x": 1200,
+      "y": 5000,
+      "width": 1000,
+      "height": 920,
+      "text": "## 14 Security and robustness\n\n[SPEC][IMPLEMENTATION] Check offset/count addition and multiplication overflow; reject reads past footer, overlap, nonzero reserved fields, and nonzero padding.\n[SPEC][IMPLEMENTATION] Reject absolute paths, ., .., empty components, backslashes, and NUL; bundle sources reject symlink/reparse points.\n[IMPLEMENTATION] Defaults: metadata 1MiB, cover 32MiB/8192px, STATS 16KiB, bundle 128MiB/4096 entries; limits are configurable.\n[IMPLEMENTATION] Exclusive temporary files + atomic publish; layered CRC/hash validation.\n[RESOLVED][IMPLEMENTATION] Header concurrency is explicit: concurrent positional reads need thread-safe IO; mutable cursors and bundle handles require exclusive ownership."
+    },
+    {
+      "id": "compat",
+      "type": "text",
+      "x": 2400,
+      "y": 5000,
+      "width": 1000,
+      "height": 880,
+      "text": "## 15 Versions and compatibility\n\n[SPEC] ROMX 0.2.0 / footer wire 2 / RIDX 1 / metadata 0.2.0 / RMUT 1 / RMBL 1 / STATS 1. Reserved fields are zero.\n[SPEC] Unknown nonzero platform/format IDs may be read but are unsupported; 0xFFFF is forbidden; 0x8000..0xFFFE are private registrations.\n[RESOLVED][SPEC][IMPLEMENTATION] Future wire/component versions fail closed. Registry APIs distinguish KNOWN, UNSPECIFIED, UNKNOWN, PRIVATE and PROHIBITED; UNSPECIFIED/unknown SAVE projection is one file per complete bundle-relative path."
+    },
+    {
+      "id": "tests",
+      "type": "text",
+      "x": 3600,
+      "y": 5000,
+      "width": 1000,
+      "height": 980,
+      "text": "## 16 Conformance matrix\n\n[TEST EVIDENCE] minimal-single: single file/no optional areas; single-complete: metadata+PNG+12KiB mutable+SHA; multi-cue: CUE/BIN/3 entries/CRC.\n[TEST EVIDENCE] test_v2: VFS, payload IO/map, entry CRC, metadata, mutable CRC/hash boundary.\n[TEST EVIDENCE] test_writer_mutable: writer, generation/delete, bundle, ordinary per-file SAVE slots, PSP PARAM.SFO directory slots, slot member lookup, STATS, probe, collision.\n[TEST EVIDENCE] Frozen fixture provenance is pinned externally; malformed magic/truncation/CRC/overlap/traversal cases are covered by the adjacent fixture set.\n[RESOLVED][TEST EVIDENCE] Intermediate WRITING/DELETING, unknown-platform fallback, strict SFO profile, STATS merge/overflow and registry status tests are in the current suite; real power cut is platform acceptance."
+    },
+    {
+      "id": "api",
+      "type": "text",
+      "x": 0,
+      "y": 6300,
+      "width": 1000,
+      "height": 820,
+      "text": "## API families and lifetimes\n\n[IMPLEMENTATION] reader open/get/validate/read; VFS/payload_file cursor; metadata copy/get; mapping; extract; mutable object/file; RMBL bundle; SAVE slot projection; PSP SFO inspect; STATS; probe; writer; registry.\n\n[IMPLEMENTATION] Input/IO/truncation/CRC/structure failures return romx_result_t + romx_error_t; output structs require struct_size first; borrowed objects close before the reader; close releases opaque handles.\n[RESOLVED][IMPLEMENTATION] Registry status queries and romx_mutable_stats_merge_session_delta() are public. The C++ layer is optional move-only RAII for common operations and does not replace the C ABI.\n\nSee the interface table in section 11 of the draft."
+    },
+    {
+      "id": "diff",
+      "type": "text",
+      "x": 1200,
+      "y": 6300,
+      "width": 1000,
+      "height": 900,
+      "text": "## 17 Implementation versus the frozen standard\n\n[RESOLVED] Provenance: source commit and fixture/schema hashes are pinned and installed in release records.\n[RESOLVED] Text identity: valid UTF-8, non-ASCII preserved, ASCII A–Z folding; full Unicode profile is future work.\n[RESOLVED] Registry: explicit KNOWN/UNSPECIFIED/UNKNOWN/PRIVATE/PROHIBITED statuses; unknown nonzero values are readable but unsupported.\n[RESOLVED] Salvage: outside the normal reader and fail-closed API.\n[RESOLVED] SAVE projection: UNSPECIFIED/unknown per-file; nested PSP uses the longest valid SFO root.\n[RESOLVED] PSP SFO: bounded PSF v1.01 grammar and malformed-table rejection.\n[RESOLVED] Slot ABI: struct_size gates in-memory extension, not wire fields.\n[RESOLVED] STATS: public checked session-delta merge with timestamp min/max and summary overwrite.\n[RESOLVED] Mutable interruption: durable WRITING/DELETING protocol; intermediate states hidden.\n[RESOLVED] Durable publish: POSIX parent-directory fsync and Windows file-level write-through.\n[RESOLVED] Payload SHA: derived extraction self-check only.\n[RESOLVED] Threading: positional reads require thread-safe IO; cursors/bundles are exclusive.\n[RESOLVED] C++ scope: optional move-only RAII convenience, not the full C ABI.\n[RESOLVED] Compiler portability: GCC/Clang/MSVC warning failures are fixed and strict builds pass."
+    },
+    {
+      "id": "fixtures",
+      "type": "text",
+      "x": 2400,
+      "y": 6300,
+      "width": 1000,
+      "height": 860,
+      "text": "## Frozen-fixture evidence\n\n[TEST EVIDENCE] /Volumes/Repositories/romx/tests/fixtures/README_CN.md: the reference generator creates deterministic ROMX 0.2.0 files.\n\nminimal-single: file_size 25296, payload 24592, RIDX 576, footer 128.\nsingle-complete: metadata 68, cover 70, mutable 12288, immutable SHA.\nmulti-cue: payload 4231, RIDX 1600, CUE entrypoint 135B + 2 BIN.\n\n[RESOLVED][TEST EVIDENCE] Source commit, generator inputs and fixture SHA-256 values are pinned in ROMX-0.2.0-PROVENANCE.md."
+    },
+    {
+      "id": "pending",
+      "type": "text",
+      "x": 3600,
+      "y": 6300,
+      "width": 1000,
+      "height": 980,
+      "text": "## Resolved release-gate decisions\n\n1. [RESOLVED] Standard/schema/fixture provenance is pinned by commit and SHA-256.\n2. [RESOLVED] UTF-8 is preserved; collision folding is ASCII A–Z; full Unicode is future profile.\n3. [RESOLVED] Registry statuses and unknown-ID readable-but-unsupported behavior are public.\n4. [RESOLVED] UNSPECIFIED/unknown SAVE projection is one file per path.\n5. [RESOLVED] Nested PSP ownership uses the longest valid SFO root; PSF v1.01 grammar is bounded.\n6. [RESOLVED] Salvage is outside the normal 0.2.0 API.\n7. [RESOLVED] STATS session-delta merge is implemented and tested.\n8. [RESOLVED] Bundle host restore remains an adapter responsibility.\n9. [RESOLVED] Durable WRITING/DELETING protocol is frozen; intermediate states are tested.\n10. [RESOLVED] POSIX parent-directory fsync and Windows file-level durability are specified.\n11. [RESOLVED] Payload SHA is a derived extraction self-check only.\n12. [RESOLVED] Concurrent reads require thread-safe IO; cursors/bundles are exclusive.\n13. [RESOLVED] C++ wrapper scope is optional move-only RAII for common operations.\n14. [RESOLVED] Unknown platform uses conservative one-file-per-slot projection.\n15. [RESOLVED] Compiler warning and strict portability issues are fixed."
+    }
+  ],
+  "edges": [
+    {
+      "id": "e-center-scope",
+      "fromNode": "romx-center",
+      "toNode": "scope",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-center-layout",
+      "fromNode": "romx-center",
+      "toNode": "layout",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-center-footer",
+      "fromNode": "romx-center",
+      "toNode": "footer",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-center-ridx",
+      "fromNode": "romx-center",
+      "toNode": "ridx",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-layout-metadata",
+      "fromNode": "layout",
+      "toNode": "metadata",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-layout-cover",
+      "fromNode": "layout",
+      "toNode": "cover",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-footer-mutable",
+      "fromNode": "footer",
+      "toNode": "mutable",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-bundle-tests",
+      "fromNode": "bundle",
+      "toNode": "tests",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-metadata-cover",
+      "fromNode": "metadata",
+      "toNode": "cover",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-cover-mutable",
+      "fromNode": "cover",
+      "toNode": "mutable",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-mutable-commit",
+      "fromNode": "mutable",
+      "toNode": "commit",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-bundle-save-slots",
+      "fromNode": "bundle",
+      "toNode": "save-slots",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-save-slots-tests",
+      "fromNode": "save-slots",
+      "toNode": "tests",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "e-writer-tests",
+      "fromNode": "writer",
+      "toNode": "tests",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-bundle-stats",
+      "fromNode": "bundle",
+      "toNode": "stats",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-stats-reader",
+      "fromNode": "stats",
+      "toNode": "reader",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-reader-writer",
+      "fromNode": "reader",
+      "toNode": "writer",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-writer-security",
+      "fromNode": "writer",
+      "toNode": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-errors-security",
+      "fromNode": "errors",
+      "toNode": "security",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-security-compat",
+      "fromNode": "security",
+      "toNode": "compat",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-compat-tests",
+      "fromNode": "compat",
+      "toNode": "tests",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-tests-fixtures",
+      "fromNode": "tests",
+      "toNode": "fixtures",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-tests-diff",
+      "fromNode": "tests",
+      "toNode": "diff",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "e-api-diff",
+      "fromNode": "api",
+      "toNode": "diff",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "e-fixtures-pending",
+      "fromNode": "fixtures",
+      "toNode": "pending",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ]
+}

@@ -6,6 +6,13 @@
 
 #include <romx/romx.h>
 #include "json_internal.h"
+#include "binary_internal.h"
+#include "path_internal.h"
+
+/* Capability flags are selected by the embedding application's toolchain. */
+#if defined(ROMX_DISABLE_MMAP) && !defined(ROMX_NO_MMAP)
+#define ROMX_NO_MMAP 1
+#endif
 
 struct romx_mutable_slot {
     romx_mutable_object_info_t object;

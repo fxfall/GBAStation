@@ -1,5 +1,31 @@
 #include "json_internal.h"
 
+int romx_json_object_has_unique_keys(const romx_json_document_t *json,
+    int object)
+{
+    int first = -1;
+    if (object < 0 || (size_t)object >= json->token_count ||
+        json->tokens[object].type != ROMX_JSON_OBJECT) return 0;
+    for (;;) {
+        int first_value, second;
+        first = romx_json_next_direct_child(json, object, first);
+        if (first < 0) return 1;
+        first_value = romx_json_next_direct_child(json, object, first);
+        if (first_value < 0) return 0;
+        second = first_value;
+        for (;;) {
+            int second_value;
+            second = romx_json_next_direct_child(json, object, second);
+            if (second < 0) break;
+            second_value = romx_json_next_direct_child(json, object, second);
+            if (second_value < 0 ||
+                romx_json_strings_equal(json, first, second)) return 0;
+            second = second_value;
+        }
+        first = first_value;
+    }
+}
+
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>

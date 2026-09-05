@@ -6,6 +6,7 @@
 #endif
 
 #include "romx_internal.h"
+#include "save_internal.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -34,16 +35,17 @@ typedef struct save_candidate_record {
     char *display_name;
     char *source_path;
     char title_id[ROMX_SAVE_TITLE_ID_CAPACITY + 1U];
+    char extdata_id[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U];
     romx_save_candidate_flags_t flags;
     romx_save_source_format_t source_format;
     romx_save_grouping_t grouping;
+    romx_save_scope_t scope;
     save_file_record_t *files;
     uint32_t file_count;
     uint64_t data_size;
 } save_candidate_record_t;
 
 struct romx_save_catalog {
-    char *source_path;
     romx_save_scan_options_t options;
     romx_save_profile_info_t profile;
     save_candidate_record_t *candidates;
@@ -117,25 +119,6 @@ static char *save_join_path(const char *base, const char *name)
     return joined;
 }
 
-static char *save_join_relative(const char *prefix, const char *name)
-{
-    size_t prefix_size = prefix == NULL ? 0U : strlen(prefix);
-    size_t name_size = strlen(name);
-    size_t total;
-    char *joined;
-    if (prefix_size == 0U) return save_strdup(name);
-    if (name_size > SIZE_MAX - 1U ||
-        prefix_size > SIZE_MAX - 1U - name_size ||
-        prefix_size + 1U + name_size == SIZE_MAX) return NULL;
-    total = prefix_size + 1U + name_size;
-    joined = (char *)malloc(total + 1U);
-    if (joined == NULL) return NULL;
-    memcpy(joined, prefix, prefix_size);
-    joined[prefix_size] = '/';
-    memcpy(joined + prefix_size + 1U, name, name_size + 1U);
-    return joined;
-}
-
 static const char *save_basename(const char *path)
 {
     const char *slash = strrchr(path, '/');
@@ -177,118 +160,36 @@ static char *save_stem_copy(const char *path)
     return stem;
 }
 
-static int save_ascii_fold_equal(const char *left, const char *right)
-{
-    for (;;) {
-        unsigned char a = (unsigned char)*left++;
-        unsigned char b = (unsigned char)*right++;
-        if (a >= (unsigned char)'A' && a <= (unsigned char)'Z')
-            a = (unsigned char)(a + 32U);
-        if (b >= (unsigned char)'A' && b <= (unsigned char)'Z')
-            b = (unsigned char)(b + 32U);
-        if (a != b) return 0;
-        if (a == 0U) return 1;
-    }
-}
-
-static int save_name_equal(const char *left, const char *right)
-{
-    return save_ascii_fold_equal(left, right);
-}
-
 static int save_name_in(const char *name, const char *const *values,
     size_t value_count)
 {
     size_t index;
     for (index = 0U; index < value_count; ++index)
-        if (save_name_equal(name, values[index])) return 1;
+        if (romx_ascii_fold_equal(name, values[index])) return 1;
     return 0;
 }
 
 static int save_path_valid(const char *path)
 {
-    const uint8_t *bytes = (const uint8_t *)path;
-    size_t size;
-    size_t component = 0U;
-    size_t index;
-    size_t bad = 0U;
-    if (path == NULL) return 0;
-    size = strlen(path);
-    if (size == 0U || size > (size_t)ROMX_MUTABLE_BUNDLE_PATH_CAPACITY ||
-        bytes[0] == (uint8_t)'/' || bytes[size - 1U] == (uint8_t)'/' ||
-        !romx_utf8_validate(bytes, size, &bad)) return 0;
-    for (index = 0U; index <= size; ++index) {
-        if (index < size && bytes[index] != (uint8_t)'/') {
-            if (bytes[index] == (uint8_t)'\\' || bytes[index] == UINT8_C(0))
-                return 0;
-            continue;
-        }
-        if (index == component ||
-            (index - component == 1U && bytes[component] == (uint8_t)'.') ||
-            (index - component == 2U && bytes[component] == (uint8_t)'.' &&
-                bytes[component + 1U] == (uint8_t)'.')) return 0;
-        component = index + 1U;
-    }
-    return 1;
+    return romx_path_valid(path, ROMX_MUTABLE_BUNDLE_PATH_CAPACITY);
 }
 
 static int save_is_hex_title_id(const char *value)
 {
-    size_t index;
-    if (value == NULL || strlen(value) != (size_t)ROMX_SAVE_TITLE_ID_CAPACITY)
-        return 0;
-    for (index = 0U; index < (size_t)ROMX_SAVE_TITLE_ID_CAPACITY; ++index) {
-        unsigned char byte = (unsigned char)value[index];
-        if (!((byte >= (unsigned char)'0' && byte <= (unsigned char)'9') ||
-              (byte >= (unsigned char)'A' && byte <= (unsigned char)'F') ||
-              (byte >= (unsigned char)'a' && byte <= (unsigned char)'f')))
-            return 0;
-    }
-    return 1;
-}
-
-static int save_is_hex_name(const char *value, size_t expected_size)
-{
-    size_t index;
-    if (value == NULL || strlen(value) != expected_size) return 0;
-    for (index = 0U; index < expected_size; ++index) {
-        unsigned char byte = (unsigned char)value[index];
-        if (!((byte >= (unsigned char)'0' && byte <= (unsigned char)'9') ||
-              (byte >= (unsigned char)'A' && byte <= (unsigned char)'F') ||
-              (byte >= (unsigned char)'a' && byte <= (unsigned char)'f')))
-            return 0;
-    }
-    return 1;
+    return romx_hex_string(value, ROMX_SAVE_TITLE_ID_CAPACITY);
 }
 
 static void save_copy_title_id(const char *value,
     char output[ROMX_SAVE_TITLE_ID_CAPACITY + 1U])
 {
-    size_t index;
-    for (index = 0U; index < (size_t)ROMX_SAVE_TITLE_ID_CAPACITY; ++index) {
-        unsigned char byte = (unsigned char)value[index];
-        if (byte >= (unsigned char)'a' && byte <= (unsigned char)'f')
-            byte = (unsigned char)(byte - 'a' + 'A');
-        output[index] = (char)byte;
-    }
-    output[ROMX_SAVE_TITLE_ID_CAPACITY] = '\0';
+    romx_copy_hex_upper(value, ROMX_SAVE_TITLE_ID_CAPACITY, output);
 }
 
 static void save_copy_title_id_parts(const char *high, const char *low,
     char output[ROMX_SAVE_TITLE_ID_CAPACITY + 1U])
 {
-    size_t index;
-    for (index = 0U; index < 8U; ++index) {
-        unsigned char high_byte = (unsigned char)high[index];
-        unsigned char low_byte = (unsigned char)low[index];
-        if (high_byte >= (unsigned char)'a' && high_byte <= (unsigned char)'f')
-            high_byte = (unsigned char)(high_byte - 'a' + 'A');
-        if (low_byte >= (unsigned char)'a' && low_byte <= (unsigned char)'f')
-            low_byte = (unsigned char)(low_byte - 'a' + 'A');
-        output[index] = (char)high_byte;
-        output[index + 8U] = (char)low_byte;
-    }
-    output[ROMX_SAVE_TITLE_ID_CAPACITY] = '\0';
+    romx_copy_hex_upper(high, 8U, output);
+    romx_copy_hex_upper(low, 8U, output + 8U);
 }
 
 static int save_title_id_from_path(const char *path,
@@ -329,7 +230,7 @@ static int save_is_known_extension(const char *name)
     if (dot == NULL || dot[1] == '\0') return 0;
     for (index = 0U; index < sizeof(extensions) / sizeof(extensions[0]);
          ++index)
-        if (save_name_equal(dot + 1U, extensions[index])) return 1;
+        if (romx_ascii_fold_equal(dot + 1U, extensions[index])) return 1;
     return 0;
 }
 
@@ -346,7 +247,7 @@ static int save_is_3ds_noise_file(const char *name)
     if (dot == NULL || dot[1] == '\0') return 0;
     for (index = 0U; index < sizeof(extensions) / sizeof(extensions[0]);
          ++index)
-        if (save_name_equal(dot + 1U, extensions[index])) return 1;
+        if (romx_ascii_fold_equal(dot + 1U, extensions[index])) return 1;
     return 0;
 }
 
@@ -366,10 +267,10 @@ static int save_is_3ds_likely_file(const char *name)
     const char *dot;
     if (save_name_in(base, names, sizeof(names) / sizeof(names[0]))) return 1;
     dot = strrchr(base, '.');
-    return dot != NULL && (save_name_equal(dot + 1U, "sav") ||
-        save_name_equal(dot + 1U, "save") ||
-        save_name_equal(dot + 1U, "bin") ||
-        save_name_equal(dot + 1U, "dat"));
+    return dot != NULL && (romx_ascii_fold_equal(dot + 1U, "sav") ||
+        romx_ascii_fold_equal(dot + 1U, "save") ||
+        romx_ascii_fold_equal(dot + 1U, "bin") ||
+        romx_ascii_fold_equal(dot + 1U, "dat"));
 }
 
 static int save_should_skip_name(const char *name, uint32_t flags)
@@ -378,7 +279,7 @@ static int save_should_skip_name(const char *name, uint32_t flags)
         ".DS_Store", "Thumbs.db", "desktop.ini"
     };
     if (name == NULL || name[0] == '\0' ||
-        save_name_equal(name, ".") || save_name_equal(name, "..")) return 1;
+        romx_ascii_fold_equal(name, ".") || romx_ascii_fold_equal(name, "..")) return 1;
     if ((flags & ROMX_SAVE_SCAN_INCLUDE_HIDDEN) == 0U && name[0] == '.')
         return 1;
     return save_name_in(name, noise, sizeof(noise) / sizeof(noise[0]));
@@ -528,14 +429,7 @@ static int save_directory_entry_compare(const void *left, const void *right)
         (const save_directory_entry_t *)left;
     const save_directory_entry_t *b =
         (const save_directory_entry_t *)right;
-    const unsigned char *first = (const unsigned char *)a->name;
-    const unsigned char *second = (const unsigned char *)b->name;
-    while (*first != 0U && *second != 0U) {
-        if (*first != *second) return *first < *second ? -1 : 1;
-        ++first;
-        ++second;
-    }
-    return *first == *second ? 0 : (*first == 0U ? -1 : 1);
+    return strcmp(a->name, b->name);
 }
 
 static romx_result_t save_directory_entries_read(const char *path,
@@ -586,7 +480,7 @@ static romx_result_t save_directory_entries_read(const char *path,
                     ROMX_OFFSET_UNKNOWN,
                     "SAVE directory contains invalid UTF-8");
             }
-            if (save_name_equal(name, ".") || save_name_equal(name, "..")) {
+            if (romx_ascii_fold_equal(name, ".") || romx_ascii_fold_equal(name, "..")) {
                 free(name);
             } else {
                 child = save_join_path(path, name);
@@ -637,13 +531,24 @@ static romx_result_t save_directory_entries_read(const char *path,
             return romx_error_set(error, ROMX_E_IO, errno,
                 ROMX_OFFSET_UNKNOWN, "failed to read SAVE directory");
         }
-        while ((entry = readdir(directory)) != NULL) {
+        for (;;) {
             char *child;
             save_node_kind_t kind;
             uint64_t size = UINT64_C(0);
             romx_result_t result;
-            if (save_name_equal(entry->d_name, ".") ||
-                save_name_equal(entry->d_name, "..")) continue;
+            romx_error_t detail;
+            errno = 0;
+            entry = readdir(directory);
+            if (entry == NULL) {
+                int code = errno;
+                if (code == 0) break;
+                closedir(directory);
+                save_directory_entries_destroy(entries);
+                return romx_error_set(error, ROMX_E_IO, code,
+                    ROMX_OFFSET_UNKNOWN, "failed to read SAVE directory");
+            }
+            if (romx_ascii_fold_equal(entry->d_name, ".") ||
+                romx_ascii_fold_equal(entry->d_name, "..")) continue;
             child = save_join_path(path, entry->d_name);
             if (child == NULL) {
                 closedir(directory);
@@ -651,15 +556,15 @@ static romx_result_t save_directory_entries_read(const char *path,
                 return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
                     ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE child path");
             }
-            romx_error_clear(error);
-            kind = save_stat_path(child, &size, error);
+            romx_error_clear(&detail);
+            kind = save_stat_path(child, &size, &detail);
             if (kind == SAVE_NODE_OTHER) {
                 free(child);
-                if (error != NULL && error->code != ROMX_OK) {
-                    romx_result_t code = error->code;
+                if (detail.code != ROMX_OK) {
                     closedir(directory);
                     save_directory_entries_destroy(entries);
-                    return code;
+                    if (error != NULL) *error = detail;
+                    return detail.code;
                 }
                 continue;
             }
@@ -805,7 +710,7 @@ static romx_result_t save_unique_key(const romx_save_catalog_t *catalog,
         }
         used = 0;
         for (index = 0U; index < catalog->candidate_count; ++index) {
-            if (save_ascii_fold_equal(catalog->candidates[index].key,
+            if (romx_ascii_fold_equal(catalog->candidates[index].key,
                     candidate)) {
                 used = 1;
                 break;
@@ -832,7 +737,41 @@ static int save_directory_contains_name(const save_directory_entries_t *entries,
 {
     uint32_t index;
     for (index = 0U; index < entries->count; ++index)
-        if (save_name_equal(entries->values[index].name, name)) return 1;
+        if (entries->values[index].kind == SAVE_NODE_FILE &&
+            romx_ascii_fold_equal(entries->values[index].name, name)) return 1;
+    return 0;
+}
+
+/* Recognizes only the strict SaveDataFiler interchange shape:
+ *   <editable-label>/export.log
+ *   <editable-label>/<id>.dat
+ *   <editable-label>/<id>_.dat
+ *   <editable-label>/<id>/<all save files>
+ * The label is intentionally ignored; the eight-digit child ID is the
+ * ExtData identity used by both the writer and the mutable reader. */
+static int save_directory_is_strict_savedatafiler(
+    const save_directory_entries_t *entries, char low[9])
+{
+    romx_savedatafiler_shape_t shape = { { 0 }, 0U };
+    uint32_t index;
+    for (index = 0U; index < entries->count; ++index) {
+        const save_directory_entry_t *entry = &entries->values[index];
+        if (save_should_skip_name(entry->name, 0U)) continue;
+        if (!romx_savedatafiler_add(&shape, entry->name,
+                entry->kind == SAVE_NODE_DIRECTORY)) return 0;
+    }
+    return romx_savedatafiler_finish(&shape, low);
+}
+
+static int save_directory_has_citra_save_data(
+    const save_directory_entries_t *entries)
+{
+    uint32_t index;
+    for (index = 0U; index < entries->count; ++index) {
+        const save_directory_entry_t *entry = &entries->values[index];
+        if (entry->kind == SAVE_NODE_FILE &&
+            romx_ascii_fold_equal(entry->name, "saveData.bin")) return 1;
+    }
     return 0;
 }
 
@@ -863,7 +802,7 @@ static int save_directory_has_gateway_file(
         char *stem;
         if (entry->kind != SAVE_NODE_FILE) continue;
         dot = strrchr(save_basename(entry->name), '.');
-        if (dot == NULL || !save_name_equal(dot + 1U, "sav")) continue;
+        if (dot == NULL || !romx_ascii_fold_equal(dot + 1U, "sav")) continue;
         stem = save_stem_copy(entry->name);
         if (stem == NULL) return 0;
         if (save_is_hex_title_id(stem)) {
@@ -883,7 +822,7 @@ static int save_citra_candidate_title(const char *path,
     char *grandparent;
     char *greatgrandparent = NULL;
     int found = 0;
-    if (parent == NULL || !save_name_equal(save_basename(parent), "data")) {
+    if (parent == NULL || !romx_ascii_fold_equal(save_basename(parent), "data")) {
         free(parent);
         return 0;
     }
@@ -892,13 +831,13 @@ static int save_citra_candidate_title(const char *path,
         save_copy_title_id(save_basename(grandparent), output);
         found = 1;
     } else if (grandparent != NULL &&
-               save_is_hex_name(save_basename(grandparent), 8U)) {
+               romx_hex_string(save_basename(grandparent), 8U)) {
         // Azahar/Citra's on-disk SD layout splits the 16-digit Title ID into
         // title/<high-8>/<low-8>/data/00000001. Treat that leaf exactly like
         // the older title/<16-digit>/data/00000001 layout.
         greatgrandparent = save_parent_copy(grandparent);
         if (greatgrandparent != NULL &&
-            save_is_hex_name(save_basename(greatgrandparent), 8U)) {
+            romx_hex_string(save_basename(greatgrandparent), 8U)) {
             save_copy_title_id_parts(save_basename(greatgrandparent),
                 save_basename(grandparent), output);
             found = 1;
@@ -907,7 +846,35 @@ static int save_citra_candidate_title(const char *path,
     free(greatgrandparent);
     free(grandparent);
     free(parent);
-    return found && save_name_equal(save_basename(path), "00000001");
+    return found && romx_ascii_fold_equal(save_basename(path), "00000001");
+}
+
+static int save_citra_candidate_extdata(const char *path,
+    char output[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U])
+{
+    char *parent = save_parent_copy(path);
+    char *grandparent = NULL;
+    int found = 0;
+    if (parent != NULL && romx_hex_string(save_basename(path), 8U) &&
+        romx_hex_string(save_basename(parent), 8U)) {
+        grandparent = save_parent_copy(parent);
+        if (grandparent != NULL &&
+            romx_ascii_fold_equal(save_basename(grandparent), "extdata")) {
+            save_copy_title_id_parts(save_basename(parent),
+                save_basename(path), output);
+            found = 1;
+        }
+    }
+    free(grandparent);
+    free(parent);
+    return found;
+}
+
+static void save_copy_extdata_id_from_leaf(const char *value,
+    char output[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U])
+{
+    static const char zero_high[] = "00000000";
+    save_copy_title_id_parts(zero_high, value, output);
 }
 
 static romx_save_source_format_t save_classify_file(
@@ -918,7 +885,7 @@ static romx_save_source_format_t save_classify_file(
         return catalog->options.source_format_hint;
     if (catalog->profile.platform_id == ROMX_PLATFORM_NINTENDO_3DS &&
         save_title_id_from_path(path, title_id) &&
-        save_name_equal(strrchr(save_basename(path), '.') == NULL
+        romx_ascii_fold_equal(strrchr(save_basename(path), '.') == NULL
                 ? "" : strrchr(save_basename(path), '.') + 1U, "sav"))
         return ROMX_SAVE_SOURCE_3DS_GATEWAY;
     return ROMX_SAVE_SOURCE_FILE;
@@ -927,25 +894,30 @@ static romx_save_source_format_t save_classify_file(
 static romx_save_source_format_t save_classify_directory(
     const romx_save_catalog_t *catalog, const char *path,
     const save_directory_entries_t *entries,
-    char title_id[ROMX_SAVE_TITLE_ID_CAPACITY + 1U])
+    char title_id[ROMX_SAVE_TITLE_ID_CAPACITY + 1U],
+    char extdata_id[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U])
 {
-    int citra = 0;
-    if (catalog->options.source_format_hint != ROMX_SAVE_SOURCE_AUTO)
-        return catalog->options.source_format_hint;
-    if (catalog->profile.grouping == ROMX_SAVE_GROUP_MARKER_DIRECTORY)
-        return ROMX_SAVE_SOURCE_PSP_SAVEDATA;
-    if (catalog->profile.platform_id == ROMX_PLATFORM_NINTENDO_3DS) {
-        citra = save_citra_candidate_title(path, title_id);
-        if (citra) return ROMX_SAVE_SOURCE_3DS_CITRA;
-        if (save_directory_has_gateway_file(entries, title_id))
-            return ROMX_SAVE_SOURCE_3DS_GATEWAY;
-        if (save_directory_contains_name(entries, "export.log"))
-            return ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER;
-        if (save_directory_has_3ds_markers(entries))
-            return ROMX_SAVE_SOURCE_3DS_BACKUP;
-        return ROMX_SAVE_SOURCE_3DS_BACKUP;
+    romx_save_source_format_t source = ROMX_SAVE_SOURCE_DIRECTORY;
+    char low[9];
+    if (catalog->profile.grouping == ROMX_SAVE_GROUP_MARKER_DIRECTORY) {
+        source = ROMX_SAVE_SOURCE_PSP_SAVEDATA;
+    } else if (catalog->profile.platform_id == ROMX_PLATFORM_NINTENDO_3DS) {
+        if (save_directory_is_strict_savedatafiler(entries, low)) {
+            save_copy_extdata_id_from_leaf(low, extdata_id);
+            source = ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER;
+        } else if (save_citra_candidate_extdata(path, extdata_id) ||
+                   save_citra_candidate_title(path, title_id) ||
+                   save_directory_has_citra_save_data(entries) ||
+                   romx_ascii_fold_equal(save_basename(path), "00000001")) {
+            source = ROMX_SAVE_SOURCE_3DS_CITRA;
+        } else if (save_directory_has_gateway_file(entries, title_id)) {
+            source = ROMX_SAVE_SOURCE_3DS_GATEWAY;
+        } else {
+            source = ROMX_SAVE_SOURCE_3DS_BACKUP;
+        }
     }
-    return ROMX_SAVE_SOURCE_DIRECTORY;
+    return catalog->options.source_format_hint == ROMX_SAVE_SOURCE_AUTO
+        ? source : catalog->options.source_format_hint;
 }
 
 static romx_result_t save_candidate_add(
@@ -958,6 +930,7 @@ static romx_result_t save_candidate_add(
     char *base = NULL;
     char *key = NULL;
     char title_id[ROMX_SAVE_TITLE_ID_CAPACITY + 1U] = { 0 };
+    char extdata_id[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U] = { 0 };
     romx_result_t result;
     save_node_kind_t kind;
     uint64_t unused_size = UINT64_C(0);
@@ -982,13 +955,11 @@ static romx_result_t save_candidate_add(
             return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
                 ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE directory name");
         }
-        if (source_format == ROMX_SAVE_SOURCE_AUTO)
-            source_format = save_classify_directory(catalog, path, &features,
-                title_id);
-        else if (source_format == ROMX_SAVE_SOURCE_3DS_GATEWAY)
-            (void)save_directory_has_gateway_file(&features, title_id);
-        else if (source_format == ROMX_SAVE_SOURCE_3DS_CITRA)
-            (void)save_citra_candidate_title(path, title_id);
+        {
+            romx_save_source_format_t detected = save_classify_directory(
+                catalog, path, &features, title_id, extdata_id);
+            if (source_format == ROMX_SAVE_SOURCE_AUTO) source_format = detected;
+        }
     } else {
         base = save_stem_copy(path);
         if (base == NULL) {
@@ -1012,6 +983,19 @@ static romx_result_t save_candidate_add(
     candidate.source_path = save_strdup(path);
     candidate.source_format = source_format;
     candidate.grouping = grouping;
+    if (catalog->profile.platform_id == ROMX_PLATFORM_NINTENDO_3DS) {
+        if (extdata_id[0] != '\0') {
+            memcpy(candidate.extdata_id, extdata_id,
+                sizeof(candidate.extdata_id));
+            candidate.scope = ROMX_SAVE_SCOPE_3DS_EXTDATA;
+        } else {
+            /* For 3DS, every non-ExtData candidate is a Title Save.  This
+             * includes a flat Citra/Azahar folder containing only
+             * saveData.bin and a Gateway/single-file export; the actual native
+             * title path is supplied by the consuming ROMX adapter. */
+            candidate.scope = ROMX_SAVE_SCOPE_3DS_TITLE;
+        }
+    }
     if (candidate.source_path == NULL) {
         save_candidate_destroy(&candidate);
         save_directory_entries_destroy(&features);
@@ -1093,7 +1077,7 @@ static romx_result_t save_candidate_add_file(
         return romx_error_set(error, ROMX_E_RANGE, 0, ROMX_OFFSET_UNKNOWN,
             "SAVE data size exceeds the configured limit");
     for (index = 0U; index < candidate->file_count; ++index) {
-        if (save_ascii_fold_equal(candidate->files[index].path, relative_path))
+        if (romx_ascii_fold_equal(candidate->files[index].path, relative_path))
             return romx_error_set(error, ROMX_E_MUTABLE_BUNDLE, 0,
                 ROMX_OFFSET_UNKNOWN, "SAVE file paths are not portable-unique");
     }
@@ -1137,8 +1121,8 @@ static romx_result_t save_candidate_add_file(
 
 static romx_result_t save_collect_candidate_files(
     romx_save_catalog_t *catalog, save_candidate_record_t *candidate,
-    const char *root, const char *directory, const char *prefix,
-    uint32_t depth, int include_all, romx_error_t *error)
+    const char *directory, const char *prefix,
+    uint32_t depth, romx_error_t *error)
 {
     save_directory_entries_t entries;
     uint32_t index;
@@ -1159,26 +1143,21 @@ static romx_result_t save_collect_candidate_files(
                     ROMX_OFFSET_UNKNOWN,
                     "SAVE directory depth exceeds the configured limit");
             }
-            relative = save_join_relative(prefix, entry->name);
+            relative = save_join_path(prefix, entry->name);
             if (relative == NULL) {
                 save_directory_entries_destroy(&entries);
                 return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
                     ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE relative path");
             }
-            result = save_collect_candidate_files(catalog, candidate, root,
-                entry->path, relative, depth + 1U, include_all, error);
+            result = save_collect_candidate_files(catalog, candidate,
+                entry->path, relative, depth + 1U, error);
             free(relative);
             if (result != ROMX_OK) {
                 save_directory_entries_destroy(&entries);
                 return result;
             }
-        } else if (entry->kind == SAVE_NODE_FILE &&
-                   (include_all
-                        ? (catalog->profile.platform_id !=
-                            ROMX_PLATFORM_NINTENDO_3DS ||
-                            save_is_3ds_candidate_file(entry->name))
-                        : save_is_known_extension(entry->name))) {
-            relative = save_join_relative(prefix, entry->name);
+        } else if (entry->kind == SAVE_NODE_FILE) {
+            relative = save_join_path(prefix, entry->name);
             if (relative == NULL) {
                 save_directory_entries_destroy(&entries);
                 return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
@@ -1265,8 +1244,8 @@ static romx_result_t save_scan_marker_tree(romx_save_catalog_t *catalog,
             ROMX_SAVE_GROUP_MARKER_DIRECTORY, ROMX_SAVE_SOURCE_PSP_SAVEDATA,
             error, &candidate);
         if (result != ROMX_OK) return result;
-        result = save_collect_candidate_files(catalog, candidate, directory,
-            directory, "", 0U, 1, error);
+        result = save_collect_candidate_files(catalog, candidate,
+            directory, "", 0U, error);
         if (result != ROMX_OK || candidate->file_count == 0U) {
             save_remove_last_candidate(catalog);
             if (result == ROMX_OK) {
@@ -1313,8 +1292,8 @@ static romx_result_t save_add_3ds_directory_candidate(
     romx_result_t result = save_candidate_add(catalog, directory, 1,
         ROMX_SAVE_GROUP_DIRECTORY_PER_SAVE, source_format, error, &candidate);
     if (result != ROMX_OK) return result;
-    result = save_collect_candidate_files(catalog, candidate, directory,
-        directory, "", 0U, 1, error);
+    result = save_collect_candidate_files(catalog, candidate,
+        directory, "", 0U, error);
     if (result != ROMX_OK) {
         save_remove_last_candidate(catalog);
         return result;
@@ -1334,34 +1313,35 @@ static romx_result_t save_scan_3ds_tree(romx_save_catalog_t *catalog,
     save_directory_entries_t entries;
     uint32_t index;
     uint32_t before;
-    int found_savedatafiler = 0;
     romx_result_t result = save_directory_entries_read(directory, &entries,
         error);
     if (result != ROMX_OK) return result;
+    {
+        char savedatafiler_id[9] = { 0 };
+        if (save_directory_is_strict_savedatafiler(&entries,
+                savedatafiler_id)) {
+            save_directory_entries_destroy(&entries);
+            return save_add_3ds_directory_candidate(catalog, directory,
+                ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER, error);
+        }
+    }
+    if (save_citra_candidate_extdata(directory,
+            (char[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U]){ 0 })) {
+        save_directory_entries_destroy(&entries);
+        return save_add_3ds_directory_candidate(catalog, directory,
+            ROMX_SAVE_SOURCE_3DS_CITRA, error);
+    }
     if (save_citra_candidate_title(directory,
             (char[ROMX_SAVE_TITLE_ID_CAPACITY + 1U]){ 0 })) {
         save_directory_entries_destroy(&entries);
         return save_add_3ds_directory_candidate(catalog, directory,
             ROMX_SAVE_SOURCE_3DS_CITRA, error);
     }
-    if (save_directory_contains_name(&entries, "export.log")) {
-        for (index = 0U; index < entries.count; ++index) {
-            const save_directory_entry_t *entry = &entries.values[index];
-            if (entry->kind == SAVE_NODE_DIRECTORY &&
-                save_is_hex_name(entry->name, 8U)) {
-                result = save_add_3ds_directory_candidate(catalog, entry->path,
-                    ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER, error);
-                if (result != ROMX_OK) {
-                    save_directory_entries_destroy(&entries);
-                    return result;
-                }
-                found_savedatafiler = 1;
-            }
-        }
-        if (found_savedatafiler) {
-            save_directory_entries_destroy(&entries);
-            return ROMX_OK;
-        }
+    if (save_directory_has_citra_save_data(&entries) ||
+        romx_ascii_fold_equal(save_basename(directory), "00000001")) {
+        save_directory_entries_destroy(&entries);
+        return save_add_3ds_directory_candidate(catalog, directory,
+            ROMX_SAVE_SOURCE_3DS_CITRA, error);
     }
     {
         char title_id[ROMX_SAVE_TITLE_ID_CAPACITY + 1U] = { 0 };
@@ -1420,11 +1400,40 @@ static romx_result_t save_scan_3ds_tree(romx_save_catalog_t *catalog,
     return ROMX_OK;
 }
 
+static char *save_extdata_bundle_path(const save_candidate_record_t *candidate,
+    const char *relative)
+{
+    char high[9];
+    char low[9];
+    char prefix[64];
+    char *result;
+    size_t index;
+    if (candidate == NULL || relative == NULL ||
+        !save_is_hex_title_id(candidate->extdata_id) ||
+        !save_path_valid(relative)) return NULL;
+    memcpy(high, candidate->extdata_id, 8U);
+    memcpy(low, candidate->extdata_id + 8U, 8U);
+    high[8] = '\0';
+    low[8] = '\0';
+    for (index = 0U; index < 8U; ++index) {
+        if (high[index] >= 'A' && high[index] <= 'F')
+            high[index] = (char)(high[index] - 'A' + 'a');
+        if (low[index] >= 'A' && low[index] <= 'F')
+            low[index] = (char)(low[index] - 'A' + 'a');
+    }
+    if (snprintf(prefix, sizeof(prefix), "extdata/%s/%s", high, low) < 0)
+        return NULL;
+    result = save_join_path(prefix, relative);
+    if (result == NULL || !save_path_valid(result)) {
+        free(result);
+        return NULL;
+    }
+    return result;
+}
+
 static romx_result_t save_scan_directory_per_save(
     romx_save_catalog_t *catalog, const char *directory, romx_error_t *error)
 {
-    save_directory_entries_t entries;
-    uint32_t index;
     romx_result_t result;
     if ((catalog->options.flags & ROMX_SAVE_SCAN_TREAT_ROOT_AS_SAVE) != 0U) {
         save_candidate_record_t *candidate = NULL;
@@ -1432,8 +1441,8 @@ static romx_result_t save_scan_directory_per_save(
             ROMX_SAVE_GROUP_DIRECTORY_PER_SAVE, ROMX_SAVE_SOURCE_AUTO, error,
             &candidate);
         if (result != ROMX_OK) return result;
-        result = save_collect_candidate_files(catalog, candidate, directory,
-            directory, "", 0U, 1, error);
+        result = save_collect_candidate_files(catalog, candidate,
+            directory, "", 0U, error);
         if (result != ROMX_OK || candidate->file_count == 0U) {
             save_remove_last_candidate(catalog);
             return result != ROMX_OK ? result : romx_error_set(error,
@@ -1442,36 +1451,7 @@ static romx_result_t save_scan_directory_per_save(
         }
         return ROMX_OK;
     }
-    if (catalog->profile.platform_id == ROMX_PLATFORM_NINTENDO_3DS) {
-        return save_scan_3ds_tree(catalog, directory, 0U, 1, error);
-    }
-    result = save_directory_entries_read(directory, &entries, error);
-    if (result != ROMX_OK) return result;
-    for (index = 0U; index < entries.count; ++index) {
-        const save_directory_entry_t *entry = &entries.values[index];
-        if (save_should_skip_name(entry->name, catalog->options.flags)) continue;
-        if (entry->kind == SAVE_NODE_DIRECTORY) {
-            save_candidate_record_t *candidate = NULL;
-            result = save_candidate_add(catalog, entry->path, 1,
-                ROMX_SAVE_GROUP_DIRECTORY_PER_SAVE, ROMX_SAVE_SOURCE_AUTO,
-                error, &candidate);
-            if (result == ROMX_OK)
-                result = save_collect_candidate_files(catalog, candidate,
-                    entry->path, entry->path, "", 0U, 1, error);
-            if (result == ROMX_OK && candidate->file_count == 0U) {
-                save_remove_last_candidate(catalog);
-            }
-        } else if (entry->kind == SAVE_NODE_FILE) {
-            result = save_add_file_candidate(catalog, entry->path,
-                entry->name, entry->size, error);
-        }
-        if (result != ROMX_OK) {
-            save_directory_entries_destroy(&entries);
-            return result;
-        }
-    }
-    save_directory_entries_destroy(&entries);
-    return ROMX_OK;
+    return save_scan_3ds_tree(catalog, directory, 0U, 1, error);
 }
 
 static int save_candidate_compare(const void *left, const void *right)
@@ -1480,14 +1460,7 @@ static int save_candidate_compare(const void *left, const void *right)
         (const save_candidate_record_t *)left;
     const save_candidate_record_t *b =
         (const save_candidate_record_t *)right;
-    const unsigned char *first = (const unsigned char *)a->key;
-    const unsigned char *second = (const unsigned char *)b->key;
-    while (*first != 0U && *second != 0U) {
-        if (*first != *second) return *first < *second ? -1 : 1;
-        ++first;
-        ++second;
-    }
-    return *first == *second ? 0 : (*first == 0U ? -1 : 1);
+    return strcmp(a->key, b->key);
 }
 
 romx_result_t romx_save_catalog_open_path(const char *utf8_source_path,
@@ -1510,12 +1483,6 @@ romx_result_t romx_save_catalog_open_path(const char *utf8_source_path,
     if (catalog == NULL)
         return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
             ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE catalog");
-    catalog->source_path = save_strdup(utf8_source_path);
-    if (catalog->source_path == NULL) {
-        free(catalog);
-        return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
-            ROMX_OFFSET_UNKNOWN, "failed to copy SAVE source path");
-    }
     catalog->options = options;
     save_profile_compute(options.platform_id, options.format_id,
         options.launch_format_id, &catalog->profile);
@@ -1540,7 +1507,6 @@ romx_result_t romx_save_catalog_open_path(const char *utf8_source_path,
     }
     if (result != ROMX_OK) {
         save_catalog_destroy_records(catalog);
-        free(catalog->source_path);
         free(catalog);
         return result;
     }
@@ -1605,14 +1571,18 @@ romx_result_t romx_save_catalog_get_candidate(
         (stored->file_count > 1U ? ROMX_SAVE_CANDIDATE_IS_MULTI_FILE : 0U);
     candidate->source_format = stored->source_format;
     candidate->grouping = stored->grouping;
+    candidate->scope = stored->scope;
     candidate->file_count = stored->file_count;
     candidate->data_size = stored->data_size;
     candidate->key_size = (uint32_t)key_size;
     candidate->display_name_size = (uint32_t)display_size;
     candidate->title_id_size = (uint32_t)title_size;
+    candidate->extdata_id_size = (uint32_t)strlen(stored->extdata_id);
     memcpy(candidate->key, stored->key, key_size + 1U);
     memcpy(candidate->display_name, stored->display_name, display_size + 1U);
     memcpy(candidate->title_id, stored->title_id, title_size + 1U);
+    memcpy(candidate->extdata_id, stored->extdata_id,
+        candidate->extdata_id_size + 1U);
     romx_error_clear(error);
     return ROMX_OK;
 }
@@ -1688,7 +1658,10 @@ romx_result_t romx_save_catalog_write_candidate(
 {
     const save_candidate_record_t *candidate;
     romx_mutable_bundle_path_entry_t *entries;
+    char **relative_paths = NULL;
     const char *key;
+    int wrap_psp;
+    int canonical_extdata;
     uint32_t index;
     romx_result_t result;
     if (catalog == NULL || utf8_romx_path == NULL || utf8_romx_path[0] == '\0' ||
@@ -1709,15 +1682,58 @@ romx_result_t romx_save_catalog_write_candidate(
     if (entries == NULL)
         return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
             ROMX_OFFSET_UNKNOWN, "failed to allocate SAVE bundle entries");
+    wrap_psp = candidate->grouping == ROMX_SAVE_GROUP_MARKER_DIRECTORY;
+    canonical_extdata = candidate->scope == ROMX_SAVE_SCOPE_3DS_EXTDATA &&
+        candidate->source_format != ROMX_SAVE_SOURCE_3DS_SAVEDATAFILER;
+    if (wrap_psp || canonical_extdata) {
+        if (canonical_extdata && !save_is_hex_title_id(candidate->extdata_id)) {
+            free(entries);
+            return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
+                ROMX_OFFSET_UNKNOWN,
+                "3DS ExtData candidate has no valid 16-digit ExtData ID");
+        }
+        relative_paths = (char **)calloc(candidate->file_count,
+            sizeof(*relative_paths));
+        if (relative_paths == NULL) {
+            free(entries);
+            return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
+                ROMX_OFFSET_UNKNOWN,
+                "failed to allocate SAVE bundle paths");
+        }
+    }
     for (index = 0U; index < candidate->file_count; ++index) {
         entries[index] = (romx_mutable_bundle_path_entry_t)
             ROMX_MUTABLE_BUNDLE_PATH_ENTRY_INIT;
-        entries[index].relative_path = candidate->files[index].path;
+        if (relative_paths != NULL) {
+            relative_paths[index] = wrap_psp
+                ? save_join_path(save_basename(candidate->source_path),
+                    candidate->files[index].path)
+                : save_extdata_bundle_path(candidate, candidate->files[index].path);
+            if (relative_paths[index] == NULL) {
+                uint32_t cleanup_index;
+                for (cleanup_index = 0U; cleanup_index <= index;
+                     ++cleanup_index)
+                    free(relative_paths[cleanup_index]);
+                free(relative_paths);
+                free(entries);
+                return romx_error_set(error, ROMX_E_RANGE, 0,
+                    ROMX_OFFSET_UNKNOWN,
+                    "SAVE bundle path is invalid or too long");
+            }
+            entries[index].relative_path = relative_paths[index];
+        } else {
+            entries[index].relative_path = candidate->files[index].path;
+        }
         entries[index].source_path = candidate->files[index].source_path;
     }
     result = romx_mutable_bundle_write_path_entries(utf8_romx_path,
         ROMX_MUTABLE_NAMESPACE_SAVE, key, entries, candidate->file_count,
         bundle_options, write_options, written_object, error);
+    if (relative_paths != NULL) {
+        for (index = 0U; index < candidate->file_count; ++index)
+            free(relative_paths[index]);
+        free(relative_paths);
+    }
     free(entries);
     return result;
 }
@@ -1726,6 +1742,5 @@ void romx_save_catalog_close(romx_save_catalog_t *catalog)
 {
     if (catalog == NULL) return;
     save_catalog_destroy_records(catalog);
-    free(catalog->source_path);
     free(catalog);
 }

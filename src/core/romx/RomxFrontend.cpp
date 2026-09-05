@@ -235,19 +235,13 @@ int platformFromRomxId(uint16_t id)
     }
 }
 
-bool readInfo(const std::string& path, Info& out, std::string* error)
+static bool readInfoFromReader(const romx_reader_t* reader,
+    const std::string& path, Info& out, std::string* error)
 {
     out = {};
     out.sourcePath = path;
-    romx_reader_t* reader = nullptr;
     romx_error_t err{};
-    romx_result_t result = romx_reader_open_path(path.c_str(), nullptr, &reader, &err);
-    if (result != ROMX_OK)
-    {
-        setError(error, errorText("romx_reader_open_path", err, result));
-        return false;
-    }
-
+    romx_result_t result;
     romx_info_t info = ROMX_INFO_INIT;
     romx_entry_info_t entry = ROMX_ENTRY_INFO_INIT;
     result = romx_reader_get_info(reader, &info, &err);
@@ -256,10 +250,12 @@ bool readInfo(const std::string& path, Info& out, std::string* error)
     if (result != ROMX_OK)
     {
         setError(error, errorText("ROMX entrypoint", err, result));
-        romx_reader_close(reader);
         return false;
     }
     out.platformId = info.platform_id;
+    if (info.platform_id != 0)
+        if (const char* name = romx_platform_name(info.platform_id))
+            out.platformName = name;
     out.launchFormatId = info.launch_format_id;
     out.platform = platformFromRomxId(info.platform_id);
     out.entryCount = info.entry_count;
@@ -319,8 +315,23 @@ bool readInfo(const std::string& path, Info& out, std::string* error)
         out.coverSize = cover.size;
         out.hasCover = cover.size != 0;
     }
-    romx_reader_close(reader);
     return true;
+}
+
+bool readInfo(const std::string& path, Info& out, std::string* error)
+{
+    out = {};
+    romx_reader_t* reader = nullptr;
+    romx_error_t err{};
+    const romx_result_t result = romx_reader_open_path(path.c_str(), nullptr, &reader, &err);
+    if (result != ROMX_OK)
+    {
+        setError(error, errorText("romx_reader_open_path", err, result));
+        return false;
+    }
+    const bool success = readInfoFromReader(reader, path, out, error);
+    romx_reader_close(reader);
+    return success;
 }
 
 bool extractCover(const std::string& path, std::string& outPath, const std::string& cacheDirectory)
@@ -381,7 +392,7 @@ bool LaunchSession::open(const std::string& path, std::string* error)
         return false;
     }
     sourcePath_ = path;
-    if (!readInfo(path, info_, error))
+    if (!readInfoFromReader(reader_, path, info_, error))
     {
         close();
         return false;

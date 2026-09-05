@@ -32,50 +32,13 @@ static int string_is_one_of(const romx_json_document_t *json, int token,
     return 0;
 }
 
-static int object_has_duplicate_keys(
-    const romx_json_document_t *json, int object)
-{
-    int first = -1;
-
-    for (;;) {
-        int first_value;
-        int second;
-        first = romx_json_next_direct_child(json, object, first);
-        if (first < 0) {
-            return 0;
-        }
-        first_value = romx_json_next_direct_child(json, object, first);
-        if (first_value < 0) {
-            return 1;
-        }
-        second = first_value;
-        for (;;) {
-            int second_value;
-
-            second = romx_json_next_direct_child(json, object, second);
-            if (second < 0) {
-                break;
-            }
-            second_value = romx_json_next_direct_child(json, object, second);
-            if (second_value < 0) {
-                return 1;
-            }
-            if (romx_json_strings_equal(json, first, second)) {
-                return 1;
-            }
-            second = second_value;
-        }
-        first = first_value;
-    }
-}
-
 static int document_has_duplicate_keys(const romx_json_document_t *json)
 {
     size_t index;
 
     for (index = 0U; index < json->token_count; ++index) {
         if (json->tokens[index].type == ROMX_JSON_OBJECT &&
-            object_has_duplicate_keys(json, (int)index)) {
+            !romx_json_object_has_unique_keys(json, (int)index)) {
             return 1;
         }
     }

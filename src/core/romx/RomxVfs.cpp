@@ -1,6 +1,6 @@
 #include "RomxVfs.hpp"
 
-#include "core/romx/RomxFrontend.hpp"
+#include "RomxFrontend.hpp"
 
 #include <romx/romx.h>
 

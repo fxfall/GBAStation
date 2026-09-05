@@ -573,6 +573,7 @@ typedef struct romx_mutable_write_options {
 #define ROMX_SAVE_DEFAULT_MAX_SIZE UINT64_C(134217728)
 #define ROMX_SAVE_DEFAULT_MAX_DEPTH UINT32_C(64)
 #define ROMX_SAVE_TITLE_ID_CAPACITY UINT32_C(16)
+#define ROMX_SAVE_EXTDATA_ID_CAPACITY UINT32_C(16)
 
 typedef uint32_t romx_save_scan_flags_t;
 #define ROMX_SAVE_SCAN_INCLUDE_HIDDEN UINT32_C(0x00000001)
@@ -585,6 +586,15 @@ typedef uint16_t romx_save_grouping_t;
 #define ROMX_SAVE_GROUP_SINGLE_FILE       UINT16_C(1)
 #define ROMX_SAVE_GROUP_DIRECTORY_PER_SAVE UINT16_C(2)
 #define ROMX_SAVE_GROUP_MARKER_DIRECTORY  UINT16_C(3)
+
+/* Semantic storage areas are independent from the source format label.  A
+ * 3DS title can have a normal Title Save and one or more ExtData archives;
+ * frontends use this field to restore each candidate to the matching native
+ * tree without reimplementing console-specific path rules. */
+typedef uint16_t romx_save_scope_t;
+#define ROMX_SAVE_SCOPE_UNSPECIFIED UINT16_C(0)
+#define ROMX_SAVE_SCOPE_3DS_TITLE   UINT16_C(1)
+#define ROMX_SAVE_SCOPE_3DS_EXTDATA UINT16_C(2)
 
 /* The source labels describe the normalization performed by the host-side
  * scanner.  They are descriptive and are not new ROMX wire-format IDs. */
@@ -649,6 +659,7 @@ typedef struct romx_save_candidate_info {
     romx_save_source_format_t source_format;
     romx_save_grouping_t grouping;
     uint16_t reserved;
+    romx_save_scope_t scope;
     uint32_t file_count;
     uint64_t data_size;
     uint32_t key_size;
@@ -657,12 +668,15 @@ typedef struct romx_save_candidate_info {
     char key[ROMX_MUTABLE_KEY_CAPACITY + 1U];
     char display_name[ROMX_MUTABLE_BUNDLE_PATH_CAPACITY + 1U];
     char title_id[ROMX_SAVE_TITLE_ID_CAPACITY + 1U];
+    uint32_t extdata_id_size;
+    char extdata_id[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U];
 } romx_save_candidate_info_t;
 
 #define ROMX_SAVE_CANDIDATE_INFO_INIT { \
     (uint32_t)sizeof(romx_save_candidate_info_t), UINT32_C(0), UINT32_C(0), \
-    UINT16_C(0), ROMX_SAVE_GROUP_UNSPECIFIED, UINT16_C(0), UINT32_C(0), \
-    UINT64_C(0), UINT32_C(0), UINT32_C(0), UINT32_C(0), { 0 }, { 0 }, { 0 } \
+    UINT16_C(0), ROMX_SAVE_GROUP_UNSPECIFIED, UINT16_C(0), \
+    ROMX_SAVE_SCOPE_UNSPECIFIED, UINT32_C(0), UINT64_C(0), UINT32_C(0), \
+    UINT32_C(0), UINT32_C(0), { 0 }, { 0 }, { 0 }, UINT32_C(0), { 0 } \
 }
 
 typedef struct romx_save_file_info {
@@ -718,6 +732,31 @@ typedef struct romx_mutable_bundle_entry_info {
 #define ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT { \
     (uint32_t)sizeof(romx_mutable_bundle_entry_info_t), UINT32_C(0), \
     UINT64_C(0), UINT32_C(0), UINT32_C(0), { 0 } \
+}
+
+/* The mutable SAVE reader re-analyzes bundle paths instead of trusting the
+ * object key.  This keeps a user-editable outer save label independent from
+ * the 3DS storage area encoded by the files themselves. */
+typedef uint32_t romx_mutable_save_layout_flags_t;
+#define ROMX_MUTABLE_SAVE_LAYOUT_HAS_EXTDATA_ID \
+    UINT32_C(0x00000001)
+#define ROMX_MUTABLE_SAVE_LAYOUT_STRICT_EXTDATA \
+    UINT32_C(0x00000002)
+
+typedef struct romx_mutable_save_layout_info {
+    uint32_t struct_size;
+    romx_save_scope_t scope;
+    uint16_t reserved;
+    romx_mutable_save_layout_flags_t flags;
+    uint32_t entry_count;
+    uint32_t extdata_id_size;
+    char extdata_id[ROMX_SAVE_EXTDATA_ID_CAPACITY + 1U];
+} romx_mutable_save_layout_info_t;
+
+#define ROMX_MUTABLE_SAVE_LAYOUT_INFO_INIT { \
+    (uint32_t)sizeof(romx_mutable_save_layout_info_t), \
+    ROMX_SAVE_SCOPE_UNSPECIFIED, UINT16_C(0), UINT32_C(0), UINT32_C(0), \
+    UINT32_C(0), { 0 } \
 }
 
 /* Platform-aware logical SAVE-slot projection of an RMBL file set. PSP slots
@@ -1297,6 +1336,17 @@ ROMX_API romx_result_t romx_mutable_bundle_get_entry(
     const romx_mutable_bundle_t *bundle,
     uint32_t index,
     romx_mutable_bundle_entry_info_t *entry,
+    romx_error_t *error);
+
+/* Re-analyzes one SAVE bundle using the ROM platform and its relative entry
+ * paths.  For 3DS, a strict SaveDataFiler tree is recognized as ExtData when
+ * it contains one eight-digit ID directory, matching `<id>.dat` and
+ * `<id>_.dat` sidecars, and `export.log`; the outer RMBL key is not used as
+ * the ID.  The same call also recognizes legacy canonical
+ * `extdata/<high>/<low>/...` bundles and otherwise reports Title Save. */
+ROMX_API romx_result_t romx_mutable_bundle_get_save_layout(
+    const romx_mutable_bundle_t *bundle,
+    romx_mutable_save_layout_info_t *layout,
     romx_error_t *error);
 
 ROMX_API romx_result_t romx_mutable_bundle_get_save_slot_count(

@@ -19,10 +19,15 @@ ROMX 0.2.0 is the only wire format implemented by this branch.
 - optional payload probing when metadata or cover is absent;
 - fixed-capacity mutable SAVE, CHEAT, STATS, and PRIVATE objects;
 - deterministic uncompressed SAVE/CHEAT bundles with normalized paths and
-  per-file CRC32; each SAVE object key is an independent multi-file save slot,
-  with platform-aware libromx APIs for PSP directory slots and per-file slots
-  on other ROMX 0.2.0 platforms;
+  per-file CRC32, plus a host-side SAVE catalog that applies platform-aware
+  grouping (PSP marker directories, 3DS directory-per-save, and single-file
+  profiles) before writing normalized RMBL objects. 3DS candidates also expose
+  Title Save versus ExtData scope and a normalized ExtData ID;
+- original Arcade ZIP archives can be stored as a `ROMX_FORMAT_ZIP` single-file
+  entrypoint; libromx preserves and streams the archive without parsing it;
 - strict versioned STATS JSON parsing, serialization, and explicit commit;
+- deterministic baseline-plus-session-delta STATS merge with safe-integer
+  overflow checks;
 - durable in-place mutable write, overwrite, and delete commits without moving
   the footer or rewriting immutable game data.
 
@@ -59,11 +64,15 @@ multi-file game, it is normally a descriptor such as CUE, GDI, or M3U.
 - Use `romx_reader_map_payload` when a core accepts one memory buffer.
 - Use `romx_vfs_file_open` to expose every RIDX path requested by a multi-file
   core.
-- Use `romx_mutable_bundle_open` for interoperable SAVE/CHEAT file sets. A
-  SAVE object key is one independent logical slot; enumerate mutable objects,
-  filter the SAVE namespace, and open each selected key separately. Then use
-  `romx_mutable_bundle_get_save_slot*` to enumerate multiple logical saves
-  inside one bundle.
+- Use `romx_mutable_bundle_open` for interoperable SAVE/CHEAT file sets.
+  Enumerate mutable objects, filter the SAVE namespace, and open each selected
+  key separately. Then use `romx_mutable_bundle_get_save_slot*` to enumerate
+  logical saves inside each bundle.
+- Use `romx_save_catalog_open_path` for host SAVE discovery. Pass the ROMX
+  platform and format in `romx_save_scan_options_t`; 3DS direct child
+  directories become independent multi-file candidates, while direct files
+  remain independent candidates. Inspect `scope` and `extdata_id` for 3DS,
+  then commit a selected candidate with `romx_save_catalog_write_candidate`.
 - Use `romx_mutable_stats_read` for the strict STATS profile.
 - Use `romx_mutable_write_*` and `romx_mutable_delete_path` only after an
   explicit frontend save/delete action.
@@ -71,6 +80,12 @@ multi-file game, it is normally a descriptor such as CUE, GDI, or M3U.
 Borrowed callback views and cursors require their `romx_reader_t` to remain
 open. A successful guarded mapping owns its mapping and survives reader close.
 
-The normative format rules are maintained in the
+The normative format rules are frozen in the
 [ROMX specification](https://github.com/fxfall/romx-container-spec). This
-repository defines the library API and implementation behavior.
+repository defines the library API and implementation behavior. See
+[`docs/ROMX-0.2.0-PROVENANCE.md`](docs/ROMX-0.2.0-PROVENANCE.md) for the pinned
+snapshot and [`docs/ROMX-0.2.0-OPEN-ITEMS-RESOLVED.md`](docs/ROMX-0.2.0-OPEN-ITEMS-RESOLVED.md)
+for the release-gate decisions. The bilingual technical review is available in
+[`docs/ROMX-0.2.0-Technical-Spec-Draft.md`](docs/ROMX-0.2.0-Technical-Spec-Draft.md)
+and [`docs/ROMX-0.2.0-技术规格草案.md`](docs/ROMX-0.2.0-技术规格草案.md), with
+Obsidian Canvas maps beside them.

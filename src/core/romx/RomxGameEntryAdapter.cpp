@@ -856,11 +856,12 @@ bool parseBundleSlotSelector(const std::string& selector,
                              std::string& objectKey,
                              std::string& slotKey)
 {
-    objectKey.clear();
-    slotKey.clear();
     const std::string prefix(kBundleSlotSelectorPrefix);
     if (selector.rfind(prefix, 0) != 0)
         return false;
+
+    objectKey.clear();
+    slotKey.clear();
 
     const std::size_t lengthStart = prefix.size();
     const std::size_t separator = selector.find(':', lengthStart);
@@ -936,6 +937,24 @@ fs::path threeDsNativeSaveDirectory(const GameEntry& entry)
     return root / "Azahar" / "sdmc" / "Nintendo 3DS" / kZeroId / kZeroId /
            "title" / lowerTitleId.substr(0, 8U) / lowerTitleId.substr(8U, 8U) /
            "data" / "00000001";
+#endif
+}
+
+fs::path threeDsNativeSdRoot(const GameEntry& entry)
+{
+#ifdef __SWITCH__
+    // The Switch-side 3DS implementation already exposes the final native
+    // save directory.  Keep its existing path contract unchanged; the
+    // ExtData root mapping below is only needed by the macOS Azahar core.
+    return threeDsNativeSaveDirectory(entry);
+#else
+    const fs::path root = entry.savePath.empty()
+        ? fs::path(beiklive::tools::defaultGameSavePath(entry.platform, entry.path))
+        : fs::path(entry.savePath);
+    if (root.empty())
+        return root;
+    constexpr const char* kZeroId = "00000000000000000000000000000000";
+    return root / "Azahar" / "sdmc" / "Nintendo 3DS" / kZeroId / kZeroId;
 #endif
 }
 
@@ -1059,6 +1078,84 @@ using BundleOutputMapper = std::function<std::optional<fs::path>(
 
 fs::path gameBatterySavePath(const GameEntry& entry);
 BundleOutputMapper batterySaveOutputMapper(const GameEntry& entry);
+
+BundleOutputMapper threeDsSaveOutputMapper(
+    const GameEntry& entry,
+    const romx_mutable_save_layout_info_t* saveLayout = nullptr)
+{
+#ifdef __SWITCH__
+    (void)entry;
+    (void)saveLayout;
+    return {};
+#else
+    const std::string titleId = GameEntryAdapter::resolveThreeDsTitleId(entry);
+    const bool hasTitleId = titleId.size() == 16U;
+    const bool strictExtdata = saveLayout != nullptr &&
+        saveLayout->scope == ROMX_SAVE_SCOPE_3DS_EXTDATA &&
+        (saveLayout->flags & ROMX_MUTABLE_SAVE_LAYOUT_HAS_EXTDATA_ID) != 0U &&
+        (saveLayout->flags & ROMX_MUTABLE_SAVE_LAYOUT_STRICT_EXTDATA) != 0U &&
+        saveLayout->extdata_id_size == 16U;
+    if (!hasTitleId && !strictExtdata)
+        return {};
+    fs::path titleSavePrefix;
+    if (hasTitleId)
+    {
+        std::string lowerTitleId = titleId;
+        std::transform(lowerTitleId.begin(), lowerTitleId.end(), lowerTitleId.begin(),
+                       [](unsigned char value) {
+                           return static_cast<char>(std::tolower(value));
+                       });
+        titleSavePrefix = fs::path("title") /
+            lowerTitleId.substr(0, 8U) / lowerTitleId.substr(8U, 8U) /
+            "data" / "00000001";
+    }
+    const std::string extdataLow = strictExtdata
+        ? [&saveLayout]() {
+            std::string value(saveLayout->extdata_id + 8U, 8U);
+            std::transform(value.begin(), value.end(), value.begin(),
+                           [](unsigned char character) {
+                               return static_cast<char>(std::tolower(character));
+                           });
+            return value;
+        }()
+        : std::string{};
+    return [titleSavePrefix, strictExtdata, extdataLow](const fs::path& relative,
+                             uint32_t /*index*/, uint32_t /*count*/)
+        -> std::optional<fs::path> {
+        const auto first = relative.begin();
+        if (strictExtdata)
+        {
+            if (!relative.has_parent_path())
+                // SaveDataFiler's root-level metadata is intentionally kept
+                // in the ROMX object but is not part of Azahar's user data.
+                return std::nullopt;
+            if (first == relative.end() || first->string().size() != 8U)
+                return std::nullopt;
+            std::string firstName = first->string();
+            std::transform(firstName.begin(), firstName.end(), firstName.begin(),
+                           [](unsigned char character) {
+                               return static_cast<char>(std::tolower(character));
+                           });
+            if (firstName != extdataLow)
+                return std::nullopt;
+            fs::path mapped = fs::path("extdata") / "00000000" /
+                extdataLow / "user";
+            auto component = first;
+            ++component;
+            for (; component != relative.end(); ++component)
+                mapped /= *component;
+            return mapped;
+        }
+        if (first != relative.end() && first->string() == "extdata")
+            return relative;
+        // Normal Title Save bundles contain paths relative to the candidate
+        // root. Put them back under Azahar's Title Save archive. Legacy
+        // canonical ExtData bundles already carry their extdata prefix and
+        // remain rooted at the SD root.
+        return titleSavePrefix / relative;
+    };
+#endif
+}
 
 SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t ns,
                          const char* key, const fs::path& destination,
@@ -1466,6 +1563,10 @@ std::vector<GameEntryAdapter::LocalSaveCandidate> listThreeDsSaveCandidates(
         }
         item.sourceFormat = candidate.source_format;
         item.grouping = candidate.grouping;
+        item.scope = candidate.scope;
+        item.extdataId = threeDsCandidateText(
+            candidate.extdata_id, sizeof(candidate.extdata_id),
+            candidate.extdata_id_size);
         item.fileCount = candidate.file_count;
         item.dataSize = candidate.data_size;
         item.isDirectory = (candidate.flags & ROMX_SAVE_CANDIDATE_IS_DIRECTORY) != 0;
@@ -1879,12 +1980,12 @@ SyncResult importBundleNamespace(GameEntry& entry,
     }
 
     SyncResult result = SyncResult::Skipped;
-    const fs::path root(namespaceDirectory(entry, objectNamespace));
+    const bool threeDsSave = isThreeDs(entry) &&
+        objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE;
+    const fs::path root = threeDsSave
+        ? threeDsNativeSdRoot(entry)
+        : fs::path(namespaceDirectory(entry, objectNamespace));
     const auto validator = bundlePathValidator(entry, objectNamespace, root);
-    const BundleOutputMapper outputMapper =
-        objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE
-            ? batterySaveOutputMapper(entry)
-            : BundleOutputMapper{};
     for (const std::string& key : keys)
     {
         std::string objectKey = key;
@@ -1893,6 +1994,31 @@ SyncResult importBundleNamespace(GameEntry& entry,
             parseBundleSlotSelector(key, objectKey, requestedSlot);
         std::string bundleError;
         std::vector<fs::path> restoredPaths;
+        romx_mutable_save_layout_info_t saveLayout =
+            ROMX_MUTABLE_SAVE_LAYOUT_INFO_INIT;
+        bool hasSaveLayout = false;
+        if (threeDsSave)
+        {
+            // libromx owns the 3DS layout decision.  The adapter only turns
+            // the resulting semantic scope into the native Azahar path.
+            romx_mutable_bundle_t* layoutBundle = nullptr;
+            romx_error_t layoutError{};
+            if (romx_mutable_bundle_open(reader, ROMX_MUTABLE_NAMESPACE_SAVE,
+                                         objectKey.c_str(), nullptr,
+                                         &layoutBundle, &layoutError) == ROMX_OK)
+            {
+                hasSaveLayout = romx_mutable_bundle_get_save_layout(
+                    layoutBundle, &saveLayout, &layoutError) == ROMX_OK;
+                romx_mutable_bundle_close(layoutBundle);
+            }
+        }
+        const BundleOutputMapper outputMapper =
+            threeDsSave
+                ? threeDsSaveOutputMapper(entry,
+                    hasSaveLayout ? &saveLayout : nullptr)
+                : objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE
+                    ? batterySaveOutputMapper(entry)
+                    : BundleOutputMapper{};
         if (isPsp(entry) && objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE)
         {
             result = extractPspSaveBundle(reader, entry, objectKey.c_str(),
@@ -3136,6 +3262,11 @@ SyncResult GameEntryAdapter::writeLocalSavesToRomx(
                        (writtenCount && *writtenCount != 0)))
         *outputPath = destination.string();
     return result;
+}
+
+uint32_t GameEntryAdapter::saveSlotKeyCapacity()
+{
+    return ROMX_MUTABLE_KEY_CAPACITY;
 }
 
 bool GameEntryAdapter::validateSaveSlotKey(const std::string& key,

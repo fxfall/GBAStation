@@ -14,24 +14,6 @@ set(MELONDS_PATH       ${CMAKE_CURRENT_SOURCE_DIR}/melonDS)
 
 option(BUILD_MELONDS_CORE "Build the embedded melonDS native core" OFF)
 
-# ROMX 0.2.0 is consumed through its small C ABI.  Keep it as an independent
-# vendored target so upstream core/UI code does not need to know its internals.
-set(ROMX_BUILD_TESTS OFF CACHE BOOL "Build libromx tests inside GBAStation" FORCE)
-set(ROMX_BUILD_EXAMPLES OFF CACHE BOOL "Build libromx examples inside GBAStation" FORCE)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/libromx)
-if (PLATFORM_SWITCH)
-    # libnx/newlib does not provide POSIX mmap.  ROMX still supports normal
-    # offset reads on Switch; the frontend falls back to its payload-file
-    # materializer when a zero-copy mapping is unavailable.
-    # The SDMC devoptab also does not implement POSIX record locks.  In-place
-    # mutable writes still open the file read/write and fsync every commit,
-    # while the frontend serializes these explicit operations.
-    target_compile_definitions(romx PRIVATE
-        ROMX_NO_MMAP=1
-        ROMX_NO_PREAD=1
-        ROMX_NO_FCNTL_LOCK=1
-    )
-endif()
 
 # =========================================================
 # borealis UI 框架

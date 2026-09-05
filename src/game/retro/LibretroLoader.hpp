@@ -21,7 +21,7 @@
 #endif
 #include "core/ConfigManager.hpp"
 #include "core/enums.h"
-#include "core/romx/RomxFrontend.hpp"
+#include "core/romx/LibretroRomxSession.hpp"
 
 namespace beiklive {
 
@@ -278,26 +278,10 @@ private:
     std::string m_saveDirectory;    ///< 通过GET_SAVE_DIRECTORY返回给核心
     std::string m_systemDirectory;  ///< 通过GET_SYSTEM_DIRECTORY返回给核心
 
-    // ROMX 0.2.0 single-file entrypoint mapping.  libretro cores that accept
-    // data receive this pointer directly; no concatenated payload copy is
-    // made.  Multi-file descriptors and need_fullpath cores use the module's
-    // filesystem fallback instead.
-    romx_payload_mapping* m_romxMapping = nullptr;
-#if defined(__APPLE__) && !defined(__SWITCH__)
-    const void* m_romxPayloadData = nullptr;
-    uint64_t m_romxPayloadSize = 0;
-#endif
-    std::string m_romxMaterializedPath;
-
-    // A need_fullpath core may still ask for Libretro VFS.  In that case the
-    // path passed to retro_load_game is a logical ROMX URI and this session
-    // remains alive until retro_unload_game has returned.  The bridge is
-    // deliberately owned by the loader so no page/core code needs to know
-    // about ROMX internals.
-    std::unique_ptr<beiklive::romx::LaunchSession> m_romxSession;
-    std::string m_romxVirtualPath;
+    // The frontend module owns mappings, VFS bindings and cache fallback.
+    // Keep it alive until retro_unload_game has closed the core's handles.
+    std::unique_ptr<beiklive::romx::LibretroRomxSession> m_romxSession;
     bool m_romxVfsRequested = false;
-    bool m_romxVfsActive = false;
 #if defined(__APPLE__) && !defined(__SWITCH__)
     bool m_romxVfsAllowed = true;
     bool m_romxPayloadPreferred = false;

@@ -120,34 +120,6 @@ romx_result_t romx_payload_file_tell(
     return ROMX_OK;
 }
 
-static romx_result_t romx_payload_file_add_offset(
-    uint64_t base,
-    int64_t offset,
-    uint64_t *target,
-    romx_error_t *error)
-{
-    uint64_t magnitude;
-
-    if (offset >= 0) {
-        magnitude = (uint64_t)offset;
-        if (base > UINT64_MAX - magnitude) {
-            return romx_error_set(error, ROMX_E_RANGE, 0,
-                ROMX_OFFSET_UNKNOWN, "payload file seek overflows");
-        }
-        *target = base + magnitude;
-        return ROMX_OK;
-    }
-
-    /* Avoid negating INT64_MIN directly. */
-    magnitude = (uint64_t)(-(offset + INT64_C(1))) + UINT64_C(1);
-    if (magnitude > base) {
-        return romx_error_set(error, ROMX_E_RANGE, 0,
-            ROMX_OFFSET_UNKNOWN, "payload file seek precedes the start");
-    }
-    *target = base - magnitude;
-    return ROMX_OK;
-}
-
 romx_result_t romx_payload_file_seek(
     romx_payload_file_t *file,
     int64_t offset,
@@ -157,7 +129,6 @@ romx_result_t romx_payload_file_seek(
 {
     uint64_t base;
     uint64_t target;
-    romx_result_t result;
 
     romx_error_clear(error);
     if (file == NULL) {
@@ -178,10 +149,9 @@ romx_result_t romx_payload_file_seek(
         return romx_error_set(error, ROMX_E_INVALID_ARGUMENT, 0,
             ROMX_OFFSET_UNKNOWN, "unknown payload file seek position");
     }
-    result = romx_payload_file_add_offset(base, offset, &target, error);
-    if (result != ROMX_OK) {
-        return result;
-    }
+    if (!romx_add_seek_offset(base, offset, &target))
+        return romx_error_set(error, ROMX_E_RANGE, 0,
+            ROMX_OFFSET_UNKNOWN, "file seek exceeds its valid range");
     file->position = target;
     if (new_position != NULL) {
         *new_position = target;
