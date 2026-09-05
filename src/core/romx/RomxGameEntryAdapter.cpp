@@ -1,7 +1,10 @@
 #include "RomxGameEntryAdapter.hpp"
 
 #include "RomxFrontend.hpp"
+#include "RomxPlatformIdentity.hpp"
 #include "RomxSavePaths.hpp"
+#include "RomxSaveRestore.hpp"
+#include "RomxStatsAdapter.hpp"
 #include "core/ThreeDsTitlePaths.hpp"
 #include "core/Tools.hpp"
 #include "core/constexpr.h"
@@ -59,16 +62,6 @@ constexpr int kThreeDsPlatform = static_cast<int>(enums::EmuPlatform::Emu3DS);
 constexpr uint64_t kPspSfoMaximumSize = 4U * 1024U * 1024U;
 constexpr uint64_t kPspDirectoryMaximumSize = 32U * 1024U * 1024U;
 
-bool isPsp(const GameEntry& entry)
-{
-    return entry.platform == kPspPlatform;
-}
-
-bool isThreeDs(const GameEntry& entry)
-{
-    return entry.platform == kThreeDsPlatform;
-}
-
 std::string upperAlphanumeric(std::string value)
 {
     std::string normalized;
@@ -101,21 +94,6 @@ std::string normalizePspDiscId(const std::string& value)
 {
     const std::string normalized = upperAlphanumeric(value);
     return isPlausiblePspDiscId(normalized) ? normalized : std::string();
-}
-
-fs::path pspSaveRoot()
-{
-    // PPSSPP is configured to use GBAStation/saves/PSP for native savedata.
-    // Do not use GameEntry::savePath here: that path is the generic frontend
-    // per-ROM directory and cannot represent multiple PSP savedata folders.
-    return fs::path(beiklive::path::savePath()) / "PSP";
-}
-
-fs::path pspCheatRoot()
-{
-    // The bundled PPSSPP core uses GBAStation/PSP/Cheats, next to `saves`.
-    const fs::path applicationRoot = fs::path(beiklive::path::savePath()).parent_path();
-    return applicationRoot / "PSP" / "Cheats";
 }
 
 uint32_t readU32Le(const uint8_t* bytes)
@@ -151,74 +129,6 @@ size_t boundedStringLength(const char* value, size_t maximum)
     while (length < maximum && value[length] != '\0')
         ++length;
     return length;
-}
-
-bool readRomxEntryBytes(const romx_reader_t* reader, uint32_t index,
-                        uint64_t offset, uint64_t size,
-                        std::vector<uint8_t>& output)
-{
-    if (size == 0 || size > kPspDirectoryMaximumSize ||
-        offset > UINT64_MAX - size)
-        return false;
-    output.resize(static_cast<size_t>(size));
-    uint64_t position = 0;
-    while (position < size)
-    {
-        const uint64_t requested = std::min<uint64_t>(256U * 1024U, size - position);
-        uint64_t received = 0;
-        romx_error_t error{};
-        const romx_result_t result = romx_reader_read_entry(
-            reader, index, offset + position,
-            output.data() + static_cast<size_t>(position),
-            requested, &received, &error);
-        if (result != ROMX_OK || received == 0)
-            return false;
-        position += received;
-    }
-    return true;
-}
-
-// A 3DS ROMX entry is normally a CCI/NCSD image.  The NCSD header is inside
-// the entrypoint payload, not at the beginning of the ROMX container, so the
-// generic ThreeDsTitlePaths reader cannot identify a ROMX by itself.
-std::string readThreeDsTitleIdFromRomx(const std::string& path)
-{
-    if (!isRomxPath(path))
-        return {};
-
-    romx_reader_t* reader = nullptr;
-    romx_error_t error{};
-    if (romx_reader_open_path(path.c_str(), nullptr, &reader, &error) != ROMX_OK)
-        return {};
-
-    romx_entry_info_t entry = ROMX_ENTRY_INFO_INIT;
-    if (romx_reader_get_entrypoint(reader, &entry, &error) != ROMX_OK ||
-        entry.data_size < 0x110U)
-    {
-        romx_reader_close(reader);
-        return {};
-    }
-
-    std::vector<uint8_t> header;
-    const bool read = readRomxEntryBytes(reader, entry.index, 0, 0x110U, header);
-    romx_reader_close(reader);
-    if (!read || header.size() < 0x110U || header[0x100] != 'N' ||
-        header[0x101] != 'C' || header[0x102] != 'S' || header[0x103] != 'D')
-        return {};
-
-    uint64_t titleId = 0;
-    for (int index = 0; index < 8; ++index)
-        titleId |= static_cast<uint64_t>(header[0x108U + index]) << (index * 8);
-    if (titleId == 0)
-        return {};
-
-    char titleIdText[17] = {};
-    const int written = std::snprintf(
-        titleIdText, sizeof(titleIdText), "%016llX",
-        static_cast<unsigned long long>(titleId));
-    if (written != 16)
-        return {};
-    return beiklive::three_ds::normalizeTitleId(titleIdText);
 }
 
 bool readPspSfoValue(const std::vector<uint8_t>& sfo, const char* wantedKey,
@@ -944,10 +854,10 @@ fs::path threeDsNativeSaveDirectory(const GameEntry& entry)
 fs::path threeDsNativeSdRoot(const GameEntry& entry)
 {
 #ifdef __SWITCH__
-    // The Switch-side 3DS implementation already exposes the final native
-    // save directory.  Keep its existing path contract unchanged; the
-    // ExtData root mapping below is only needed by the macOS Azahar core.
-    return threeDsNativeSaveDirectory(entry);
+    // The mapper below returns paths relative to the actual SD root.  Keep
+    // this root independent from the selected Title Save directory so an
+    // ExtData object cannot be redirected into a Title Save by accident.
+    return fs::path(beiklive::three_ds::sdRootPath());
 #else
     const fs::path root = entry.savePath.empty()
         ? fs::path(beiklive::tools::defaultGameSavePath(entry.platform, entry.path))
@@ -1078,83 +988,18 @@ using BundleOutputMapper = SavePathMapper;
 
 fs::path gameBatterySavePath(const GameEntry& entry);
 BundleOutputMapper batterySaveOutputMapper(const GameEntry& entry);
+std::string pspTemporarySuffix();
 
 BundleOutputMapper threeDsSaveOutputMapper(
     const GameEntry& entry,
     const romx_mutable_save_layout_info_t* saveLayout = nullptr)
 {
-#ifdef __SWITCH__
-    (void)entry;
-    (void)saveLayout;
-    return {};
-#else
     const std::string titleId = GameEntryAdapter::resolveThreeDsTitleId(entry);
-    const bool hasTitleId = titleId.size() == 16U;
-    const bool strictExtdata = saveLayout != nullptr &&
-        saveLayout->scope == ROMX_SAVE_SCOPE_3DS_EXTDATA &&
-        (saveLayout->flags & ROMX_MUTABLE_SAVE_LAYOUT_HAS_EXTDATA_ID) != 0U &&
-        (saveLayout->flags & ROMX_MUTABLE_SAVE_LAYOUT_STRICT_EXTDATA) != 0U &&
-        saveLayout->extdata_id_size == 16U;
-    if (!hasTitleId && !strictExtdata)
-        return {};
-    fs::path titleSavePrefix;
-    if (hasTitleId)
-    {
-        std::string lowerTitleId = titleId;
-        std::transform(lowerTitleId.begin(), lowerTitleId.end(), lowerTitleId.begin(),
-                       [](unsigned char value) {
-                           return static_cast<char>(std::tolower(value));
-                       });
-        titleSavePrefix = fs::path("title") /
-            lowerTitleId.substr(0, 8U) / lowerTitleId.substr(8U, 8U) /
-            "data" / "00000001";
-    }
-    const std::string extdataLow = strictExtdata
-        ? [&saveLayout]() {
-            std::string value(saveLayout->extdata_id + 8U, 8U);
-            std::transform(value.begin(), value.end(), value.begin(),
-                           [](unsigned char character) {
-                               return static_cast<char>(std::tolower(character));
-                           });
-            return value;
-        }()
-        : std::string{};
-    return [titleSavePrefix, strictExtdata, extdataLow](const fs::path& relative,
-                             uint32_t /*index*/, uint32_t /*count*/)
-        -> std::optional<fs::path> {
-        const auto first = relative.begin();
-        if (strictExtdata)
-        {
-            if (!relative.has_parent_path())
-                // SaveDataFiler's root-level metadata is intentionally kept
-                // in the ROMX object but is not part of Azahar's user data.
-                return std::nullopt;
-            if (first == relative.end() || first->string().size() != 8U)
-                return std::nullopt;
-            std::string firstName = first->string();
-            std::transform(firstName.begin(), firstName.end(), firstName.begin(),
-                           [](unsigned char character) {
-                               return static_cast<char>(std::tolower(character));
-                           });
-            if (firstName != extdataLow)
-                return std::nullopt;
-            fs::path mapped = fs::path("extdata") / "00000000" /
-                extdataLow / "user";
-            auto component = first;
-            ++component;
-            for (; component != relative.end(); ++component)
-                mapped /= *component;
-            return mapped;
-        }
-        if (first != relative.end() && first->string() == "extdata")
-            return relative;
-        // Normal Title Save bundles contain paths relative to the candidate
-        // root. Put them back under Azahar's Title Save archive. Legacy
-        // canonical ExtData bundles already carry their extdata prefix and
-        // remain rooted at the SD root.
-        return titleSavePrefix / relative;
-    };
-#endif
+    romx_mutable_save_layout_info_t layout =
+        ROMX_MUTABLE_SAVE_LAYOUT_INFO_INIT;
+    if (saveLayout != nullptr)
+        layout = *saveLayout;
+    return makeThreeDsSaveOutputMapper(titleId, layout);
 }
 
 SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t ns,
@@ -1163,7 +1008,8 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
                          std::vector<fs::path>* restoredPaths = nullptr,
                          const std::function<bool(const fs::path&)>& validator = {},
                          const BundleOutputMapper& outputMapper = {},
-                         const std::string* requestedSaveSlot = nullptr)
+                         const std::string* requestedSaveSlot = nullptr,
+                         const fs::path* transactionDirectory = nullptr)
 {
     romx_error_t err{};
     romx_mutable_bundle_t* bundle = nullptr;
@@ -1245,11 +1091,37 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
         assignError(error, "cannot create ROMX mutable directory: " + ec.message());
         return SyncResult::Failed;
     }
+    DirectoryRestoreTransaction restoreTransaction;
+    bool hasRestoreTransaction = false;
+    auto abortRestore = [&]() {
+        if (hasRestoreTransaction)
+            abortDirectoryRestore(restoreTransaction);
+    };
+    if (transactionDirectory != nullptr)
+    {
+        if (!isWithinDirectory(destination, *transactionDirectory))
+        {
+            romx_mutable_bundle_close(bundle);
+            assignError(error, "ROMX restore directory escapes the native SD root");
+            return SyncResult::Failed;
+        }
+        const DirectoryRestoreResult prepared = prepareDirectoryRestore(
+            *transactionDirectory, overwrite, pspTemporarySuffix(),
+            restoreTransaction, error);
+        if (prepared != DirectoryRestoreResult::Ready)
+        {
+            romx_mutable_bundle_close(bundle);
+            return prepared == DirectoryRestoreResult::Skipped
+                ? SyncResult::Skipped : SyncResult::Failed;
+        }
+        hasRestoreTransaction = true;
+    }
     struct PendingEntry
     {
         uint32_t index = 0;
         uint64_t size = 0;
         fs::path relative;
+        fs::path finalRelative;
     };
     std::vector<PendingEntry> pending;
     pending.reserve(count);
@@ -1262,6 +1134,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             romx_mutable_bundle_get_entry(bundle, bundleIndex, &info, &err);
         if (entryResult != ROMX_OK)
         {
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             assignError(error, errorText("romx_mutable_bundle_get_entry", err,
                                          entryResult));
@@ -1270,12 +1143,14 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
         fs::path relative;
         if (!safeRelativePath(info.path, relative))
         {
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             assignError(error, "ROMX mutable bundle contains an unsafe path");
             return SyncResult::Failed;
         }
         if (validator && !validator(relative))
         {
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             return SyncResult::Skipped;
         }
@@ -1291,22 +1166,57 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
         const fs::path output = destination / outputRelative;
         if (!isWithinDirectory(destination, output))
         {
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             assignError(error, "ROMX mutable destination escapes the local directory");
             return SyncResult::Failed;
+        }
+        fs::path transactionRelative = outputRelative;
+        if (hasRestoreTransaction)
+        {
+            if (!isWithinDirectory(restoreTransaction.finalDirectory, output))
+            {
+                abortRestore();
+                romx_mutable_bundle_close(bundle);
+                assignError(error, "ROMX mutable destination escapes the restore directory");
+                return SyncResult::Failed;
+            }
+            transactionRelative = output.lexically_relative(
+                restoreTransaction.finalDirectory);
+            if (transactionRelative.empty() || transactionRelative.is_absolute())
+            {
+                abortRestore();
+                romx_mutable_bundle_close(bundle);
+                assignError(error, "ROMX mutable restore path is invalid");
+                return SyncResult::Failed;
+            }
+            for (const auto& component : transactionRelative)
+            {
+                if (component == ".." || component == ".")
+                {
+                    abortRestore();
+                    romx_mutable_bundle_close(bundle);
+                    assignError(error, "ROMX mutable restore path is unsafe");
+                    return SyncResult::Failed;
+                }
+            }
         }
         // Automatic import is first-use only; explicit ROMX management passes
         // overwrite=true after the user confirms the destructive operation.
         if (!overwrite && (fs::exists(output, ec) || ec))
         {
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             return SyncResult::Skipped;
         }
-        pending.push_back({bundleIndex, info.data_size, std::move(outputRelative)});
+        pending.push_back({bundleIndex, info.data_size,
+                           std::move(transactionRelative),
+                           std::move(outputRelative)});
     }
 
     if (pending.empty())
     {
+        abortRestore();
         romx_mutable_bundle_close(bundle);
         return SyncResult::Skipped;
     }
@@ -1314,10 +1224,13 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
     std::vector<uint8_t> buffer(64 * 1024);
     for (const PendingEntry& pendingEntry : pending)
     {
-        const fs::path output = destination / pendingEntry.relative;
+        const fs::path output = hasRestoreTransaction
+            ? restoreTransaction.stagingDirectory / pendingEntry.relative
+            : destination / pendingEntry.relative;
         fs::create_directories(output.parent_path(), ec);
         if (ec)
         {
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             assignError(error, "cannot create local mutable directory: " + ec.message());
             return SyncResult::Failed;
@@ -1330,6 +1243,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
         std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
         if (!file)
         {
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             assignError(error, "cannot open local mutable file for writing");
             return SyncResult::Failed;
@@ -1345,6 +1259,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             {
                 file.close();
                 fs::remove(temporary, ec);
+                abortRestore();
                 romx_mutable_bundle_close(bundle);
                 assignError(error, errorText("romx_mutable_bundle_read_entry", err,
                                              readResult == ROMX_OK
@@ -1357,6 +1272,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             {
                 file.close();
                 fs::remove(temporary, ec);
+                abortRestore();
                 romx_mutable_bundle_close(bundle);
                 assignError(error, "cannot write local mutable file");
                 return SyncResult::Failed;
@@ -1367,6 +1283,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
         if (!file)
         {
             fs::remove(temporary, ec);
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             assignError(error, "cannot finish writing local mutable file");
             return SyncResult::Failed;
@@ -1377,12 +1294,29 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
         {
             std::error_code cleanupError;
             fs::remove(temporary, cleanupError);
+            abortRestore();
             romx_mutable_bundle_close(bundle);
             assignError(error, "cannot install local mutable file: " + ec.message());
             return SyncResult::Failed;
         }
+        if (restoredPaths && !hasRestoreTransaction)
+            restoredPaths->push_back(destination / pendingEntry.finalRelative);
+    }
+
+    if (hasRestoreTransaction)
+    {
+        if (!commitDirectoryRestore(restoreTransaction, error))
+        {
+            abortRestore();
+            romx_mutable_bundle_close(bundle);
+            return SyncResult::Failed;
+        }
         if (restoredPaths)
-            restoredPaths->push_back(output);
+        {
+            for (const PendingEntry& pendingEntry : pending)
+                restoredPaths->push_back(restoreTransaction.finalDirectory /
+                                         pendingEntry.finalRelative);
+        }
     }
     romx_mutable_bundle_close(bundle);
     return SyncResult::Success;
@@ -1645,13 +1579,36 @@ SyncResult writeThreeDsSaveCatalog(const fs::path& source,
             continue;
         }
 
+        uint64_t measuredSize = 0;
+        const romx_result_t measureResult = romx_save_catalog_measure_candidate(
+            catalog, index, nullptr, &measuredSize, &err);
+        if (measureResult != ROMX_OK)
+        {
+            if (firstError.empty())
+                firstError = errorText("romx_save_catalog_measure_candidate",
+                                       err, measureResult);
+            continue;
+        }
+
         romx_mutable_write_options_t writeOptions =
             ROMX_MUTABLE_WRITE_OPTIONS_INIT;
-        writeOptions.data_capacity = 0;
+        const bool existing = hasThreeDsSaveObject(destination, objectKey);
+        const bool allowGrowth = !existing && candidate.file_count > 1U;
+        writeOptions.data_capacity = existing ? 0U :
+            expandedMutableBundleCapacity(measuredSize, allowGrowth);
         romx_mutable_object_info_t written = ROMX_MUTABLE_OBJECT_INFO_INIT;
-        const romx_result_t result = romx_save_catalog_write_candidate(
+        romx_result_t result = romx_save_catalog_write_candidate(
             catalog, index, destination.string().c_str(), objectKey.c_str(),
             nullptr, &writeOptions, &written, &err);
+        if (result == ROMX_E_MUTABLE_NO_SPACE && !existing &&
+            writeOptions.data_capacity != measuredSize)
+        {
+            writeOptions.data_capacity = measuredSize;
+            err = romx_error_t{};
+            result = romx_save_catalog_write_candidate(
+                catalog, index, destination.string().c_str(), objectKey.c_str(),
+                nullptr, &writeOptions, &written, &err);
+        }
         if (result != ROMX_OK) {
             if (firstError.empty())
                 firstError = errorText("romx_save_catalog_write_candidate", err,
@@ -1784,47 +1741,26 @@ SyncResult extractPspSaveBundle(const romx_reader_t* reader,
         return SyncResult::Failed;
     }
 
-    const fs::path backupDirectory =
-        root / (".romx-psp-backup-" + suffix);
-    fs::remove_all(backupDirectory, ec);
-    ec.clear();
-    bool movedExisting = false;
-    if (fs::exists(finalDirectory, ec) && !ec)
+    // PSP-specific staging and PARAM.SFO handling are complete. Reuse the
+    // shared directory transaction for backup, atomic publish, and rollback.
+    DirectoryRestoreTransaction restoreTransaction;
+    const DirectoryRestoreResult prepared = prepareDirectoryRestoreWithStaging(
+        finalDirectory, stagedDirectory, overwrite, suffix, restoreTransaction,
+        error);
+    if (prepared != DirectoryRestoreResult::Ready)
     {
-        if (!overwrite)
-        {
-            fs::remove_all(staging, ec);
-            return SyncResult::Skipped;
-        }
-        fs::rename(finalDirectory, backupDirectory, ec);
-        if (ec)
-        {
-            fs::remove_all(staging, ec);
-            assignError(error, "cannot stage existing PSP savedata directory: " +
-                                ec.message());
-            return SyncResult::Failed;
-        }
-        movedExisting = true;
+        fs::remove_all(staging, ec);
+        return prepared == DirectoryRestoreResult::Skipped
+            ? SyncResult::Skipped : SyncResult::Failed;
     }
 
-    fs::rename(stagedDirectory, finalDirectory, ec);
-    if (ec)
+    if (!commitDirectoryRestore(restoreTransaction, error))
     {
-        if (movedExisting)
-        {
-            std::error_code restoreError;
-            fs::rename(backupDirectory, finalDirectory, restoreError);
-        }
+        abortDirectoryRestore(restoreTransaction);
         fs::remove_all(staging, ec);
-        assignError(error, "cannot install PSP savedata directory: " + ec.message());
         return SyncResult::Failed;
     }
     fs::remove_all(staging, ec);
-    if (movedExisting)
-    {
-        ec.clear();
-        fs::remove_all(backupDirectory, ec);
-    }
     return SyncResult::Success;
 }
 
@@ -1998,6 +1934,10 @@ SyncResult importBundleNamespace(GameEntry& entry,
                 : objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE
                     ? batterySaveOutputMapper(entry)
                     : BundleOutputMapper{};
+        const fs::path transactionDirectory = threeDsSave
+            ? threeDsSaveTransactionDirectory(
+                GameEntryAdapter::resolveThreeDsTitleId(entry), saveLayout)
+            : fs::path{};
         if (isPsp(entry) && objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE)
         {
             result = extractPspSaveBundle(reader, entry, objectKey.c_str(),
@@ -2010,7 +1950,9 @@ SyncResult importBundleNamespace(GameEntry& entry,
             result = extractBundle(reader, objectNamespace, objectKey.c_str(), root,
                                    overwrite, &bundleError, &restoredPaths,
                                    validator, outputMapper,
-                                   hasBundleSelector ? &requestedSlot : nullptr);
+                                   hasBundleSelector ? &requestedSlot : nullptr,
+                                   transactionDirectory.empty()
+                                       ? nullptr : &transactionDirectory);
         }
         if (result == SyncResult::Success)
         {
@@ -2027,88 +1969,6 @@ SyncResult importBundleNamespace(GameEntry& entry,
     }
     romx_reader_close(reader);
     return result;
-}
-
-std::string timestampString(uint64_t unixSeconds)
-{
-    if (unixSeconds == 0)
-        return {};
-    const std::time_t value = static_cast<std::time_t>(unixSeconds);
-    std::tm local{};
-#ifdef _WIN32
-    if (localtime_s(&local, &value) != 0)
-        return {};
-#else
-    if (localtime_r(&value, &local) == nullptr)
-        return {};
-#endif
-    char buffer[32]{};
-    if (std::strftime(buffer, sizeof(buffer), "%y-%m-%d %H-%M-%S", &local) == 0)
-        return {};
-    return buffer;
-}
-
-uint64_t parseTimestamp(const std::string& value)
-{
-    int year = 0;
-    int month = 0;
-    int day = 0;
-    int hour = 0;
-    int minute = 0;
-    int second = 0;
-    if (std::sscanf(value.c_str(), "%d-%d-%d %d-%d-%d",
-                    &year, &month, &day, &hour, &minute, &second) != 6)
-        return 0;
-    if (year < 0 || year > 99 || month < 1 || month > 12 ||
-        day < 1 || day > 31 || hour < 0 || hour > 23 ||
-        minute < 0 || minute > 59 || second < 0 || second > 59)
-        return 0;
-    std::tm local{};
-    local.tm_year = (2000 + year) - 1900;
-    local.tm_mon = month - 1;
-    local.tm_mday = day;
-    local.tm_hour = hour;
-    local.tm_min = minute;
-    local.tm_sec = second;
-    local.tm_isdst = -1;
-    const std::time_t result = std::mktime(&local);
-    return result < 0 ? 0 : static_cast<uint64_t>(result);
-}
-
-SyncResult readStats(const std::string& path, GameEntry& entry,
-                     std::string* error = nullptr)
-{
-    romx_reader_t* reader = nullptr;
-    romx_error_t err{};
-    const romx_result_t openResult =
-        romx_reader_open_path(path.c_str(), nullptr, &reader, &err);
-    if (openResult != ROMX_OK)
-    {
-        assignError(error, errorText("romx_reader_open_path", err, openResult));
-        return SyncResult::Failed;
-    }
-    romx_mutable_stats_t stats = ROMX_MUTABLE_STATS_INIT;
-    romx_result_t result = romx_mutable_stats_read(reader, "default", &stats, &err);
-    if (result != ROMX_OK)
-        result = romx_mutable_stats_read(reader, "libretro", &stats, &err);
-    if (result != ROMX_OK)
-    {
-        romx_reader_close(reader);
-        if (result == ROMX_E_MUTABLE_ABSENT || result == ROMX_E_MUTABLE_ENTRY)
-            return SyncResult::Skipped;
-        assignError(error, errorText("romx_mutable_stats_read", err, result));
-        return SyncResult::Failed;
-    }
-    if (stats.flags & ROMX_MUTABLE_STATS_HAS_PLAY_TIME)
-        entry.playTime = static_cast<int>(std::min<uint64_t>(stats.play_time_seconds, INT32_MAX));
-    if (stats.flags & ROMX_MUTABLE_STATS_HAS_LAUNCH_COUNT)
-        entry.playCount = static_cast<int>(std::min<uint64_t>(stats.launch_count, INT32_MAX));
-    if (stats.flags & ROMX_MUTABLE_STATS_HAS_FAVORITE)
-        entry.favourite = stats.favorite != 0;
-    if (stats.flags & ROMX_MUTABLE_STATS_HAS_LAST_PLAYED)
-        entry.lastPlayed = timestampString(stats.last_played_unix_seconds);
-    romx_reader_close(reader);
-    return SyncResult::Success;
 }
 
 std::string titleFallback(const std::string& path)
@@ -2356,6 +2216,44 @@ bool collectBundleFiles(const GameEntry& entry, romx_mutable_namespace_t ns,
     return !relativePaths.empty() && relativePaths.size() == sourcePaths.size();
 }
 
+bool mutableObjectExists(const GameEntry& entry,
+                         romx_mutable_namespace_t objectNamespace,
+                         const char* key)
+{
+    if (entry.path.empty() || key == nullptr || *key == '\0')
+        return false;
+
+    romx_reader_t* reader = nullptr;
+    romx_error_t error{};
+    if (romx_reader_open_path(entry.path.c_str(), nullptr, &reader, &error) !=
+        ROMX_OK)
+        return false;
+
+    uint32_t count = 0;
+    bool found = false;
+    if (romx_reader_get_mutable_object_count(reader, &count, &error) == ROMX_OK)
+    {
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            romx_mutable_object_info_t object = ROMX_MUTABLE_OBJECT_INFO_INIT;
+            if (romx_reader_get_mutable_object(reader, index, &object, &error) !=
+                    ROMX_OK ||
+                object.object_namespace != objectNamespace)
+                continue;
+            const std::size_t keySize = std::min<std::size_t>(
+                object.key_size, sizeof(object.key) - 1U);
+            if (std::strlen(key) == keySize &&
+                std::memcmp(object.key, key, keySize) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+    }
+    romx_reader_close(reader);
+    return found;
+}
+
 SyncResult writeBundlePathEntries(const GameEntry& entry,
                                   romx_mutable_namespace_t ns,
                                   const char* key,
@@ -2373,15 +2271,41 @@ SyncResult writeBundlePathEntries(const GameEntry& entry,
         files.push_back(file);
     }
 
-    romx_mutable_write_options_t options = ROMX_MUTABLE_WRITE_OPTIONS_INIT;
-    // A zero capacity preserves the existing object's reserved extent and
-    // lets libromx choose the exact aligned size for a new object.
-    options.data_capacity = 0;
-    romx_mutable_object_info_t written = ROMX_MUTABLE_OBJECT_INFO_INIT;
+    uint64_t measuredSize = 0;
     romx_error_t err{};
-    const romx_result_t result = romx_mutable_bundle_write_path_entries(
+    const romx_result_t measureResult = romx_mutable_bundle_measure_path_entries(
+        ns, files.data(), static_cast<uint32_t>(files.size()), nullptr,
+        &measuredSize, &err);
+    if (measureResult != ROMX_OK)
+    {
+        assignError(error, errorText(
+            "romx_mutable_bundle_measure_path_entries", err, measureResult));
+        return SyncResult::Failed;
+    }
+
+    romx_mutable_write_options_t options = ROMX_MUTABLE_WRITE_OPTIONS_INIT;
+    const bool existing = mutableObjectExists(entry, ns, key);
+    const bool allowGrowth = !existing && isPsp(entry) &&
+        ns == ROMX_MUTABLE_NAMESPACE_SAVE && relativePaths.size() > 1U;
+    // Existing objects keep their original extent. New fixed-size objects use
+    // the measured RMBL size; PSP multi-file objects get a bounded growth
+    // reserve and fall back to the exact size if that reserve does not fit.
+    options.data_capacity = existing ? 0U :
+        expandedMutableBundleCapacity(measuredSize, allowGrowth);
+    romx_mutable_object_info_t written = ROMX_MUTABLE_OBJECT_INFO_INIT;
+    romx_result_t result = romx_mutable_bundle_write_path_entries(
         entry.path.c_str(), ns, key, files.data(),
         static_cast<uint32_t>(files.size()), nullptr, &options, &written, &err);
+    if (result == ROMX_E_MUTABLE_NO_SPACE && !existing &&
+        options.data_capacity != measuredSize)
+    {
+        options.data_capacity = measuredSize;
+        err = romx_error_t{};
+        result = romx_mutable_bundle_write_path_entries(
+            entry.path.c_str(), ns, key, files.data(),
+            static_cast<uint32_t>(files.size()), nullptr, &options, &written,
+            &err);
+    }
     if (result != ROMX_OK)
     {
         assignError(error, errorText("romx_mutable_bundle_write_path_entries", err, result));
@@ -2816,31 +2740,6 @@ std::vector<GameEntryAdapter::SaveSlot> enumerateSaveSlots(
             &bundle, &err);
         if (bundleResult != ROMX_OK)
             continue; // Opaque SAVE objects are not selectable by this UI.
-
-        // libromx writes each native 3DS catalog candidate as one outer SAVE
-        // object.  A candidate may contain several files directly below its
-        // source root; do not let the generic 3DS bundle path heuristic split
-        // those files into separate UI saves.  The object itself is the
-        // selectable folder-save, matching the native 3DS directory model.
-        if (isThreeDs(entry))
-        {
-            uint32_t entryCount = 0;
-            if (romx_mutable_bundle_get_entry_count(bundle, &entryCount, &err) ==
-                ROMX_OK && entryCount != 0U)
-            {
-                slot.entryCount = entryCount;
-                slot.selectionKey.clear();
-                romx_mutable_bundle_entry_info_t bundleEntry =
-                    ROMX_MUTABLE_BUNDLE_ENTRY_INFO_INIT;
-                if (romx_mutable_bundle_get_entry(bundle, 0U, &bundleEntry,
-                                                  &err) == ROMX_OK)
-                    slot.entryPath.assign(bundleEntry.path,
-                                          bundleEntry.path_size);
-                slots.push_back(std::move(slot));
-            }
-            romx_mutable_bundle_close(bundle);
-            continue;
-        }
 
         uint32_t saveSlotCount = 0;
         if (romx_mutable_bundle_get_save_slot_count(bundle, &saveSlotCount,

@@ -37,7 +37,9 @@ struct Info
     uint32_t crc32 = 0;
     uint64_t entrypointSize = 0;
     uint64_t coverSize = 0;
+    std::string cacheIdentity;
     bool hasCover = false;
+    bool cacheable = false;
     bool multiFile = false;
 };
 

@@ -6,9 +6,12 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -88,22 +91,131 @@ std::string jsonString(const nlohmann::json& object, const char* key)
     return it != object.end() && it->is_string() ? it->get<std::string>() : std::string();
 }
 
-std::string cacheKey(const Info& info)
+std::string cacheKey(const Info& info, const char* purpose)
 {
-    // FNV-1a is stable across platforms and does not expose host paths in the
-    // cache filename.  The source path is included so two ROMX files with the
-    // same title/CRC cannot overwrite each other's artwork.
+    // FNV-1a is stable across platforms.  The identity is deliberately built
+    // from immutable ROMX data only: mutable SAVE/CHEAT/STATS commits must not
+    // invalidate a launch or cover cache.
     uint64_t hash = UINT64_C(1469598103934665603);
-    const std::string value = info.sourcePath + "\n" + std::to_string(info.crc32) +
-                              "\n" + std::to_string(info.coverSize);
+    const std::string value = std::string(purpose) + "\n" + info.cacheIdentity;
     for (unsigned char c : value)
     {
         hash ^= c;
         hash *= UINT64_C(1099511628211);
     }
     std::ostringstream stream;
-    stream << std::hex << hash;
+    stream << std::hex << std::setw(16) << std::setfill('0') << hash;
     return stream.str();
+}
+
+std::string ephemeralCacheKey(const char* purpose)
+{
+    // A container without a trustworthy immutable identity must not reuse a
+    // permanent cache entry.  Keep the result in the normal cache directory
+    // for the current launch, but give every materialization a fresh name.
+    static std::atomic<uint64_t> sequence{0};
+    const uint64_t serial = ++sequence;
+    const uint64_t clock = static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
+    return std::string(purpose) + "-uncacheable-" + std::to_string(clock) +
+           "-" + std::to_string(serial);
+}
+
+std::string cachePathKey(const Info& info, const char* purpose)
+{
+    return info.cacheable && !info.cacheIdentity.empty()
+        ? std::string(purpose) + "-" + cacheKey(info, purpose)
+        : ephemeralCacheKey(purpose);
+}
+
+bool cacheFileSizeMatches(const fs::path& path, uint64_t expectedSize)
+{
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec) || ec)
+        return false;
+    return fs::file_size(path, ec) == expectedSize && !ec;
+}
+
+uint32_t crc32Update(uint32_t crc, const uint8_t* data, std::size_t size)
+{
+    for (std::size_t index = 0; index < size; ++index)
+    {
+        crc ^= static_cast<uint32_t>(data[index]);
+        for (unsigned bit = 0; bit < 8; ++bit)
+        {
+            const uint32_t mask = static_cast<uint32_t>(-
+                static_cast<int32_t>(crc & UINT32_C(1)));
+            crc = (crc >> 1) ^ (UINT32_C(0xedb88320) & mask);
+        }
+    }
+    return crc;
+}
+
+bool cacheFileMatches(const fs::path& path, const romx_entry_info_t& entry)
+{
+    if (!cacheFileSizeMatches(path, entry.data_size))
+        return false;
+    if ((entry.flags & ROMX_RIDX_HAS_CRC32) == 0)
+        return true;
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input)
+        return false;
+    std::vector<uint8_t> buffer(256 * 1024);
+    uint32_t crc = UINT32_C(0xffffffff);
+    while (input)
+    {
+        input.read(reinterpret_cast<char*>(buffer.data()),
+                   static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize read = input.gcount();
+        if (read > 0)
+            crc = crc32Update(crc, buffer.data(), static_cast<std::size_t>(read));
+        if (input.bad())
+            return false;
+    }
+    return (crc ^ UINT32_C(0xffffffff)) == entry.crc32;
+}
+
+fs::path temporaryCachePath(const fs::path& destination)
+{
+    static std::atomic<uint64_t> sequence{0};
+    return destination.string() + ".tmp-" + std::to_string(++sequence);
+}
+
+bool publishEntryCache(const fs::path& temporary, const fs::path& destination,
+                       const romx_entry_info_t& entry, std::string* error)
+{
+    std::error_code ec;
+    fs::rename(temporary, destination, ec);
+    if (!ec)
+        return true;
+    // POSIX rename replaces atomically; another frontend may have won the
+    // race.  Accept that result only after validating the complete file.
+    if (cacheFileMatches(destination, entry))
+    {
+        fs::remove(temporary, ec);
+        return true;
+    }
+    const std::string message = ec.message();
+    fs::remove(temporary, ec);
+    setError(error, "failed to publish ROMX cache: " + message);
+    return false;
+}
+
+bool publishSizedCache(const fs::path& temporary, const fs::path& destination,
+                       uint64_t expectedSize)
+{
+    std::error_code ec;
+    fs::rename(temporary, destination, ec);
+    if (!ec)
+        return true;
+    if (cacheFileSizeMatches(destination, expectedSize))
+    {
+        fs::remove(temporary, ec);
+        return true;
+    }
+    fs::remove(temporary, ec);
+    return false;
 }
 
 bool safeVirtualPath(const char* path, std::size_t size, fs::path& result)
@@ -135,10 +247,10 @@ bool extractEntryToPath(const romx_reader_t* reader, uint32_t index,
         setError(error, "cannot create ROMX entry cache: " + ec.message());
         return false;
     }
-    if (fs::exists(destination, ec) && !ec)
+    if (cacheFileMatches(destination, entry))
         return true;
 
-    const fs::path temporary = destination.string() + ".tmp";
+    const fs::path temporary = temporaryCachePath(destination);
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output)
     {
@@ -161,6 +273,13 @@ bool extractEntryToPath(const romx_reader_t* reader, uint32_t index,
             setError(error, errorText("romx_reader_read_entry", err, result));
             return false;
         }
+        if (read > requested)
+        {
+            output.close();
+            fs::remove(temporary, ec);
+            setError(error, "ROMX reader returned too many entry bytes");
+            return false;
+        }
         output.write(reinterpret_cast<const char*>(buffer.data()),
                      static_cast<std::streamsize>(read));
         if (!output)
@@ -173,19 +292,61 @@ bool extractEntryToPath(const romx_reader_t* reader, uint32_t index,
         offset += read;
     }
     output.close();
-    fs::rename(temporary, destination, ec);
-    if (ec)
+    return publishEntryCache(temporary, destination, entry, error);
+}
+
+bool buildCacheIdentity(const romx_reader_t* reader, const romx_info_t& romxInfo,
+                        Info& out, std::string* error)
+{
+    out.cacheIdentity.clear();
+    out.cacheable = false;
+    if (romxInfo.immutable_hash_algorithm == ROMX_IMMUTABLE_HASH_SHA256)
     {
-        // A concurrent frontend instance may have published the same cache
-        // file; accepting an already-present destination is safe.
-        if (!fs::exists(destination))
+        static constexpr char hex[] = "0123456789abcdef";
+        out.cacheIdentity = "sha256:";
+        for (const uint8_t byte : romxInfo.immutable_sha256)
         {
-            fs::remove(temporary, ec);
-            setError(error, "failed to publish ROMX entry cache: " + ec.message());
+            out.cacheIdentity += hex[byte >> 4];
+            out.cacheIdentity += hex[byte & 0x0f];
+        }
+        out.cacheIdentity += "|platform=" + std::to_string(romxInfo.platform_id);
+        out.cacheIdentity += "|launch=" + std::to_string(romxInfo.launch_format_id);
+        out.cacheable = true;
+        return true;
+    }
+
+    if (romxInfo.entry_count == 0)
+        return true;
+    out.cacheIdentity = "ridx|platform=" + std::to_string(romxInfo.platform_id) +
+                        "|launch=" + std::to_string(romxInfo.launch_format_id);
+    for (uint32_t index = 0; index < romxInfo.entry_count; ++index)
+    {
+        romx_entry_info_t entry = ROMX_ENTRY_INFO_INIT;
+        romx_error_t err{};
+        const romx_result_t result = romx_reader_get_entry(reader, index, &entry, &err);
+        if (result != ROMX_OK)
+        {
+            setError(error, errorText("ROMX cache identity", err, result));
+            out.cacheIdentity.clear();
             return false;
         }
-        fs::remove(temporary, ec);
+        // A CRC-less entry cannot safely participate in a persistent
+        // multi-file cache: a changed non-entrypoint file would be invisible.
+        if ((entry.flags & ROMX_RIDX_HAS_CRC32) == 0)
+        {
+            out.cacheIdentity.clear();
+            return true;
+        }
+        out.cacheIdentity += "|entry=" + std::to_string(index) +
+                             ",flags=" + std::to_string(entry.flags) +
+                             ",format=" + std::to_string(entry.format_id) +
+                             ",offset=" + std::to_string(entry.data_offset) +
+                             ",size=" + std::to_string(entry.data_size) +
+                             ",crc=" + std::to_string(entry.crc32) +
+                             ",path=";
+        out.cacheIdentity.append(entry.path, entry.path_size);
     }
+    out.cacheable = true;
     return true;
 }
 
@@ -315,7 +476,7 @@ static bool readInfoFromReader(const romx_reader_t* reader,
         out.coverSize = cover.size;
         out.hasCover = cover.size != 0;
     }
-    return true;
+    return buildCacheIdentity(reader, info, out, error);
 }
 
 bool readInfo(const std::string& path, Info& out, std::string* error)
@@ -348,24 +509,47 @@ bool extractCover(const std::string& path, std::string& outPath, const std::stri
     fs::create_directories(directory, ec);
     if (ec)
         return false;
-    outPath = (directory / (cacheKey(info) + ".png")).string();
-    if (fs::exists(outPath, ec) && !ec)
-        return true;
+    outPath = (directory / (cachePathKey(info, "cover") + ".png")).string();
 
     romx_reader_t* reader = nullptr;
     romx_error_t err{};
     if (romx_reader_open_path(path.c_str(), nullptr, &reader, &err) != ROMX_OK)
-        return false;
-    romx_extract_options_t options = ROMX_EXTRACT_OPTIONS_INIT;
-    options.flags = ROMX_EXTRACT_REPLACE_EXISTING;
-    const romx_result_t result = romx_extract_cover_path(reader, outPath.c_str(), &options, &err);
-    romx_reader_close(reader);
-    if (result != ROMX_OK)
     {
         outPath.clear();
         return false;
     }
-    return true;
+    romx_cover_info_t cover = ROMX_COVER_INFO_INIT;
+    if (romx_reader_get_cover_info(reader, &cover, &err) != ROMX_OK || cover.size == 0)
+    {
+        romx_reader_close(reader);
+        outPath.clear();
+        return false;
+    }
+    if (info.cacheable && cacheFileSizeMatches(outPath, cover.size))
+    {
+        romx_reader_close(reader);
+        return true;
+    }
+
+    const fs::path temporary = temporaryCachePath(outPath);
+    romx_extract_options_t options = ROMX_EXTRACT_OPTIONS_INIT;
+    options.flags = ROMX_EXTRACT_REPLACE_EXISTING;
+    const romx_result_t result = romx_extract_cover_path(
+        reader, temporary.string().c_str(), &options, &err);
+    romx_reader_close(reader);
+    if (result != ROMX_OK)
+    {
+        fs::remove(temporary, ec);
+        outPath.clear();
+        return false;
+    }
+    if (!publishSizedCache(temporary, outPath, cover.size))
+    {
+        fs::remove(temporary, ec);
+        outPath.clear();
+        return false;
+    }
+    return cacheFileSizeMatches(outPath, cover.size);
 }
 
 LaunchSession::LaunchSession() = default;
@@ -459,13 +643,11 @@ bool LaunchSession::materializeEntrypoint(const std::string& cacheDirectory,
         setError(error, "cannot create ROMX payload cache: " + ec.message());
         return false;
     }
-    std::string stem = fs::path(sourcePath_).stem().string();
-    if (stem.empty()) stem = "romx";
-    const std::string key = cacheKey(info_);
+    const std::string key = cachePathKey(info_, "payload");
 
     if (info_.multiFile)
     {
-        const fs::path root = directory / (stem + "-" + key);
+        const fs::path root = directory / key;
         uint32_t count = 0;
         romx_error_t err{};
         const romx_result_t countResult = romx_reader_get_entry_count(reader_, &count, &err);
@@ -504,21 +686,33 @@ bool LaunchSession::materializeEntrypoint(const std::string& cacheDirectory,
         return true;
     }
 
-    outPath = (directory / (stem + "-" + key + "." +
+    outPath = (directory / (key + "." +
                            (info_.entrypointFormat.empty() ? "rom" : lower(info_.entrypointFormat)))).string();
-    if (fs::exists(outPath, ec) && !ec)
+    romx_entry_info_t entrypoint = ROMX_ENTRY_INFO_INIT;
+    romx_error_t err{};
+    if (romx_reader_get_entrypoint(reader_, &entrypoint, &err) != ROMX_OK)
+    {
+        setError(error, errorText("romx_reader_get_entrypoint", err,
+                                  ROMX_E_ENTRY_NOT_FOUND));
+        outPath.clear();
+        return false;
+    }
+    if (info_.cacheable && cacheFileMatches(outPath, entrypoint))
         return true;
+
+    const fs::path temporary = temporaryCachePath(outPath);
     romx_extract_options_t options = ROMX_EXTRACT_OPTIONS_INIT;
     options.flags = ROMX_EXTRACT_REPLACE_EXISTING;
-    romx_error_t err{};
-    const romx_result_t result = romx_extract_payload_path(reader_, outPath.c_str(), &options, &err);
+    const romx_result_t result = romx_extract_payload_path(
+        reader_, temporary.string().c_str(), &options, &err);
     if (result != ROMX_OK)
     {
+        fs::remove(temporary, ec);
         outPath.clear();
         setError(error, errorText("romx_extract_payload_path", err, result));
         return false;
     }
-    return true;
+    return publishEntryCache(temporary, outPath, entrypoint, error);
 }
 
 bool LaunchSession::openVfs(const std::string& virtualPath, romx_vfs_file** outFile,

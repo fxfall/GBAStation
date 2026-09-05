@@ -19,7 +19,10 @@ add_library(GBAStation::ROMX ALIAS gbastation_romx)
 target_sources(gbastation_romx INTERFACE
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxFrontend.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxGameEntryAdapter.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RomxPlatformIdentity.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxSavePaths.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RomxSaveRestore.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/RomxStatsAdapter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/RomxVfs.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/LibretroRomxSession.cpp")
 target_link_libraries(gbastation_romx INTERFACE ROMX::romx)

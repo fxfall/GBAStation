@@ -1,6 +1,7 @@
 #include "../RomxSavePaths.hpp"
 
 #include <cassert>
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -9,6 +10,13 @@ namespace fs = std::filesystem;
 
 int main()
 {
+    assert(beiklive::romx::expandedMutableBundleCapacity(1024U, false) == 1024U);
+    assert(beiklive::romx::expandedMutableBundleCapacity(1024U, true) ==
+           1024U * 1024U + 1024U);
+    assert(beiklive::romx::expandedMutableBundleCapacity(2U * 1024U * 1024U,
+                                                         true) ==
+           4U * 1024U * 1024U);
+
     std::string targetDirectory;
     const auto mapper = beiklive::romx::makePspSaveOutputMapper(
         targetDirectory, std::string());

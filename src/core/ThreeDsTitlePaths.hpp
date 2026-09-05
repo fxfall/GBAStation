@@ -19,6 +19,8 @@ namespace beiklive::three_ds
     std::string extractTitleIdFromInstalledPath(const std::string& path);
     std::string resolveTitleId(std::string_view storedTitleId, const std::string& path);
 
+    /// Returns the native Azahar/SDMC root containing Nintendo 3DS data.
+    std::string sdRootPath();
     std::string baseTitlePath(std::string_view titleId);
     std::string updateTitlePath(std::string_view titleId);
     std::string dlcTitlePath(std::string_view titleId);

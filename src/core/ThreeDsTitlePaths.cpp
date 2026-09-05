@@ -1,4 +1,5 @@
 #include "core/ThreeDsTitlePaths.hpp"
+#include "core/constexpr.h"
 
 #include <borealis/core/logger.hpp>
 
@@ -431,6 +432,17 @@ namespace beiklive::three_ds
         if (!titleId.empty())
             return titleId;
         return readNcsdTitleId(path);
+    }
+
+    std::string sdRootPath()
+    {
+#ifdef __SWITCH__
+        return std::string(ThreeDsRoot) + "/sdmc/Nintendo 3DS/" + ZeroId + "/" +
+               ZeroId;
+#else
+        return (fs::path(beiklive::path::savePath()) / "Azahar" / "sdmc" /
+                "Nintendo 3DS" / ZeroId / ZeroId).string();
+#endif
     }
 
     std::string baseTitlePath(std::string_view titleId)
