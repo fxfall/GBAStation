@@ -1,3 +1,8 @@
+#if !defined(_WIN32)
+#define _FILE_OFFSET_BITS 64
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <romx/romx.h>
 
 #include <stdio.h>
