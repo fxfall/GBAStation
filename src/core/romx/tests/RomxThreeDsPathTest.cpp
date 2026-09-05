@@ -28,7 +28,7 @@ romx_mutable_save_layout_info_t strictExtdataLayout()
     layout.flags = ROMX_MUTABLE_SAVE_LAYOUT_HAS_EXTDATA_ID |
         ROMX_MUTABLE_SAVE_LAYOUT_STRICT_EXTDATA;
     layout.extdata_id_size = 16U;
-    std::string("00000000000016E1").copy(layout.extdata_id, 16U);
+    std::string("12345678000016E1").copy(layout.extdata_id, 16U);
     return layout;
 }
 
@@ -39,7 +39,7 @@ romx_mutable_save_layout_info_t canonicalExtdataLayout()
     layout.scope = ROMX_SAVE_SCOPE_3DS_EXTDATA;
     layout.flags = ROMX_MUTABLE_SAVE_LAYOUT_HAS_EXTDATA_ID;
     layout.extdata_id_size = 16U;
-    std::string("00000000000016E1").copy(layout.extdata_id, 16U);
+    std::string("12345678000016E1").copy(layout.extdata_id, 16U);
     return layout;
 }
 }
@@ -68,6 +68,7 @@ int main()
         titleMapper("saveData.bin", 0U, 1U);
     assert(flat.has_value());
     assert(flat.value() == fs::path("title/0100abcd/12345678/data/00000001/saveData.bin"));
+    assert(!titleMapper(fs::path("../outside.sav"), 0U, 1U).has_value());
 
     const std::optional<fs::path> prefixed =
         titleMapper(fs::path("00000001") / "system.dat", 0U, 2U);
@@ -83,22 +84,49 @@ int main()
         {}, strictExtdataLayout());
     assert(beiklive::romx::threeDsSaveTransactionDirectory(
                {}, strictExtdataLayout()) ==
-           fs::path("extdata/00000000/000016e1/user"));
+           fs::path("extdata/12345678/000016e1/user"));
     const std::optional<fs::path> strictData =
         strictMapper(fs::path("000016e1") / "save.sav", 0U, 4U);
     assert(strictData.has_value());
-    assert(strictData.value() == fs::path("extdata/00000000/000016e1/user/save.sav"));
+    assert(strictData.value() == fs::path("extdata/12345678/000016e1/user/save.sav"));
     assert(!strictMapper("000016e1.dat", 1U, 4U).has_value());
+    assert(!strictMapper("000016e1_.dat", 2U, 4U).has_value());
     assert(!strictMapper("export.log", 2U, 4U).has_value());
 
     const auto canonicalMapper = beiklive::romx::makeThreeDsSaveOutputMapper(
         {}, canonicalExtdataLayout());
     assert(beiklive::romx::threeDsSaveTransactionDirectory(
                {}, canonicalExtdataLayout()) ==
-           fs::path("extdata/00000000/000016e1/user"));
+           fs::path("extdata/12345678/000016e1/user"));
     const fs::path canonical =
-        fs::path("extdata/00000000/000016e1/user/save.sav");
+        fs::path("extdata/12345678/000016e1/user/save.sav");
     assert(canonicalMapper(canonical, 0U, 1U) == canonical);
+    assert(canonicalMapper(
+               fs::path("EXTDATA/12345678/000016E1/USER/save.sav"), 0U, 1U) ==
+           canonical);
+
+    std::string mappingError;
+    const auto mismatchMapper = beiklive::romx::makeThreeDsSaveOutputMapper(
+        {}, canonicalExtdataLayout(), &mappingError);
+    assert(!mismatchMapper(
+                fs::path("extdata/12345678/000016e2/user/save.sav"), 0U, 1U));
+    assert(mappingError.find("does not match layout extdata_id") !=
+           std::string::npos);
+
+    mappingError.clear();
+    assert(!mismatchMapper(
+                fs::path("extdata/12345678/000016e1/cache/save.sav"), 0U, 1U));
+    assert(mappingError.find("user directory") != std::string::npos);
+
+    romx_mutable_save_layout_info_t unknownLayout =
+        ROMX_MUTABLE_SAVE_LAYOUT_INFO_INIT;
+    assert(beiklive::romx::threeDsSaveTransactionDirectory(
+               "0100ABCD12345678", unknownLayout).empty());
+    mappingError.clear();
+    const auto unknownMapper = beiklive::romx::makeThreeDsSaveOutputMapper(
+        "0100ABCD12345678", unknownLayout, &mappingError);
+    assert(!unknownMapper("save.sav", 0U, 1U));
+    assert(mappingError.find("unknown 3DS SAVE layout") != std::string::npos);
 
     // The public helper is intentionally relative to the native SD root; the
     // adapter must compose it before performing absolute containment checks.

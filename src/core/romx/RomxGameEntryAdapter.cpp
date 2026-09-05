@@ -866,43 +866,50 @@ std::string namespaceDirectory(const GameEntry& entry, romx_mutable_namespace_t 
         : entry.savePath;
 }
 
-bool safeRelativePath(const char* input, fs::path& result)
+bool safeRelativePath(const char* input, fs::path& result, std::string* error)
 {
-    if (!input || !*input)
-        return false;
-    const std::string raw(input);
-    // Backslashes are not valid ROMX bundle separators.  More importantly,
-    // reject dot components before lexical normalization so a traversal such
-    // as "a/../b" cannot be normalized into an apparently safe path.
-    if (raw.find('\\') != std::string::npos || raw.find('\0') != std::string::npos)
-        return false;
-    const fs::path rawPath(raw);
-    for (const auto& component : rawPath)
-        if (component == ".." || component == ".")
-            return false;
-    fs::path candidate = rawPath.lexically_normal();
-    if (candidate.empty() || candidate.is_absolute())
-        return false;
-    result = candidate;
-    return true;
+    return normalizeSafeMutableRelativePath(
+        input == nullptr ? fs::path{} : fs::path(input), result, error);
 }
 
-bool isWithinDirectory(const fs::path& directory, const fs::path& candidate)
+std::string pathForDiagnostic(const fs::path& path)
 {
-    std::error_code ec;
-    const fs::path canonicalDirectory = fs::weakly_canonical(directory, ec);
-    if (ec)
-        return false;
-    const fs::path canonicalCandidate = fs::weakly_canonical(candidate, ec);
-    if (ec)
-        return false;
-    const fs::path relative = canonicalCandidate.lexically_relative(canonicalDirectory);
-    if (relative.empty() || relative.is_absolute())
-        return false;
-    for (const auto& component : relative)
-        if (component == "..")
+    return path.empty() ? "<empty>" : path.string();
+}
+
+std::string restorePathDiagnostic(const fs::path& root,
+                                  const fs::path& bundlePath,
+                                  const fs::path& mappedPath,
+                                  const fs::path& transactionPath,
+                                  const std::string& details)
+{
+    return "ROMX restore rejected\nroot=" + pathForDiagnostic(root) +
+        "\nbundle_path=" + pathForDiagnostic(bundlePath) +
+        "\nmapped_path=" + pathForDiagnostic(mappedPath) +
+        "\ntransaction_path=" + pathForDiagnostic(transactionPath) +
+        "\n" + details;
+}
+
+bool relativePathInside(const fs::path& rootRelative,
+                        const fs::path& candidateRelative,
+                        fs::path& childRelative)
+{
+    auto rootComponent = rootRelative.begin();
+    auto candidateComponent = candidateRelative.begin();
+    for (; rootComponent != rootRelative.end(); ++rootComponent,
+           ++candidateComponent)
+    {
+        if (candidateComponent == candidateRelative.end() ||
+            *rootComponent != *candidateComponent)
             return false;
-    return true;
+    }
+    if (candidateComponent == candidateRelative.end())
+        return false;
+
+    childRelative.clear();
+    for (; candidateComponent != candidateRelative.end(); ++candidateComponent)
+        childRelative /= *candidateComponent;
+    return !childRelative.empty();
 }
 
 // std::filesystem::copy_file(..., overwrite_existing) is not implemented
@@ -965,14 +972,11 @@ std::string pspTemporarySuffix();
 
 BundleOutputMapper threeDsSaveOutputMapper(
     const GameEntry& entry,
-    const romx_mutable_save_layout_info_t* saveLayout = nullptr)
+    const romx_mutable_save_layout_info_t& saveLayout,
+    std::string* mappingError)
 {
     const std::string titleId = GameEntryAdapter::resolveThreeDsTitleId(entry);
-    romx_mutable_save_layout_info_t layout =
-        ROMX_MUTABLE_SAVE_LAYOUT_INFO_INIT;
-    if (saveLayout != nullptr)
-        layout = *saveLayout;
-    return makeThreeDsSaveOutputMapper(titleId, layout);
+    return makeThreeDsSaveOutputMapper(titleId, saveLayout, mappingError);
 }
 
 SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t ns,
@@ -982,7 +986,8 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
                          const std::function<bool(const fs::path&)>& validator = {},
                          const BundleOutputMapper& outputMapper = {},
                          const std::string* requestedSaveSlot = nullptr,
-                         const fs::path* transactionDirectory = nullptr)
+                         const fs::path* transactionRelativeDirectory = nullptr,
+                         std::string* mapperError = nullptr)
 {
     romx_error_t err{};
     romx_mutable_bundle_t* bundle = nullptr;
@@ -1066,20 +1071,27 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
     }
     DirectoryRestoreTransaction restoreTransaction;
     bool hasRestoreTransaction = false;
+    fs::path transactionRelative;
+    fs::path transactionDirectory;
     auto abortRestore = [&]() {
         if (hasRestoreTransaction)
             abortDirectoryRestore(restoreTransaction);
     };
-    if (transactionDirectory != nullptr)
+    if (transactionRelativeDirectory != nullptr)
     {
-        if (!isWithinDirectory(destination, *transactionDirectory))
+        std::string pathError;
+        if (!resolveSafeMutablePath(destination, *transactionRelativeDirectory,
+                                    transactionDirectory, &pathError))
         {
             romx_mutable_bundle_close(bundle);
-            assignError(error, "ROMX restore directory escapes the native SD root");
+            assignError(error, restorePathDiagnostic(
+                destination, {}, {}, destination / *transactionRelativeDirectory,
+                pathError));
             return SyncResult::Failed;
         }
+        transactionRelative = transactionRelativeDirectory->lexically_normal();
         const DirectoryRestoreResult prepared = prepareDirectoryRestore(
-            *transactionDirectory, overwrite, pspTemporarySuffix(),
+            transactionDirectory, overwrite, pspTemporarySuffix(),
             restoreTransaction, error);
         if (prepared != DirectoryRestoreResult::Ready)
         {
@@ -1113,12 +1125,16 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
                                          entryResult));
             return SyncResult::Failed;
         }
+        const fs::path bundlePath(info.path);
         fs::path relative;
-        if (!safeRelativePath(info.path, relative))
+        std::string pathError;
+        if (!safeRelativePath(info.path, relative, &pathError))
         {
             abortRestore();
             romx_mutable_bundle_close(bundle);
-            assignError(error, "ROMX mutable bundle contains an unsafe path");
+            assignError(error, restorePathDiagnostic(
+                destination, bundlePath,
+                {}, transactionDirectory, pathError));
             return SyncResult::Failed;
         }
         if (validator && !validator(relative))
@@ -1132,50 +1148,48 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
         {
             const std::optional<fs::path> mapped =
                 outputMapper(relative, index, count);
+            if (mapperError != nullptr && !mapperError->empty())
+            {
+                abortRestore();
+                romx_mutable_bundle_close(bundle);
+                assignError(error, restorePathDiagnostic(
+                    destination, bundlePath,
+                    mapped ? *mapped : fs::path{}, transactionDirectory,
+                    *mapperError));
+                return SyncResult::Failed;
+            }
             if (!mapped)
                 continue;
             outputRelative = *mapped;
         }
-        const fs::path output = destination / outputRelative;
-        if (!isWithinDirectory(destination, output))
+        fs::path output;
+        if (!resolveSafeMutablePath(destination, outputRelative, output, &pathError))
         {
             abortRestore();
             romx_mutable_bundle_close(bundle);
-            assignError(error, "ROMX mutable destination escapes the local directory");
+            assignError(error, restorePathDiagnostic(
+                destination, bundlePath, outputRelative, transactionDirectory,
+                pathError));
             return SyncResult::Failed;
         }
-        fs::path transactionRelative = outputRelative;
+        fs::path entryTransactionRelative = outputRelative;
         if (hasRestoreTransaction)
         {
-            if (!isWithinDirectory(restoreTransaction.finalDirectory, output))
+            if (!relativePathInside(transactionRelative, outputRelative,
+                                    entryTransactionRelative))
             {
                 abortRestore();
                 romx_mutable_bundle_close(bundle);
-                assignError(error, "ROMX mutable destination escapes the restore directory");
+                assignError(error, restorePathDiagnostic(
+                    destination, bundlePath, outputRelative, transactionDirectory,
+                    "reason=output path is outside the restore transaction\n"
+                    "filesystem_code=0\nfilesystem_message=none"));
                 return SyncResult::Failed;
-            }
-            transactionRelative = output.lexically_relative(
-                restoreTransaction.finalDirectory);
-            if (transactionRelative.empty() || transactionRelative.is_absolute())
-            {
-                abortRestore();
-                romx_mutable_bundle_close(bundle);
-                assignError(error, "ROMX mutable restore path is invalid");
-                return SyncResult::Failed;
-            }
-            for (const auto& component : transactionRelative)
-            {
-                if (component == ".." || component == ".")
-                {
-                    abortRestore();
-                    romx_mutable_bundle_close(bundle);
-                    assignError(error, "ROMX mutable restore path is unsafe");
-                    return SyncResult::Failed;
-                }
             }
         }
         // Automatic import is first-use only; explicit ROMX management passes
         // overwrite=true after the user confirms the destructive operation.
+        ec.clear();
         if (!overwrite && (fs::exists(output, ec) || ec))
         {
             abortRestore();
@@ -1183,7 +1197,7 @@ SyncResult extractBundle(const romx_reader_t* reader, romx_mutable_namespace_t n
             return SyncResult::Skipped;
         }
         pending.push_back({bundleIndex, info.data_size,
-                           std::move(transactionRelative),
+                           std::move(entryTransactionRelative),
                            std::move(outputRelative)});
     }
 
@@ -1377,13 +1391,25 @@ SyncResult extractPspSaveBundle(const romx_reader_t* reader,
         return result == SyncResult::Success ? SyncResult::Skipped : result;
     }
 
-    const fs::path stagedDirectory = staging / targetDirectory;
-    const fs::path finalDirectory = root / targetDirectory;
-    if (!fs::is_directory(stagedDirectory, ec) || ec ||
-        !isWithinDirectory(root, finalDirectory))
+    fs::path stagedDirectory;
+    fs::path finalDirectory;
+    std::string pathError;
+    if (!resolveSafeMutablePath(staging, targetDirectory, stagedDirectory,
+                                &pathError) ||
+        !resolveSafeMutablePath(root, targetDirectory, finalDirectory,
+                                &pathError))
     {
         fs::remove_all(staging, ec);
-        assignError(error, "PSP ROMX savedata directory is invalid");
+        assignError(error, restorePathDiagnostic(
+            root, {}, targetDirectory, {}, pathError));
+        return SyncResult::Failed;
+    }
+    ec.clear();
+    if (!fs::is_directory(stagedDirectory, ec) || ec)
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, "PSP ROMX savedata directory is invalid" +
+                            (ec ? ": " + ec.message() : std::string()));
         return SyncResult::Failed;
     }
 
@@ -1611,20 +1637,29 @@ SyncResult importBundleNamespace(GameEntry& entry,
                 romx_mutable_bundle_close(layoutBundle);
             }
         }
+        if (threeDsSave && !hasSaveLayout)
+        {
+            romx_reader_close(reader);
+            assignError(error, "cannot determine 3DS ROMX SAVE layout");
+            return SyncResult::Failed;
+        }
+        const fs::path transactionRelativeDirectory = threeDsSave
+            ? threeDsSaveTransactionDirectory(
+                GameEntryAdapter::resolveThreeDsTitleId(entry), saveLayout)
+            : fs::path{};
+        if (threeDsSave && transactionRelativeDirectory.empty())
+        {
+            romx_reader_close(reader);
+            assignError(error, "cannot determine 3DS ROMX SAVE layout");
+            return SyncResult::Failed;
+        }
+        std::string mappingError;
         const BundleOutputMapper outputMapper =
             threeDsSave
-                ? threeDsSaveOutputMapper(entry,
-                    hasSaveLayout ? &saveLayout : nullptr)
+                ? threeDsSaveOutputMapper(entry, saveLayout, &mappingError)
                 : objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE
                     ? batterySaveOutputMapper(entry)
                     : BundleOutputMapper{};
-        // The path mapper and transaction helper return paths relative to the
-        // native SD root.  Compose the absolute transaction target here so
-        // extractBundle's containment check compares paths in one namespace.
-        const fs::path transactionDirectory = threeDsSave
-            ? root / threeDsSaveTransactionDirectory(
-                GameEntryAdapter::resolveThreeDsTitleId(entry), saveLayout)
-            : fs::path{};
         if (isPsp(entry) && objectNamespace == ROMX_MUTABLE_NAMESPACE_SAVE)
         {
             result = extractPspSaveBundle(reader, entry, objectKey.c_str(),
@@ -1638,8 +1673,9 @@ SyncResult importBundleNamespace(GameEntry& entry,
                                    overwrite, &bundleError, &restoredPaths,
                                    validator, outputMapper,
                                    hasBundleSelector ? &requestedSlot : nullptr,
-                                   transactionDirectory.empty()
-                                       ? nullptr : &transactionDirectory);
+                                   transactionRelativeDirectory.empty()
+                                       ? nullptr : &transactionRelativeDirectory,
+                                   threeDsSave ? &mappingError : nullptr);
         }
         if (result == SyncResult::Success)
         {
@@ -2025,7 +2061,16 @@ SyncResult mergeSaveBundleSlot(const GameEntry& entry,
             break;
         }
     }
-    const fs::path stagedReplacement = staging / fs::path(replacement);
+    fs::path stagedReplacement;
+    std::string pathError;
+    if (!resolveSafeMutablePath(staging, fs::path(replacement), stagedReplacement,
+                                &pathError))
+    {
+        fs::remove_all(staging, ec);
+        assignError(error, restorePathDiagnostic(
+            staging, fs::path(replacement), fs::path(replacement), {}, pathError));
+        return SyncResult::Failed;
+    }
     fs::create_directories(stagedReplacement.parent_path(), ec);
     if (ec || !fs::copy_file(source, stagedReplacement,
                              fs::copy_options::overwrite_existing, ec) || ec)
@@ -2109,11 +2154,14 @@ SyncResult mergePspSaveBundle(const GameEntry& entry,
         return extracted;
     }
 
-    const fs::path selectedPath = staging / selectedDirectory;
-    if (!isWithinDirectory(staging, selectedPath))
+    fs::path selectedPath;
+    std::string pathError;
+    if (!resolveSafeMutablePath(staging, selectedDirectory, selectedPath,
+                                &pathError))
     {
         fs::remove_all(staging, ec);
-        assignError(error, "PSP ROMX slot directory escapes staging root");
+        assignError(error, restorePathDiagnostic(
+            staging, selectedDirectory, selectedDirectory, {}, pathError));
         return SyncResult::Failed;
     }
     const std::optional<fs::path> selectedSfo = findPspSfoPath(selectedPath);
