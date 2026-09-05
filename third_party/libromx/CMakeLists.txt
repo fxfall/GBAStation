@@ -69,6 +69,7 @@ endif()
 
 if(MSVC)
     target_compile_options(romx PRIVATE /W4)
+    target_compile_definitions(romx PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_options(romx PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 endif()
