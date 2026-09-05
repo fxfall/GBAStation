@@ -25,6 +25,11 @@
 #define BUNDLE_HEADER_SIZE UINT64_C(64)
 #define BUNDLE_ENTRY_SIZE UINT64_C(64)
 
+static int allocation_size_overflows(size_t count, size_t element_size)
+{
+    return element_size != 0U && count > SIZE_MAX / element_size;
+}
+
 #if defined(_WIN32)
 static wchar_t *path_to_wide(const char *path)
 {
@@ -582,7 +587,7 @@ static romx_result_t append_save_slot_entry(romx_mutable_bundle_t *bundle,
             (slot->entry_capacity > bundle->entry_count / 2U
                 ? bundle->entry_count : slot->entry_capacity * 2U);
         uint32_t *indices;
-        if ((uintmax_t)capacity > (uintmax_t)(SIZE_MAX / sizeof(*indices)))
+        if (allocation_size_overflows((size_t)capacity, sizeof(*indices)))
             return romx_error_set(error, ROMX_E_RANGE, 0,
                 ROMX_OFFSET_UNKNOWN, "SAVE slot index size overflows");
         indices = (uint32_t *)realloc(slot->entry_indices,

@@ -161,7 +161,8 @@ static romx_result_t disk_read(void *user, uint64_t offset, void *buffer,
             romx_posix_io_count(size - *bytes_read), (off_t)(offset + *bytes_read));
         if (count < 0) { if (errno == EINTR) continue; return romx_error_set(error,
             ROMX_E_IO, errno, offset + *bytes_read, "mutable read failed"); }
-        if (count == 0) break; *bytes_read += (uint64_t)count;
+        if (count == 0) break;
+        *bytes_read += (uint64_t)count;
     }
 #endif
     return ROMX_OK;
@@ -201,7 +202,8 @@ static romx_result_t disk_write(mutable_disk_t *disk, uint64_t offset,
             romx_posix_io_count(size - written), (off_t)(offset + written));
         if (count < 0) { if (errno == EINTR) continue; return romx_error_set(error,
             ROMX_E_WRITE, errno, offset + written, "mutable write failed"); }
-        if (count == 0) return ROMX_E_WRITE; written += (uint64_t)count;
+        if (count == 0) return ROMX_E_WRITE;
+        written += (uint64_t)count;
     }
 #endif
     return ROMX_OK;
@@ -474,7 +476,8 @@ romx_result_t romx_mutable_write_path(const char *romx_path,
     if (source.file == NULL || fseeko(source.file, 0, SEEK_END) != 0 ||
         (end = ftello(source.file)) < 0 || fseeko(source.file, 0, SEEK_SET) != 0) {
 #endif
-        if (source.file != NULL) fclose(source.file); return ROMX_E_IO;
+        if (source.file != NULL) fclose(source.file);
+        return ROMX_E_IO;
     }
     source.size = (uint64_t)end;
     io.user_data = &source; io.get_size = source_get_size; io.read_at = source_read;

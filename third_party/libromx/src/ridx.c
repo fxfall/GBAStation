@@ -8,6 +8,12 @@ typedef struct romx_range {
     uint64_t end;
 } romx_range_t;
 
+static int ridx_allocation_size_overflows(uint32_t count,
+    size_t element_size)
+{
+    return element_size != 0U && (size_t)count > SIZE_MAX / element_size;
+}
+
 static int range_compare(const void *left, const void *right)
 {
     const romx_range_t *a = (const romx_range_t *)left;
@@ -85,7 +91,7 @@ romx_result_t romx_parse_ridx(romx_reader_t *reader, romx_error_t *error)
     }
     index_size = ROMX_RIDX_HEADER_SIZE + (uint64_t)entry_count * ROMX_RIDX_ENTRY_SIZE;
     if (index_size > (uint64_t)SIZE_MAX ||
-        (uint64_t)entry_count > (uint64_t)SIZE_MAX / sizeof(*reader->entries)) {
+        ridx_allocation_size_overflows(entry_count, sizeof(*reader->entries))) {
         return romx_error_set(error, ROMX_E_OUT_OF_MEMORY, 0,
             reader->info.payload.size, "RIDX is too large for this process");
     }
