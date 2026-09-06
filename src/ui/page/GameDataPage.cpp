@@ -1024,7 +1024,13 @@ namespace beiklive
             const std::string titleId = _threeDsTitleId();
             const bool currentIsRomx =
                 beiklive::romx::isRomxPath(m_entry.path);
-            fs::path source = _batterySaveDir();
+            // A 3DS Title Save and ExtData are sibling trees below the native
+            // SD root.  ROMX export must scan that root so ExtData is not
+            // mistaken for an absent save; destructive operations continue
+            // to use _batterySaveDir() and therefore remain Title-only.
+            fs::path source = currentIsRomx
+                ? fs::path(beiklive::romx::GameEntryAdapter::nativeSaveRoot(m_entry))
+                : fs::path(_batterySaveDir());
             std::string scanError;
             auto candidates =
                 beiklive::romx::GameEntryAdapter::listLocalSaveCandidates(
@@ -1053,6 +1059,25 @@ namespace beiklive
                 brls::Application::notify(L("未找到3DS游戏存档"));
                 return;
             }
+            // `source` may be the whole native SD root so ExtData can be
+            // discovered.  Keep archive export scoped to one game save (or
+            // one unambiguous ExtData candidate) instead of packaging every
+            // sibling title and ExtData below that root.
+            fs::path archiveSource;
+            if (!currentIsRomx) {
+                archiveSource = source;
+            } else {
+                const fs::path titleSource = _batterySaveDir();
+                std::string titleScanError;
+                const auto titleCandidates =
+                    beiklive::romx::GameEntryAdapter::listLocalSaveCandidates(
+                        m_entry, titleSource.string(), &titleScanError);
+                if (!titleCandidates.empty())
+                    archiveSource = titleSource;
+                else if (candidates.size() == 1U &&
+                         !candidates.front().sourcePath.empty())
+                    archiveSource = candidates.front().sourcePath;
+            }
             auto* dialog = new brls::Dialog(L("选择3DS存档操作"));
             dialog->addButton(L("取消"), []() {});
             const auto alive = m_alive;
@@ -1062,22 +1087,24 @@ namespace beiklive
                         _writeThreeDsSavesToRomx(source.string());
                 });
             }
-            dialog->addButton(L("导出压缩包"), [source, titleId]() {
-                if (titleId.empty()) {
-                    brls::Application::notify(L("缺少3DS Title ID，无法导出压缩包"));
-                    return;
-                }
-                const fs::path target = fs::path(beiklive::three_ds::exportDirectory()) /
-                    (titleId + "_" + timestampForFile() + ".zip");
-                std::string error;
-                if (!createDirectoryArchive(source, target, &error)) {
-                    brls::Logger::warning("导出3DS存档失败: {} -> {}, error={}",
-                        source.string(), target.string(), error);
-                    brls::Application::notify(L("导出失败：") + error);
-                    return;
-                }
-                brls::Application::notify(L("已导出到 GBAStation/export/3DS"));
-            });
+            if (!archiveSource.empty()) {
+                dialog->addButton(L("导出压缩包"), [archiveSource, titleId]() {
+                    if (titleId.empty()) {
+                        brls::Application::notify(L("缺少3DS Title ID，无法导出压缩包"));
+                        return;
+                    }
+                    const fs::path target = fs::path(beiklive::three_ds::exportDirectory()) /
+                        (titleId + "_" + timestampForFile() + ".zip");
+                    std::string error;
+                    if (!createDirectoryArchive(archiveSource, target, &error)) {
+                        brls::Logger::warning("导出3DS存档失败: {} -> {}, error={}",
+                            archiveSource.string(), target.string(), error);
+                        brls::Application::notify(L("导出失败：") + error);
+                        return;
+                    }
+                    brls::Application::notify(L("已导出到 GBAStation/export/3DS"));
+                });
+            }
             dialog->open();
             return;
         }

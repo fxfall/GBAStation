@@ -859,8 +859,8 @@ std::string namespaceDirectory(const GameEntry& entry, romx_mutable_namespace_t 
 
     if (isPsp(entry))
         return pspSaveRoot().string();
-    if (isThreeDs(entry))
-        return threeDsNativeSaveDirectory(entry).string();
+    if (isThreeDs(entry) && ns == ROMX_MUTABLE_NAMESPACE_SAVE)
+        return threeDsNativeSdRoot(entry).string();
     return entry.savePath.empty()
         ? beiklive::tools::defaultGameSavePath(entry.platform, entry.path)
         : entry.savePath;
@@ -2389,6 +2389,13 @@ std::string GameEntryAdapter::nativeSaveDirectory(const GameEntry& entry)
     if (!isThreeDs(entry))
         return {};
     return threeDsNativeSaveDirectory(entry).string();
+}
+
+std::string GameEntryAdapter::nativeSaveRoot(const GameEntry& entry)
+{
+    if (!isThreeDs(entry))
+        return {};
+    return threeDsNativeSdRoot(entry).string();
 }
 
 std::string GameEntryAdapter::resolveThreeDsTitleId(const GameEntry& entry)

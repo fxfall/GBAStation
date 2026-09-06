@@ -409,9 +409,22 @@ SavePathMapper makeThreeDsSaveOutputMapper(
                 return std::nullopt;
             }
             ++component;
-            if (component == normalizedRelative.end() ||
-                !componentEquals(*component, "user"))
+            if (component == normalizedRelative.end())
             {
+                setMappingError(mappingError,
+                                "canonical ExtData path does not name a file");
+                return std::nullopt;
+            }
+            // Citra/Azahar keeps ExtData metadata such as `icon` and
+            // `metadata` beside `user`.  They are not core save files and
+            // must not escape the user-only restore transaction.  Ignore
+            // those auxiliary entries after validating the exact ExtData
+            // identity; malformed paths outside that identity still fail.
+            if (!componentEquals(*component, "user"))
+            {
+                if (componentEquals(*component, "icon") ||
+                    componentEquals(*component, "metadata"))
+                    return std::nullopt;
                 setMappingError(mappingError,
                                 "canonical ExtData path is missing the user directory");
                 return std::nullopt;

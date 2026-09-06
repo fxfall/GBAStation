@@ -101,11 +101,18 @@ public:
         std::string* outputPath = nullptr, uint32_t* writtenCount = nullptr,
         std::string* error = nullptr);
 
-    /// Returns the native 3DS save directory used by the macOS Azahar
-    /// libretro core (or the canonical SDMC directory on Switch).  The GUI
-    /// and ROMX adapter share this mapping so a restored SAVE object is
-    /// visible to the core without modifying it.
+    /// Returns the native 3DS Title Save directory used by the macOS Azahar
+    /// libretro core (or the canonical SDMC directory on Switch).  ExtData is
+    /// a sibling below nativeSaveRoot(); keep this helper for operations that
+    /// intentionally target only the active Title Save.
     static std::string nativeSaveDirectory(const GameEntry& entry);
+
+    /// Returns the native 3DS SD root used when discovering ROMX SAVE input.
+    /// This is intentionally broader than nativeSaveDirectory(): 3DS Title
+    /// Save and ExtData live in sibling trees below the same SD root.  Callers
+    /// must use nativeSaveDirectory() for operations that replace or delete
+    /// the active Title Save directory.
+    static std::string nativeSaveRoot(const GameEntry& entry);
 
     /// Resolves the real 16-digit 3DS Title ID.  For ROMX containers this
     /// reads the NCSD header from the embedded entrypoint payload when the

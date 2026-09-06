@@ -93,8 +93,9 @@ int main()
     assert(!strictMapper("000016e1_.dat", 2U, 4U).has_value());
     assert(!strictMapper("export.log", 2U, 4U).has_value());
 
+    std::string mappingError;
     const auto canonicalMapper = beiklive::romx::makeThreeDsSaveOutputMapper(
-        {}, canonicalExtdataLayout());
+        {}, canonicalExtdataLayout(), &mappingError);
     assert(beiklive::romx::threeDsSaveTransactionDirectory(
                {}, canonicalExtdataLayout()) ==
            fs::path("extdata/12345678/000016e1/user"));
@@ -104,8 +105,16 @@ int main()
     assert(canonicalMapper(
                fs::path("EXTDATA/12345678/000016E1/USER/save.sav"), 0U, 1U) ==
            canonical);
+    // Citra/Azahar also stores ExtData metadata beside `user`.  Those files
+    // are intentionally excluded from the user-only restore transaction.
+    mappingError.clear();
+    assert(!canonicalMapper(
+               fs::path("extdata/12345678/000016e1/icon"), 0U, 1U));
+    assert(mappingError.empty());
+    assert(!canonicalMapper(
+               fs::path("extdata/12345678/000016e1/metadata"), 0U, 1U));
+    assert(mappingError.empty());
 
-    std::string mappingError;
     const auto mismatchMapper = beiklive::romx::makeThreeDsSaveOutputMapper(
         {}, canonicalExtdataLayout(), &mappingError);
     assert(!mismatchMapper(
