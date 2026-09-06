@@ -1043,6 +1043,39 @@ namespace beiklive
                 beiklive::enums::EmuPlatform::EmuDolphin);
         }
 
+        std::optional<beiklive::GameEntry> findGameDbEntryIgnoringExtension(
+            const std::string& path, int platform = -1)
+        {
+            if (!beiklive::GameDB)
+                return std::nullopt;
+
+            if (auto exact = beiklive::GameDB->findByPath(path))
+                return exact;
+
+            std::string stem = beiklive::tools::getFileNameWithoutExtension(
+                std::filesystem::path(path).filename().string());
+            std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            if (stem.empty())
+                return std::nullopt;
+
+            for (const auto& entry : beiklive::GameDB->getAll())
+            {
+                if (platform >= 0 && entry.platform != platform)
+                    continue;
+                std::string entryStem = beiklive::tools::getFileNameWithoutExtension(
+                    std::filesystem::path(entry.path).filename().string());
+                std::transform(entryStem.begin(), entryStem.end(), entryStem.begin(),
+                               [](unsigned char c) {
+                                   return static_cast<char>(std::tolower(c));
+                               });
+                if (entryStem == stem)
+                    return entry;
+            }
+            return std::nullopt;
+        }
+
         [[maybe_unused]] bool exportThreeDsCoreConfig()
         {
             if (!beiklive::SettingManager)
@@ -1130,14 +1163,14 @@ namespace beiklive
             if (!beiklive::GameDB || dirItem.fullPath.empty())
                 return;
 
-            auto entryOpt = beiklive::GameDB->findByPath(dirItem.fullPath);
-            beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
-            bool changed = !entryOpt.has_value();
-
             const bool isRomx = dirItem.itemType == beiklive::enums::FileType::ROMX_FILE;
             const int platform = isRomx
                 ? beiklive::tools::detectGamePlatform(dirItem.fullPath)
                 : static_cast<int>(dirItem.itemType);
+            auto entryOpt = findGameDbEntryIgnoringExtension(dirItem.fullPath, platform);
+            beiklive::GameEntry entry = entryOpt.value_or(beiklive::GameEntry{});
+            bool changed = !entryOpt.has_value();
+
             const std::string stem = beiklive::tools::getFileNameWithoutExtension(dirItem.fileName);
 
             if (entry.path.empty()) {
@@ -1262,6 +1295,7 @@ namespace beiklive
             }
 
             brls::Logger::info("NDS external NRO configured for {}: {}", title, result.message);
+            VideoBackgroundView::setSharedAudioSuspended(true);
             brls::Application::notify(L("正在启动NDS独立NRO..."));
             brls::sync([]() { brls::Application::quit(); });
             return true;
@@ -1285,6 +1319,7 @@ namespace beiklive
             }
 
             brls::Logger::info("3DS external NRO configured for {}: {}", title, result.message);
+            VideoBackgroundView::setSharedAudioSuspended(true);
             brls::Application::notify(L("正在启动3DS独立NRO..."));
             brls::sync([]() { brls::Application::quit(); });
             return true;
@@ -1338,6 +1373,7 @@ namespace beiklive
 				brls::Logger::error("{} external session tracking could not start for {}", label, romPath);
 
             brls::Logger::info("{} external NRO configured for {}: {}", label, title, result.message);
+            VideoBackgroundView::setSharedAudioSuspended(true);
             brls::Application::notify(L("正在启动") + label + L("独立NRO..."));
             brls::sync([]() { brls::Application::quit(); });
             return true;
@@ -1560,8 +1596,8 @@ namespace beiklive
 #ifdef __SWITCH__
             return launchExternalCoreNro(entry.path, entry.title, "PS1",
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
-                "ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
-                "ps1.externalNro.returnPath");
+                "core.ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
+                "core.ps1.externalNro.returnPath");
 #else
             brls::Application::notify(L("PS1 独立运行时仅支持 Switch"));
             return false;
@@ -1683,8 +1719,8 @@ void StartPage::_launchDirItem(const beiklive::DirListData& dirItem, beiklive::B
 #ifdef __SWITCH__
             launchExternalCoreNro(dirItem.fullPath, dirItem.fileName, "PS1",
                 static_cast<int>(beiklive::enums::EmuPlatform::EmuPS1),
-                "ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
-                "ps1.externalNro.returnPath");
+                "core.ps1.externalNro.path", "/GBAStation/core/GBAStationDuckStationStub.nro",
+                "core.ps1.externalNro.returnPath");
             return;
 #else
             brls::Application::notify(L("PS1 独立运行时仅支持 Switch"));
@@ -1853,9 +1889,11 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
             brls::Logger::info("Exit requested");
             if (switchLayout) {
                 switchLayout->playExitAnimation([]() {
+                    VideoBackgroundView::setSharedAudioSuspended(true);
                     brls::Application::quit();
                 });
             } else {
+                VideoBackgroundView::setSharedAudioSuspended(true);
                 brls::Application::quit();
             }
         };
@@ -1955,9 +1993,11 @@ void StartPage::_showPlatformPicker(const beiklive::DirListData& dirItem,
             brls::Logger::info("Exit requested");
             if (iisuLayout) {
                 iisuLayout->playExitAnimation([]() {
+                    VideoBackgroundView::setSharedAudioSuspended(true);
                     brls::Application::quit();
                 });
             } else {
+                VideoBackgroundView::setSharedAudioSuspended(true);
                 brls::Application::quit();
             }
         };

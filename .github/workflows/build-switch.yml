@@ -3,6 +3,8 @@ name: Build GBAStation releases
 on:
   workflow_dispatch:
   push:
+    branches:
+      - 'romx-0.2.0'
     tags:
       - 'v*'
 

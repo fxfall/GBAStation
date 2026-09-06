@@ -791,7 +791,10 @@ namespace beiklive
             if (index < 0 || index >= static_cast<int>(candidates.size())) {
                 // 取消压缩包选择时，走项目统一的页面返回链路，恢复
                 // 启动前页面及其焦点状态，而不是直接弹出 Borealis Activity。
-                brls::delay(0, [this]() { beiklive::popActivity(this, false); });
+                brls::delay(0, [this]() {
+                    suspendBackgroundPlayback(false);
+                    beiklive::popActivity(this, false);
+                });
                 return;
             }
             brls::delay(60, [this, candidates, index, picker]() {
@@ -849,9 +852,16 @@ namespace beiklive
             dialog->close([this]() {
                 if (m_exitToApplication)
                 {
+                    // Direct launches terminate the host application instead
+                    // of returning to the previous page.
+                    VideoBackgroundView::setSharedAudioSuspended(true);
                     brls::Application::quit();
                     return;
                 }
+                // Restore the shared background worker before returning to
+                // the underlying page. GamePage suspends both video and its
+                // independent audio stream during emulation.
+                suspendBackgroundPlayback(false);
                 beiklive::popActivity(this);
             });
         });
